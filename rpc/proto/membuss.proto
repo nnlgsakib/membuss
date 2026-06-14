@@ -1,5 +1,5 @@
-﻿// Phase 1+ wire schema for the CLI <-> daemon gRPC service and the
-// core content-addressed primitives.
+﻿// Phase 4 wire schema for the libp2p-based PEX gossip protocol
+// and the CLI <-> daemon gRPC service.
 syntax = "proto3";
 
 package membuss.v1;
@@ -29,55 +29,49 @@ message PingResponse {
 
 // Block is a single chunk of content, addressed by its MID.
 message Block {
-  // Raw bytes of the chunk.
   bytes data = 1;
-  // MID of this block (mem-prefixed multibase multihash string).
   string mid = 2;
-  // Size in bytes of the data payload.
   uint64 size = 3;
 }
 
 // DAGNode is one node in a Merkle DAG.
-//
-// Leaf nodes carry inline `data` and have empty `links`. Internal
-// nodes carry only `links` to their child MIDs. The `mid` field is
-// the MID of this node (derived from `links` and `data`).
 message DAGNode {
-  // MIDs of the children of this node, in order.
   repeated string links = 1;
-  // Inline data for leaf nodes; empty for internal nodes.
   bytes data = 2;
-  // MID of this node (mem-prefixed multibase multihash string).
   string mid = 3;
 }
 
-// Shard is one erasure-coded shard of a block. The shard's
-// payload is the raw bytes produced by Reed-Solomon; the MID is
-// its content identifier (shard-MID).
+// Shard is one erasure-coded shard of a block.
 message Shard {
-  // Raw bytes of the shard payload.
   bytes data = 1;
-  // MID of this shard (mem-prefixed multibase multihash string).
   string mid = 2;
-  // Index of this shard in the original block's shard matrix
-  // (0..data_shards+parity_shards-1).
   uint32 index = 3;
-  // MID of the original block this shard was derived from.
   string original_mid = 4;
 }
 
-// ErasureManifest is stored under the original block's MID in
-// the Mem-Store. It tells the decoder how many data and parity
-// shards were produced and which shard MIDs hold them.
+// ErasureManifest is stored under the original block's MID.
 message ErasureManifest {
-  // MID of the original block (mem-prefixed string).
   string original_mid = 1;
-  // Number of data shards produced (k).
   uint32 data_shards = 2;
-  // Number of parity shards produced (m).
   uint32 parity_shards = 3;
-  // MID of every shard, in index order (0..k+m-1).
   repeated string shard_mids = 4;
-  // Size in bytes of the original block.
   uint64 original_size = 5;
+}
+
+// PeerInfo is one entry in a PEX gossip payload.
+message PeerInfo {
+  // The peer ID (string form).
+  string peer_id = 1;
+  // Multiaddrs the peer is reachable at.
+  repeated string addrs = 2;
+  // Wall-clock time the peer was last seen, in seconds since
+  // the Unix epoch. Receivers use this to age out stale entries.
+  int64 last_seen = 3;
+}
+
+// PEXMessage is the body of a /membuss/pex/1.0.0 gossip frame.
+// It carries a batch of PeerInfo entries.
+message PEXMessage {
+  // Sender's view of the network, up to 256 entries.
+  repeated PeerInfo peers = 1;
 }
