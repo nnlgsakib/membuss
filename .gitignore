@@ -1,0 +1,45 @@
+﻿# Go
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.cover
+*.prof
+*.pprof
+/vendor/
+
+# Go workspace
+go.work
+go.work.sum
+
+# Build/test caches
+/.cache/
+/tmp/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local env / secrets
+.env
+.env.local
+*.local.yaml
+secrets.yaml
+
+# Data dirs (daemon / node state)
+/data/
+/storage/
+/logs/
+*.log
+
+# Spec-kit generated / scratch
+/.specify/.scratch/
