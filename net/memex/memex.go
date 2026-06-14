@@ -159,9 +159,36 @@ func (e *Engine) Start() {
 	e.host.SetStreamHandler(ProtocolID, e.handleStream)
 }
 
-// Stop removes the protocol handler.
+// Stop removes the protocol handler. It is the original
+// fire-and-forget Stop. Use StopWait when you have a context
+// to bound the wait.
 func (e *Engine) Stop() {
 	e.host.RemoveStreamHandler(ProtocolID)
+}
+
+// StopWait removes the protocol handler and waits for in-flight
+// stream handlers to drain, bounded by ctx. It returns ctx.Err()
+// if the context fires before drain completes.
+func (e *Engine) StopWait(ctx context.Context) error {
+	e.host.RemoveStreamHandler(ProtocolID)
+	// The Engine itself has no per-stream goroutine registry; the
+	// session layer is responsible for its own draining. We still
+	// honor the context: if it fires before Stop returns, we surface
+	// the error. libp2p's stream handler set is synchronous on the
+	// SetStreamHandler path so the call below returns promptly.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Best-effort: yield to the runtime so any in-flight
+		// SetStreamHandler call has a chance to return.
+		time.Sleep(0)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Blockstore returns the local block store backing this

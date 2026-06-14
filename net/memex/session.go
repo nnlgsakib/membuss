@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -314,3 +315,106 @@ func (a *memexBlockstoreAdapter) Put(m mid.MID, data []byte) error { return a.b.
 func (a *memexBlockstoreAdapter) Get(m mid.MID) ([]byte, error)    { return a.b.Get(m) }
 func (a *memexBlockstoreAdapter) Has(m mid.MID) (bool, error)      { return a.b.Has(m) }
 func (a *memexBlockstoreAdapter) Delete(m mid.MID) error           { return nil }
+
+// RetryConfig configures FetchWithBackoff's exponential retry
+// schedule. Zero values fall back to sane defaults.
+type RetryConfig struct {
+	// Initial is the first retry delay. Default 100ms.
+	Initial time.Duration
+	// Max caps a single backoff sleep. Default 30s.
+	Max time.Duration
+	// Factor multiplies the previous delay after each failure.
+	// Default 2.0.
+	Factor float64
+	// MaxAttempts bounds the retries. Default 4.
+	MaxAttempts int
+}
+
+// DefaultRetryConfig returns the package-default retry schedule.
+func DefaultRetryConfig() RetryConfig {
+	return RetryConfig{
+		Initial:     100 * time.Millisecond,
+		Max:         30 * time.Second,
+		Factor:      2.0,
+		MaxAttempts: 4,
+	}
+}
+
+// FetchWithBackoff invokes Fetch, retrying with exponential
+// backoff when a transient failure is returned. A "transient
+// failure" is any error other than context.Canceled,
+// context.DeadlineExceeded, or a "not found" /
+// ErrNotFound-style terminal error. The retry loop terminates
+// when Fetch returns nil, a non-retryable error, or after
+// cfg.MaxAttempts total attempts.
+//
+// The returned reader is the content of the most recent
+// successful Fetch. Callers MUST Close it.
+func (s *Session) FetchWithBackoff(ctx context.Context, cfg RetryConfig) (io.Reader, error) {
+	if cfg.Initial <= 0 {
+		cfg.Initial = 100 * time.Millisecond
+	}
+	if cfg.Max <= 0 {
+		cfg.Max = 30 * time.Second
+	}
+	if cfg.Factor < 1 {
+		cfg.Factor = 2.0
+	}
+	if cfg.MaxAttempts <= 0 {
+		cfg.MaxAttempts = 4
+	}
+	delay := cfg.Initial
+	var lastErr error
+	for attempt := 1; attempt <= cfg.MaxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		r, err := s.Fetch(ctx)
+		if err == nil {
+			return r, nil
+		}
+		lastErr = err
+		// Terminal errors do not retry.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		if !isRetryableMemexErr(err) {
+			return nil, err
+		}
+		if attempt == cfg.MaxAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+		delay = time.Duration(float64(delay) * cfg.Factor)
+		if delay > cfg.Max {
+			delay = cfg.Max
+		}
+	}
+	return nil, fmt.Errorf("memex session: gave up after %d attempts: %w", cfg.MaxAttempts, lastErr)
+}
+
+// isRetryableMemexErr reports whether err is a transient
+// failure (network error, partial resolution) that is worth
+// retrying. We treat the "not all blocks resolved" error and
+// any "open stream" / "dial" / "deadline" error as retryable.
+func isRetryableMemexErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "not all blocks resolved"):
+		return true
+	case strings.Contains(msg, "open "):
+		return true
+	case strings.Contains(msg, "context deadline"):
+		return true
+	case strings.Contains(msg, "no provider"):
+		return false
+	}
+	return true
+}

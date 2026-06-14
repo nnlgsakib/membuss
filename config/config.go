@@ -50,6 +50,33 @@ type Config struct {
 	// ReprovideInterval controls how often Mem-Herald re-announces
 	// this node's provider records to the DHT.
 	ReprovideInterval time.Duration `yaml:"reprovide_interval"`
+
+	LogLevel string `yaml:"log_level"`
+	GatewayTLS TLSConfig `yaml:"gateway_tls"`
+	APITLS TLSConfig `yaml:"api_tls"`
+	APIKey string `yaml:"api_key"`
+	GatewayRateLimitPerMin int `yaml:"gateway_rate_limit_per_min"`
+	MemexRetryBackoff RetryBackoffConfig `yaml:"memex_retry_backoff"`
+	BootstrapBackoff RetryBackoffConfig `yaml:"bootstrap_backoff"`
+	MetricsEnabled bool `yaml:"metrics_enabled"`
+}
+
+// TLSConfig is a pair of PEM file paths enabling HTTPS on an HTTP
+// server. Both fields must be set (or both empty).
+type TLSConfig struct {
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+}
+
+// Enabled reports whether the TLS configuration is usable.
+func (t TLSConfig) Enabled() bool { return t.CertFile != "" && t.KeyFile != "" }
+
+// RetryBackoffConfig configures an exponential retry schedule.
+type RetryBackoffConfig struct {
+	Initial     time.Duration `yaml:"initial"`
+	Max         time.Duration `yaml:"max"`
+	Factor      float64       `yaml:"factor"`
+	MaxAttempts int           `yaml:"max_attempts"`
 }
 
 // Default returns a Config populated with safe, sensible defaults
@@ -67,6 +94,24 @@ func Default() *Config {
 		GRPCAddr:          "127.0.0.1:50051",
 		AnchorMode:        false,
 		ReprovideInterval: 12 * time.Hour,
+		LogLevel:               "info",
+		GatewayTLS:             TLSConfig{},
+		APITLS:                 TLSConfig{},
+		APIKey:                 "",
+		GatewayRateLimitPerMin: 100,
+		MemexRetryBackoff: RetryBackoffConfig{
+			Initial:     100 * time.Millisecond,
+			Max:         30 * time.Second,
+			Factor:      2.0,
+			MaxAttempts: 4,
+		},
+		BootstrapBackoff: RetryBackoffConfig{
+			Initial:     500 * time.Millisecond,
+			Max:         60 * time.Second,
+			Factor:      2.0,
+			MaxAttempts: 0,
+		},
+		MetricsEnabled: true,
 	}
 }
 
@@ -113,6 +158,27 @@ func (c *Config) Validate() error {
 	}
 	if c.ReprovideInterval <= 0 {
 		return errors.New("reprovide_interval must be positive")
+	}
+	if c.GatewayRateLimitPerMin < 0 {
+		return errors.New("gateway_rate_limit_per_min must be >= 0")
+	}
+	if (c.GatewayTLS.CertFile == "") != (c.GatewayTLS.KeyFile == "") {
+		return errors.New("gateway_tls: cert_file and key_file must both be set or both empty")
+	}
+	if (c.APITLS.CertFile == "") != (c.APITLS.KeyFile == "") {
+		return errors.New("api_tls: cert_file and key_file must both be set or both empty")
+	}
+	if c.MemexRetryBackoff.Initial < 0 || c.MemexRetryBackoff.Max < 0 {
+		return errors.New("memex_retry_backoff: durations must be >= 0")
+	}
+	if c.MemexRetryBackoff.Factor < 1 {
+		return errors.New("memex_retry_backoff: factor must be >= 1")
+	}
+	if c.BootstrapBackoff.Initial < 0 || c.BootstrapBackoff.Max < 0 {
+		return errors.New("bootstrap_backoff: durations must be >= 0")
+	}
+	if c.BootstrapBackoff.Factor < 1 {
+		return errors.New("bootstrap_backoff: factor must be >= 1")
 	}
 	return nil
 }

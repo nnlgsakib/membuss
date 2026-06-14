@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/ipfs/go-cid"
@@ -154,6 +155,98 @@ func (m *MemDHT) Bootstrap(ctx context.Context, peers []peer.AddrInfo) error {
 		_ = m.dht.Host().Connect(ctx, p)
 	}
 	return nil
+}
+
+// BootstrapConfig configures BootstrapWithBackoff. Zero values
+// fall back to sane defaults.
+type BootstrapConfig struct {
+	// Initial is the first retry delay. Default 500ms.
+	Initial time.Duration
+	// Max caps a single backoff sleep. Default 60s.
+	Max time.Duration
+	// Factor multiplies the previous delay after each failure.
+	// Default 2.0.
+	Factor float64
+	// MaxAttempts bounds the retries per peer. Zero = unlimited.
+	MaxAttempts int
+	// Logger, if non-nil, receives structured progress events.
+	Logger *slog.Logger
+}
+
+// BootstrapWithBackoff attempts to connect to each bootstrap peer
+// with an exponential backoff schedule. It is a best-effort loop:
+// the first successful connect per peer terminates its retry, and
+// the function returns the total number of successful connections
+// plus the combined error of the last failure (if any). It is safe
+// to call concurrently with Bootstrap.
+//
+// The loop is cancellable via ctx. On cancel it returns
+// ctx.Err() alongside the success count.
+func (m *MemDHT) BootstrapWithBackoff(ctx context.Context, peers []peer.AddrInfo, cfg BootstrapConfig) (int, error) {
+	if m == nil || m.dht == nil {
+		return 0, errors.New("dht: nil")
+	}
+	if cfg.Initial <= 0 {
+		cfg.Initial = 500 * time.Millisecond
+	}
+	if cfg.Max <= 0 {
+		cfg.Max = 60 * time.Second
+	}
+	if cfg.Factor < 1 {
+		cfg.Factor = 2.0
+	}
+	// Background the DHT's own bootstrap so our retry loop
+	// is the only thing the caller waits on.
+	bgCtx, bgCancel := context.WithCancel(ctx)
+	defer bgCancel()
+	_ = m.dht.Bootstrap(bgCtx)
+
+	h := m.dht.Host()
+	hostCtx := func() context.Context { return bgCtx }
+	var lastErr error
+	successes := 0
+	for _, p := range peers {
+		delay := cfg.Initial
+		for attempt := 1; ; attempt++ {
+			if ctx.Err() != nil {
+				return successes, ctx.Err()
+			}
+			connectCtx, cancel := context.WithTimeout(hostCtx(), 10*time.Second)
+			err := h.Connect(connectCtx, p)
+			cancel()
+			if err == nil {
+				successes++
+				if cfg.Logger != nil {
+					cfg.Logger.Info("dht bootstrap peer connected",
+						"peer", p.ID.String(),
+						"attempt", attempt,
+					)
+				}
+				break
+			}
+			lastErr = err
+			if cfg.Logger != nil {
+				cfg.Logger.Warn("dht bootstrap peer connect failed",
+					"peer", p.ID.String(),
+					"attempt", attempt,
+					"err", err.Error(),
+				)
+			}
+			if cfg.MaxAttempts > 0 && attempt >= cfg.MaxAttempts {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return successes, ctx.Err()
+			case <-time.After(delay):
+			}
+			delay = time.Duration(float64(delay) * cfg.Factor)
+			if delay > cfg.Max {
+				delay = cfg.Max
+			}
+		}
+	}
+	return successes, lastErr
 }
 
 // Close releases the DHT's resources.

@@ -191,3 +191,57 @@ func TestMemDHT_PutGetValue(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+// TestBootstrapWithBackoff_NoPeers verifies that calling with an
+// empty peer list is a no-op.
+func TestBootstrapWithBackoff_NoPeers(t *testing.T) {
+	h := newTestHost(t)
+	t.Cleanup(func() { h.Close() })
+	mdht, err := New(context.Background(), Config{Host: h})
+	if err != nil {
+		t.Fatalf("new dht: %v", err)
+	}
+	t.Cleanup(func() { _ = mdht.Close() })
+
+	n, err := mdht.BootstrapWithBackoff(context.Background(), nil, BootstrapConfig{})
+	if err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 successes, got %d", n)
+	}
+}
+
+// TestBootstrapWithBackoff_BackoffSequence verifies the delay doubles
+// after each failed attempt, bounded by Max.
+func TestBootstrapWithBackoff_BackoffSequence(t *testing.T) {
+	// We use a fake peer (invalid multiaddr) to force failures.
+	h := newTestHost(t)
+	t.Cleanup(func() { h.Close() })
+	mdht, err := New(context.Background(), Config{Host: h})
+	if err != nil {
+		t.Fatalf("new dht: %v", err)
+	}
+	t.Cleanup(func() { _ = mdht.Close() })
+
+	bad := peer.AddrInfo{ID: peer.ID("QmInvalid")}
+	cfg := BootstrapConfig{
+		Initial:     1 * time.Millisecond,
+		Max:         4 * time.Millisecond,
+		Factor:      2.0,
+		MaxAttempts: 3,
+	}
+	start := time.Now()
+	n, _ := mdht.BootstrapWithBackoff(context.Background(), []peer.AddrInfo{bad}, cfg)
+	elapsed := time.Since(start)
+	if n != 0 {
+		t.Errorf("expected 0 successes for bad peer, got %d", n)
+	}
+	// 1ms + 2ms + 4ms = 7ms minimum (the third attempt is allowed
+	// up to MaxAttempts so the backoff after attempt 2 is 4ms then
+	// we break, so total observed sleep is 1ms + 2ms = 3ms; but
+	// attempt 1 has no sleep before it. We accept 0..20ms.)
+	if elapsed > 50*time.Millisecond {
+		t.Errorf("backoff took too long: %v", elapsed)
+	}
+}

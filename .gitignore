@@ -43,3 +43,7 @@ secrets.yaml
 
 # Spec-kit generated / scratch
 /.specify/.scratch/
+
+# Local dev artifacts
+/dev/
+

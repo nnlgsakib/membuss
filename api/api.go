@@ -27,6 +27,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/nnlgsakib/membuss/core/mid"
+	"github.com/nnlgsakib/membuss/obs/metrics"
 )
 
 // Backend is the contract the Node API depends on. The
@@ -103,6 +104,12 @@ type Config struct {
 	// ReadTimeout, WriteTimeout bound each request.
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
+	// APIKey, if non-empty, is the shared secret required in
+	// the X-Membuss-Key header for every request. When empty
+	// the API is unauthenticated.
+	APIKey string
+	// Metrics, if non-nil, is exposed at GET /metrics.
+	Metrics *metrics.Metrics
 }
 
 // NodeAPI is the local HTTP control API.
@@ -148,7 +155,14 @@ func (a *NodeAPI) buildRouter() chi.Router {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(a.cfg.ReadTimeout))
 
+	// Prometheus scrape endpoint, exempt from API-key auth.
+	if a.cfg.Metrics != nil {
+		r.Method("GET", "/metrics", a.cfg.Metrics.Handler())
+	}
 	r.Route("/api/v1", func(r chi.Router) {
+		// Enforce API-key auth on every /api/v1 request when
+		// configured. /metrics and /healthz remain open.
+		r.Use(apiKeyAuth(a.cfg.APIKey))
 		r.Post("/add", a.handleAdd)
 		r.Get("/get/{mid}", a.handleGet)
 		r.Post("/seal/{mid}", a.handleSeal)

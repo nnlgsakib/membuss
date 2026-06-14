@@ -18,10 +18,11 @@ package main
 
 import (
 	"context"
+	cryptoTLS "crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -44,6 +45,8 @@ import (
 	"github.com/nnlgsakib/membuss/net/host"
 	"github.com/nnlgsakib/membuss/net/memex"
 	"github.com/nnlgsakib/membuss/net/pex"
+	"github.com/nnlgsakib/membuss/obs/logging"
+	"github.com/nnlgsakib/membuss/obs/metrics"
 	serverpkg "github.com/nnlgsakib/membuss/rpc/server"
 )
 
@@ -57,11 +60,25 @@ func main() {
 	// Build identifier flows into Ping responses.
 	serverpkg.Build = *build
 
+	// Construct a bootstrap logger at info level until we have
+	// the real config. The real logger is built after Load.
+	bootLogger := logging.New(os.Stdout, "info")
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		log.Fatalf("membuss: %v", err)
+		bootLogger.Error("config load failed", "err", err.Error())
+		os.Exit(1)
 	}
+	logger := logging.New(os.Stdout, cfg.LogLevel)
+	slog.SetDefault(logger)
 	banner(cfg, *cfgPath, *inMemory, *noAnchor)
+
+	// Optional Prometheus instrumentation. Disabled via
+	// config (cfg.MetricsEnabled=false) for deployments that
+	// do not want the /metrics endpoint.
+	var mtrx *metrics.Metrics
+	if cfg.MetricsEnabled {
+		mtrx = metrics.New()
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -69,7 +86,7 @@ func main() {
 	// 1) Block store.
 	bs, err := openStore(cfg, *inMemory)
 	if err != nil {
-		log.Fatalf("membuss: open store: %v", err)
+		logger.Error("open store", "err", err.Error()); os.Exit(1)
 	}
 	defer bs.Close()
 
@@ -81,7 +98,7 @@ func main() {
 	}
 	h, err := host.NewHost(hostCfg)
 	if err != nil {
-		log.Fatalf("membuss: host: %v", err)
+		logger.Error("host", "err", err.Error()); os.Exit(1)
 	}
 	defer h.Close()
 	fmt.Fprintf(os.Stdout, "  peer_id:        %s\n", h.ID())
@@ -90,21 +107,21 @@ func main() {
 	// 3) DHT.
 	mdht, err := dht.New(ctx, dht.Config{Host: h})
 	if err != nil {
-		log.Fatalf("membuss: dht: %v", err)
+		logger.Error("dht", "err", err.Error()); os.Exit(1)
 	}
 	bootstrapPeers, err := parsePeers(cfg.BootstrapPeers)
 	if err != nil {
-		log.Fatalf("membuss: parse bootstrap peers: %v", err)
+		logger.Error("parse bootstrap peers", "err", err.Error()); os.Exit(1)
 	}
 	if err := mdht.Bootstrap(ctx, bootstrapPeers); err != nil {
-		log.Printf("membuss: dht bootstrap: %v (continuing)", err)
+		logger.Warn("dht bootstrap", "err", err.Error())
 	}
 	defer mdht.Close()
 
 	// 4) PEX.
 	px, err := pex.New(pex.Config{Host: h})
 	if err != nil {
-		log.Fatalf("membuss: pex: %v", err)
+		logger.Error("pex", "err", err.Error()); os.Exit(1)
 	}
 	px.Start(ctx)
 	defer px.Stop()
@@ -112,7 +129,7 @@ func main() {
 	// 5) Memex engine.
 	mx, err := memex.New(memex.Config{Host: h, Blockstore: bs})
 	if err != nil {
-		log.Fatalf("membuss: memex: %v", err)
+		logger.Error("memex", "err", err.Error()); os.Exit(1)
 	}
 	mx.Start()
 	defer mx.Stop()
@@ -127,7 +144,7 @@ func main() {
 		Burst:    8,
 	})
 	if err != nil {
-		log.Fatalf("membuss: herald: %v", err)
+		logger.Error("herald", "err", err.Error()); os.Exit(1)
 	}
 	hd.Start(ctx)
 	defer hd.Stop()
@@ -145,10 +162,10 @@ func main() {
 			DiscoveryInterval: 30 * time.Second,
 		})
 		if err != nil {
-			log.Fatalf("membuss: anchor: %v", err)
+			logger.Error("anchor", "err", err.Error()); os.Exit(1)
 		}
 		if err := anchorEng.Start(ctx); err != nil {
-			log.Fatalf("membuss: anchor start: %v", err)
+			logger.Error("anchor start", "err", err.Error()); os.Exit(1)
 		}
 		defer anchorEng.Stop()
 		fmt.Fprintf(os.Stdout, "  anchor_mode:    enabled\n")
@@ -158,42 +175,60 @@ func main() {
 
 	// 8) gRPC server.
 	backend := &daemonBackend{
-		dataDir: cfg.DataDir,
-		host:    h,
-		store:   bs,
-		dht:     mdht,
-		pex:     px,
-		memex:   mx,
-		herald:  hd,
-		anchor:  anchorEng,
+		dataDir:      cfg.DataDir,
+		host:         h,
+		store:        bs,
+		dht:          mdht,
+		pex:          px,
+		memex:        mx,
+		herald:       hd,
+		anchor:       anchorEng,
+		metrics:      mtrx,
+		retryBackoff: cfg.MemexRetryBackoff,
+		logger:       logger,
 	}
 	grpcSrv, err := startGRPC(cfg.GRPCAddr, backend)
 	if err != nil {
-		log.Fatalf("membuss: grpc: %v", err)
+		logger.Error("grpc", "err", err.Error()); os.Exit(1)
 	}
-	defer grpcSrv.GracefulStop()
 	fmt.Fprintf(os.Stdout, "  grpc_addr:      %s\n", cfg.GRPCAddr)
 	// 9) Mem-Gate: public HTTP gateway + CDN edge.
-	gateSrv, err := startGateway(cfg.GatewayAddr, newMemgateAdapter(backend), newExplorerAdapter(backend, cfg.AnchorMode))
+	gateSrv, err := startGateway(cfg.GatewayAddr, newMemgateAdapter(backend), newExplorerAdapter(backend, cfg.AnchorMode), cfg.GatewayRateLimitPerMin, cfg.GatewayTLS)
 	if err != nil {
-		log.Fatalf("membuss: gateway: %v", err)
+		logger.Error("gateway", "err", err.Error()); os.Exit(1)
 	}
-	defer gateSrv.Close()
 	fmt.Fprintf(os.Stdout, "  gateway_addr:   %s\n", gateSrv.Addr())
 
 	// 10) Node API: local control plane over HTTP/JSON.
-	apiSrv, err := startNodeAPI(cfg.APIAddr, newAPIAdapter(backend))
+	apiSrv, err := startNodeAPI(cfg.APIAddr, newAPIAdapter(backend), mtrx, cfg.APIKey, cfg.APITLS)
 	if err != nil {
-		log.Fatalf("membuss: api: %v", err)
+		logger.Error("api", "err", err.Error()); os.Exit(1)
 	}
-	defer apiSrv.Close()
 	fmt.Fprintf(os.Stdout, "  api_addr:       %s\n", apiSrv.Addr())
 
-	// Wait for SIGINT/SIGTERM.
+	// Graceful shutdown: wait for SIGINT/SIGTERM, then
+	// drain in the order: HTTP servers (gateway, api),
+	// gRPC, memex engine, herald, anchor, pex, dht,
+	// libp2p host, store.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigCh
-	fmt.Fprintf(os.Stdout, "\nmembuss: received %s, shutting down...\n", sig)
+	logger.Info("shutdown requested", "signal", sig.String())
+
+	shutdownCtx, scancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer scancel()
+
+	if err := gateSrv.ShutdownCtx(shutdownCtx); err != nil {
+		logger.Warn("gateway shutdown", "err", err.Error())
+	}
+	if err := apiSrv.ShutdownCtx(shutdownCtx); err != nil {
+		logger.Warn("api shutdown", "err", err.Error())
+	}
+	grpcSrv.GracefulStop()
+	if err := mx.StopWait(shutdownCtx); err != nil {
+		logger.Warn("memex stop", "err", err.Error())
+	}
+	logger.Info("shutdown complete")
 }
 
 // banner writes the startup banner to stdout.
@@ -297,39 +332,44 @@ func newServerGRPC() *serverGRPC {
 
 func (s *serverGRPC) GracefulStop() { s.gsrv.GracefulStop() }
 
-// startGateway brings up the public Mem-Gate HTTP server
-// and returns a handle the caller can Close to shut it
-// down. The handler is mounted at "/".
-func startGateway(addr string, b memgate.Backend, exp *explorerAdapter) (*httpServer, error) {
+// startGateway brings up the public Mem-Gate HTTP server.
+// rateLimitPerMin is the per-IP request budget enforced on
+// every public request. tls enables HTTPS when its
+// CertFile/KeyFile are set.
+func startGateway(addr string, b memgate.Backend, exp *explorerAdapter, rateLimitPerMin int, tlsCfg config.TLSConfig) (*httpServer, error) {
 	mg, err := memgate.New(memgate.Config{
 		Backend:         b,
 		MaxCacheBytes:   64 << 20, // 64 MiB LRU
 		ExplorerHandler: buildExplorer(exp),
+		RateLimitPerMin: rateLimitPerMin,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("memgate: %w", err)
 	}
-	return startHTTP(addr, "membuss-gateway", mg.Handler())
+	return startHTTP(addr, "membuss-gateway", mg.Handler(), tlsCfg)
 }
 
-// startNodeAPI brings up the local Node control API. The
-// handler is mounted at "/api/v1" by api.Handler.
-func startNodeAPI(addr string, b api.Backend) (*httpServer, error) {
+// startNodeAPI brings up the local Node control API. mtrx
+// exposes Prometheus at /metrics; apiKey enables X-Membuss-Key
+// auth on every /api/v1 endpoint; tls enables HTTPS.
+func startNodeAPI(addr string, b api.Backend, mtrx *metrics.Metrics, apiKey string, tlsCfg config.TLSConfig) (*httpServer, error) {
 	nodeAPI, err := api.New(api.Config{
 		Backend:        b,
 		MaxUploadBytes: 1 << 30, // 1 GiB
+		APIKey:         apiKey,
+		Metrics:        mtrx,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("nodeapi: %w", err)
 	}
-	return startHTTP(addr, "membuss-api", nodeAPI.Handler())
+	return startHTTP(addr, "membuss-api", nodeAPI.Handler(), tlsCfg)
 }
 
-// startHTTP binds an http.Handler to addr in a goroutine
-// and returns a handle whose Close method does a graceful
-// shutdown. A non-ErrServerClosed error from Serve is
-// logged.
-func startHTTP(addr, name string, h http.Handler) (*httpServer, error) {
+// startHTTP binds an http.Handler to addr in a goroutine and
+// returns a handle whose Close method does a graceful shutdown.
+// A non-ErrServerClosed error from Serve is logged. When tls
+// is non-empty, the server runs HTTPS with the supplied cert+key.
+func startHTTP(addr, name string, h http.Handler, tlsCfg config.TLSConfig) (*httpServer, error) {
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      h,
@@ -337,14 +377,29 @@ func startHTTP(addr, name string, h http.Handler) (*httpServer, error) {
 		WriteTimeout: 5 * time.Minute,
 		IdleTimeout:  2 * time.Minute,
 	}
+	if tlsCfg.Enabled() {
+		cert, err := cryptoTLS.LoadX509KeyPair(tlsCfg.CertFile, tlsCfg.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("%s: load tls: %w", name, err)
+		}
+		srv.TLSConfig = &cryptoTLS.Config{Certificates: []cryptoTLS.Certificate{cert}, MinVersion: cryptoTLS.VersionTLS12}
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", addr, err)
 	}
 	hs := &httpServer{name: name, srv: srv, ln: ln, boundAddr: ln.Addr().String()}
 	go func() {
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("%s: serve: %v", name, err)
+		var err error
+		if srv.TLSConfig != nil {
+			// We need a TLS listener for ServeTLS; rebuild it.
+			tlsLn := cryptoTLS.NewListener(ln, srv.TLSConfig)
+			err = srv.Serve(tlsLn)
+		} else {
+			err = srv.Serve(ln)
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("http serve", "name", name, "err", err.Error())
 		}
 	}()
 	return hs, nil
@@ -384,7 +439,7 @@ func buildExplorer(exp *explorerAdapter) http.Handler {
 	}
 	h, err := explorerPkg.New(explorerPkg.Config{Backend: exp})
 	if err != nil {
-		log.Printf("membuss: explorer: %v", err)
+		slog.Warn("explorer", "err", err.Error())
 		return nil
 	}
 	return h.Handler()
@@ -398,6 +453,17 @@ func (h *httpServer) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := h.srv.Shutdown(ctx); err != nil {
-		log.Printf("%s: shutdown: %v", h.name, err)
+		slog.Warn("http shutdown", "name", h.name, "err", err.Error())
 	}
+}
+
+// ShutdownCtx performs a graceful shutdown bounded by the
+// provided context's deadline. The daemon's main() calls this
+// in sequence to drain HTTP traffic before tearing down the
+// rest of the subsystems.
+func (h *httpServer) ShutdownCtx(ctx context.Context) error {
+	if h == nil || h.srv == nil {
+		return nil
+	}
+	return h.srv.Shutdown(ctx)
 }

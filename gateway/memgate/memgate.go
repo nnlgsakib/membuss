@@ -87,6 +87,10 @@ type Config struct {
 	// caller is responsible for constructing the
 	// explorer with the appropriate backend.
 	ExplorerHandler http.Handler
+	// RateLimitPerMin is the per-source-IP request budget
+	// enforced on the public Mem-Gate server, evaluated
+	// per minute. Zero disables rate limiting. Default 100.
+	RateLimitPerMin int
 }
 
 // MemGate is the public HTTP gateway.
@@ -99,6 +103,10 @@ type MemGate struct {
 	// under a single mutex; it does not need to scale
 	// beyond the configured MaxCacheBytes.
 	lru *lru
+
+	// ipLimiter enforces a per-source-IP request budget on
+	// public routes. nil disables rate limiting.
+	ipLimiter *ipLimiter
 }
 
 // New returns a MemGate ready to be served. The returned
@@ -118,6 +126,7 @@ func New(cfg Config) (*MemGate, error) {
 	}
 
 	mg := &MemGate{cfg: cfg, lru: newLRU(cfg.MaxCacheBytes)}
+	mg.ipLimiter = newIPLimiter(cfg.RateLimitPerMin, 10*time.Minute)
 	mg.router = mg.buildRouter()
 	return mg, nil
 }
@@ -140,6 +149,11 @@ func (m *MemGate) buildRouter() chi.Router {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(m.cfg.ReadTimeout))
+	// Rate limit BEFORE route dispatch so a flood cannot pin
+	// a single request handler. /healthz is intentionally not
+	// exempted; operators who want it open can disable the
+	// limiter by setting RateLimitPerMin=0 in config.
+	r.Use(m.ipLimiter.Middleware)
 
 	r.Get("/healthz", m.handleHealth)
 	r.Get("/mem/{mid}", m.handleGet)

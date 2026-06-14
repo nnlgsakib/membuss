@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 
 	"github.com/nnlgsakib/membuss/anchor"
+	"github.com/nnlgsakib/membuss/config"
 	"github.com/nnlgsakib/membuss/core/chunk"
 	"github.com/nnlgsakib/membuss/core/dag"
 	"github.com/nnlgsakib/membuss/core/mid"
@@ -26,6 +28,7 @@ import (
 	"github.com/nnlgsakib/membuss/net/herald"
 	"github.com/nnlgsakib/membuss/net/memex"
 	"github.com/nnlgsakib/membuss/net/pex"
+	"github.com/nnlgsakib/membuss/obs/metrics"
 	serverpkg "github.com/nnlgsakib/membuss/rpc/server"
 )
 
@@ -53,6 +56,15 @@ type daemonBackend struct {
 	// anchor is the Anchor Node engine. nil if AnchorMode is
 	// disabled in config.
 	anchor *anchor.AnchorEngine
+
+	// metrics is the optional Prometheus facade. nil = no-op.
+	metrics *metrics.Metrics
+
+	// retryBackoff configures the Memex session retry schedule.
+	retryBackoff config.RetryBackoffConfig
+
+	// logger is the structured-logging handle. nil = no-op.
+	logger *slog.Logger
 }
 
 // Compile-time check that daemonBackend satisfies server.Backend.
