@@ -31,6 +31,7 @@ import (
 
 	"github.com/nnlgsakib/membuss/api"
 	memgate "github.com/nnlgsakib/membuss/gateway/memgate"
+	explorerPkg "github.com/nnlgsakib/membuss/gateway/explorer"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
@@ -173,7 +174,7 @@ func main() {
 	defer grpcSrv.GracefulStop()
 	fmt.Fprintf(os.Stdout, "  grpc_addr:      %s\n", cfg.GRPCAddr)
 	// 9) Mem-Gate: public HTTP gateway + CDN edge.
-	gateSrv, err := startGateway(cfg.GatewayAddr, newMemgateAdapter(backend))
+	gateSrv, err := startGateway(cfg.GatewayAddr, newMemgateAdapter(backend), newExplorerAdapter(backend, cfg.AnchorMode))
 	if err != nil {
 		log.Fatalf("membuss: gateway: %v", err)
 	}
@@ -299,10 +300,11 @@ func (s *serverGRPC) GracefulStop() { s.gsrv.GracefulStop() }
 // startGateway brings up the public Mem-Gate HTTP server
 // and returns a handle the caller can Close to shut it
 // down. The handler is mounted at "/".
-func startGateway(addr string, b memgate.Backend) (*httpServer, error) {
+func startGateway(addr string, b memgate.Backend, exp *explorerAdapter) (*httpServer, error) {
 	mg, err := memgate.New(memgate.Config{
-		Backend:       b,
-		MaxCacheBytes: 64 << 20, // 64 MiB LRU
+		Backend:         b,
+		MaxCacheBytes:   64 << 20, // 64 MiB LRU
+		ExplorerHandler: buildExplorer(exp),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("memgate: %w", err)
@@ -371,6 +373,21 @@ func (h *httpServer) Addr() string {
 		return ""
 	}
 	return h.ln.Addr().String()
+}
+
+// buildExplorer constructs the explorer http.Handler.
+// It returns nil when exp is nil so the gateway can be
+// constructed without an explorer for tests.
+func buildExplorer(exp *explorerAdapter) http.Handler {
+	if exp == nil {
+		return nil
+	}
+	h, err := explorerPkg.New(explorerPkg.Config{Backend: exp})
+	if err != nil {
+		log.Printf("membuss: explorer: %v", err)
+		return nil
+	}
+	return h.Handler()
 }
 
 // Close performs a graceful shutdown with a 5s budget.

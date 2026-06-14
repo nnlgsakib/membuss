@@ -1,0 +1,29 @@
+{{define "node_body"}}
+<section>
+  <h1>Node</h1>
+  <div class="card">
+    <h2>Identity</h2>
+    <dl>
+      <dt>Peer ID</dt><dd class="mono small">{{.NodeInfo.PeerID}}</dd>
+      <dt>Version</dt><dd>{{.NodeInfo.Version}}</dd>
+      <dt>Build</dt><dd>{{.NodeInfo.Build}}</dd>
+      <dt>Anchor mode</dt><dd>{{if .NodeInfo.AnchorMode}}enabled{{else}}disabled{{end}}</dd>
+    </dl>
+  </div>
+
+  <div class="card">
+    <h2>Listen Addresses</h2>
+    <ul class="addrs">
+      {{range .NodeInfo.Addrs}}<li class="mono small">{{.}}</li>{{end}}
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>Storage</h2>
+    <dl>
+      <dt>Store size</dt><dd>{{.StoreBytes | humanBytes}} ({{.StoreBytes}} bytes)</dd>
+      <dt>Sealed MIDs</dt><dd>{{.SealedCount}}</dd>
+    </dl>
+  </div>
+</section>
+{{end}}

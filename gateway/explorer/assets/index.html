@@ -1,0 +1,50 @@
+{{define "index_body"}}
+<section class="hero">
+  <h1>Membuss Explorer</h1>
+  <p class="muted">Browse the local Mem-Store, DAG structure, peers, and anchor nodes.</p>
+  <form class="big-search" method="POST" action="/explorer/search">
+    <input name="mid" type="text" placeholder="mem1z..." autocomplete="off" spellcheck="false" required>
+    <button type="submit">Open</button>
+  </form>
+</section>
+
+<section class="grid">
+  <div class="card">
+    <h2>Local Store</h2>
+    <dl>
+      <dt>Total bytes</dt><dd>{{.StoreBytes | humanBytes}}</dd>
+      <dt>Sealed MIDs</dt><dd>{{.SealedCount}}</dd>
+      <dt>Block count</dt><dd>{{.BlockCount}}</dd>
+    </dl>
+  </div>
+
+  <div class="card">
+    <h2>Networking</h2>
+    <dl>
+      <dt>Peer ID</dt><dd class="mono small">{{.NodeInfo.PeerID}}</dd>
+      <dt>Peers in table</dt><dd>{{.PeerCount}}</dd>
+      <dt>Anchor mode</dt><dd>{{if .NodeInfo.AnchorMode}}enabled{{else}}disabled{{end}}</dd>
+    </dl>
+  </div>
+
+  <div class="card">
+    <h2>Build</h2>
+    <dl>
+      <dt>Version</dt><dd>{{.NodeInfo.Version}}</dd>
+      <dt>Build</dt><dd>{{.NodeInfo.Build}}</dd>
+      <dt>Uptime</dt><dd>{{.Uptime}}s</dd>
+    </dl>
+  </div>
+
+  {{if .SealedList}}
+  <div class="card span-2">
+    <h2>Sealed MIDs</h2>
+    <ul class="mids">
+      {{range .SealedList}}
+      <li><a href="/explorer/mid/{{.}}">{{.}}</a></li>
+      {{end}}
+    </ul>
+  </div>
+  {{end}}
+</section>
+{{end}}

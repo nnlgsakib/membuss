@@ -82,6 +82,11 @@ type Config struct {
 	// WriteTimeout is the per-request write timeout.
 	// Defaults to 60s.
 	WriteTimeout time.Duration
+	// ExplorerHandler, if non-nil, is mounted under
+	// /explorer/* on the same router. The Mem-Gate
+	// caller is responsible for constructing the
+	// explorer with the appropriate backend.
+	ExplorerHandler http.Handler
 }
 
 // MemGate is the public HTTP gateway.
@@ -140,6 +145,9 @@ func (m *MemGate) buildRouter() chi.Router {
 	r.Get("/mem/{mid}", m.handleGet)
 	r.Head("/mem/{mid}", m.handleHead)
 	r.Get("/mem/{mid}/{path:*}", m.handlePathGet)
+	if m.cfg.ExplorerHandler != nil {
+		r.Mount("/explorer", m.cfg.ExplorerHandler)
+	}
 	return r
 }
 

@@ -1,0 +1,32 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} - Membuss Explorer</title>
+<link rel="stylesheet" href="/explorer/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/explorer/">Membuss</a>
+  <nav>
+    <a href="/explorer/">Home</a>
+    <a href="/explorer/peers">Peers</a>
+    <a href="/explorer/anchors">Anchors</a>
+    <a href="/explorer/node">Node</a>
+  </nav>
+  <form class="search" method="POST" action="/explorer/search">
+    <input name="mid" type="text" placeholder="mem..." autocomplete="off" spellcheck="false" required>
+    <button type="submit">Search</button>
+  </form>
+</header>
+<main>
+{{block "body" .}}empty{{end}}
+</main>
+<footer class="footer">
+  <span>Membuss Explorer</span>
+  <span class="muted">/explorer - served by Mem-Gate</span>
+</footer>
+</body>
+</html>
+{{end}}

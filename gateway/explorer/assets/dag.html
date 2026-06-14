@@ -1,0 +1,9 @@
+{{define "dag_body"}}
+<section class="dag">
+  <h1>DAG</h1>
+  <p class="muted mono">{{.MID}}</p>
+  <p class="muted">Click a node to expand or collapse its children. Node data is fetched on demand from <code>/mem/&lt;mid&gt;?format=dag-json</code>.</p>
+  <ul id="dag-root" class="dag-tree" data-mid="{{.MID}}"></ul>
+</section>
+<script src="/explorer/static/dag.js"></script>
+{{end}}

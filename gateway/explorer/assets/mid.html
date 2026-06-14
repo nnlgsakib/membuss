@@ -1,0 +1,57 @@
+{{define "mid_body"}}
+<section class="mid-detail">
+  <h1>MID</h1>
+  <div class="mid-string mono">
+    <code id="midstr">{{.MID}}</code>
+    <button class="copy" data-copy="{{.MID}}">Copy</button>
+  </div>
+
+  {{if .NotFound}}
+    <p class="warn">This MID is not present in the local store.</p>
+    <p class="muted">DHT lookup for providers:</p>
+    <pre class="providers">{{range .Providers}}{{.}}
+{{end}}{{if not .Providers}}(no providers found){{end}}</pre>
+  {{else}}
+  <div class="grid">
+    <div class="card">
+      <h2>Content</h2>
+      <dl>
+        <dt>Size</dt><dd>{{.Size | humanBytes}} ({{.Size}} bytes)</dd>
+        <dt>Blocks</dt><dd>{{.Blocks}}</dd>
+        <dt>Sealed</dt><dd>{{if .Sealed}}yes{{else}}no{{end}}</dd>
+        <dt>Codec</dt><dd>0x{{printf "%x" .Codec}}</dd>
+        <dt>Content-Type</dt><dd>{{if .ContentType}}{{.ContentType}}{{else}}(unknown){{end}}</dd>
+      </dl>
+      <div class="actions">
+        <a class="btn" href="/mem/{{.MID}}" target="_blank">Download</a>
+        <a class="btn" href="/explorer/mid/{{.MID}}/dag">DAG</a>
+        {{if .Sealed}}
+        <form method="POST" action="/explorer/mid/{{.MID}}/unseal" style="display:inline">
+          <button class="btn warn" type="submit">Unseal</button>
+        </form>
+        {{else}}
+        <form method="POST" action="/explorer/mid/{{.MID}}/seal" style="display:inline">
+          <button class="btn primary" type="submit">Seal</button>
+        </form>
+        {{end}}
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Erasure Coding</h2>
+      <dl>
+        <dt>Layout</dt><dd>{{.DataShards}} data + {{.ParityShards}} parity</dd>
+        <dt>Total shards</dt><dd>{{.TotalShards}}</dd>
+        <dt>Health</dt><dd>{{.HealthLabel}} ({{.Health}})</dd>
+      </dl>
+    </div>
+
+    <div class="card span-2">
+      <h2>Providers (DHT)</h2>
+      <pre class="providers">{{range .Providers}}{{.}}
+{{end}}{{if not .Providers}}(no providers found in DHT){{end}}</pre>
+    </div>
+  </div>
+  {{end}}
+</section>
+{{end}}

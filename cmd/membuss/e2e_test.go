@@ -15,6 +15,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 
 	midpkg "github.com/nnlgsakib/membuss/core/mid"
@@ -285,7 +286,119 @@ reprovide_interval: 12h
 	notFound, err := http.Get(gwURL + "/mem/" + notFoundMid.String())
 	if err != nil {
 		t.Fatalf("gw 404: %v", err)
+		// -- Explorer E2E ---------------------------------------------
+	// /explorer/
+	homeResp, err := http.Get(gwURL + "/explorer/")
+	if err != nil {
+		t.Fatalf("explorer home: %v", err)
 	}
+	homeBody, _ := io.ReadAll(homeResp.Body)
+	homeResp.Body.Close()
+	if homeResp.StatusCode != http.StatusOK {
+		t.Fatalf("explorer home status: %d", homeResp.StatusCode)
+	}
+	if !bytes.Contains(homeBody, []byte("Membuss Explorer")) {
+		t.Errorf("explorer home missing title")
+	}
+
+	// /explorer/peers
+	peersResp, err := http.Get(gwURL + "/explorer/peers")
+	if err != nil {
+		t.Fatalf("explorer peers: %v", err)
+	}
+	peersResp.Body.Close()
+	if peersResp.StatusCode != http.StatusOK {
+		t.Errorf("explorer peers status: %d", peersResp.StatusCode)
+	}
+
+	// /explorer/mid/{addMid} (the MID we uploaded above)
+	midResp, err := http.Get(gwURL + "/explorer/mid/" + addMid)
+	if err != nil {
+		t.Fatalf("explorer mid: %v", err)
+	}
+	midBody, _ := io.ReadAll(midResp.Body)
+	midResp.Body.Close()
+	if midResp.StatusCode != http.StatusOK {
+		t.Errorf("explorer mid status: %d", midResp.StatusCode)
+	}
+	if !bytes.Contains(midBody, []byte(addMid)) {
+		t.Errorf("explorer mid missing the MID string")
+	}
+	if !bytes.Contains(midBody, []byte("Download")) {
+		t.Errorf("explorer mid missing Download button")
+	}
+	if !bytes.Contains(midBody, []byte("Erasure Coding")) {
+		t.Errorf("explorer mid missing Erasure Coding card")
+	}
+
+	// /explorer/mid/{addMid}/dag
+	dagResp, err := http.Get(gwURL + "/explorer/mid/" + addMid + "/dag")
+	if err != nil {
+		t.Fatalf("explorer dag: %v", err)
+	}
+	dagBody, _ := io.ReadAll(dagResp.Body)
+	dagResp.Body.Close()
+	if dagResp.StatusCode != http.StatusOK {
+		t.Errorf("explorer dag status: %d", dagResp.StatusCode)
+	}
+	if !bytes.Contains(dagBody, []byte("dag-tree")) {
+		t.Errorf("explorer dag missing dag-tree")
+	}
+	if !bytes.Contains(dagBody, []byte("dag.js")) {
+		t.Errorf("explorer dag missing dag.js script")
+	}
+
+	// /explorer/node
+	nodeResp, err := http.Get(gwURL + "/explorer/node")
+	if err != nil {
+		t.Fatalf("explorer node: %v", err)
+	}
+	nodeResp.Body.Close()
+	if nodeResp.StatusCode != http.StatusOK {
+		t.Errorf("explorer node status: %d", nodeResp.StatusCode)
+	}
+
+	// /explorer/anchors
+	ancResp, err := http.Get(gwURL + "/explorer/anchors")
+	if err != nil {
+		t.Fatalf("explorer anchors: %v", err)
+	}
+	ancResp.Body.Close()
+	if ancResp.StatusCode != http.StatusOK {
+		t.Errorf("explorer anchors status: %d", ancResp.StatusCode)
+	}
+
+	// /explorer/static/style.css
+	cssResp, err := http.Get(gwURL + "/explorer/static/style.css")
+	if err != nil {
+		t.Fatalf("explorer css: %v", err)
+	}
+	cssBody, _ := io.ReadAll(cssResp.Body)
+	cssResp.Body.Close()
+	if cssResp.StatusCode != http.StatusOK {
+		t.Errorf("explorer css status: %d", cssResp.StatusCode)
+	}
+	if !bytes.Contains(cssBody, []byte(".topbar")) {
+		t.Errorf("explorer css missing .topbar selector")
+	}
+
+	// POST /explorer/search (form post -> 303 redirect)
+	searchForm := url.Values{"mid": {addMid}}
+	searchReq, _ := http.NewRequest("POST", gwURL+"/explorer/search", strings.NewReader(searchForm.Encode()))
+	searchReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
+	searchResp, err := client.Do(searchReq)
+	if err != nil {
+		t.Fatalf("explorer search: %v", err)
+	}
+	searchResp.Body.Close()
+	if searchResp.StatusCode != http.StatusSeeOther {
+		t.Errorf("explorer search status: %d want 303", searchResp.StatusCode)
+	}
+	if loc := searchResp.Header.Get("Location"); loc != "/explorer/mid/"+addMid {
+		t.Errorf("explorer search redirect: %q", loc)
+	}
+}
 	notFound.Body.Close()
 	if notFound.StatusCode != http.StatusNotFound {
 		t.Errorf("gw 404 status: got %d want 404", notFound.StatusCode)
