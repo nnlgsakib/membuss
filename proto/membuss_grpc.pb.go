@@ -29,11 +29,10 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// Ping is a connectivity probe used by the CLI to verify the daemon
-// is reachable on the gRPC endpoint.
+// Node is a minimal connectivity probe used by the CLI to verify
+// the daemon is reachable on the gRPC endpoint. The full operator
+// surface lives on MembussNode below.
 type NodeClient interface {
-	// Ping returns a static reply; useful for health checks and
-	// connection bring-up.
 	Ping(ctx context.Context, in *PingRequest, opts ...grpc.CallOption) (*PingResponse, error)
 }
 
@@ -59,11 +58,10 @@ func (c *nodeClient) Ping(ctx context.Context, in *PingRequest, opts ...grpc.Cal
 // All implementations must embed UnimplementedNodeServer
 // for forward compatibility.
 //
-// Ping is a connectivity probe used by the CLI to verify the daemon
-// is reachable on the gRPC endpoint.
+// Node is a minimal connectivity probe used by the CLI to verify
+// the daemon is reachable on the gRPC endpoint. The full operator
+// surface lives on MembussNode below.
 type NodeServer interface {
-	// Ping returns a static reply; useful for health checks and
-	// connection bring-up.
 	Ping(context.Context, *PingRequest) (*PingResponse, error)
 	mustEmbedUnimplementedNodeServer()
 }
@@ -130,5 +128,421 @@ var Node_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
+	Metadata: "membuss.proto",
+}
+
+const (
+	MembussNode_Add_FullMethodName          = "/membuss.v1.MembussNode/Add"
+	MembussNode_Get_FullMethodName          = "/membuss.v1.MembussNode/Get"
+	MembussNode_Seal_FullMethodName         = "/membuss.v1.MembussNode/Seal"
+	MembussNode_Unseal_FullMethodName       = "/membuss.v1.MembussNode/Unseal"
+	MembussNode_Stat_FullMethodName         = "/membuss.v1.MembussNode/Stat"
+	MembussNode_Peers_FullMethodName        = "/membuss.v1.MembussNode/Peers"
+	MembussNode_DHTPeek_FullMethodName      = "/membuss.v1.MembussNode/DHTPeek"
+	MembussNode_GC_FullMethodName           = "/membuss.v1.MembussNode/GC"
+	MembussNode_AnchorStatus_FullMethodName = "/membuss.v1.MembussNode/AnchorStatus"
+)
+
+// MembussNodeClient is the client API for MembussNode service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// MembussNode is the operator-facing daemon service. The CLI
+// dials this; humans usually interact with it through membuss-cli.
+type MembussNodeClient interface {
+	Add(ctx context.Context, in *AddRequest, opts ...grpc.CallOption) (*AddResponse, error)
+	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GetChunk], error)
+	Seal(ctx context.Context, in *SealRequest, opts ...grpc.CallOption) (*SealResponse, error)
+	Unseal(ctx context.Context, in *UnsealRequest, opts ...grpc.CallOption) (*UnsealResponse, error)
+	Stat(ctx context.Context, in *StatRequest, opts ...grpc.CallOption) (*StatResponse, error)
+	Peers(ctx context.Context, in *PeersRequest, opts ...grpc.CallOption) (*PeersResponse, error)
+	DHTPeek(ctx context.Context, in *DHTPeekRequest, opts ...grpc.CallOption) (*DHTPeekResponse, error)
+	GC(ctx context.Context, in *GCRequest, opts ...grpc.CallOption) (*GCResponse, error)
+	AnchorStatus(ctx context.Context, in *AnchorStatusRequest, opts ...grpc.CallOption) (*AnchorStatusResponse, error)
+}
+
+type membussNodeClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewMembussNodeClient(cc grpc.ClientConnInterface) MembussNodeClient {
+	return &membussNodeClient{cc}
+}
+
+func (c *membussNodeClient) Add(ctx context.Context, in *AddRequest, opts ...grpc.CallOption) (*AddResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AddResponse)
+	err := c.cc.Invoke(ctx, MembussNode_Add_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *membussNodeClient) Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GetChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &MembussNode_ServiceDesc.Streams[0], MembussNode_Get_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[GetRequest, GetChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MembussNode_GetClient = grpc.ServerStreamingClient[GetChunk]
+
+func (c *membussNodeClient) Seal(ctx context.Context, in *SealRequest, opts ...grpc.CallOption) (*SealResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SealResponse)
+	err := c.cc.Invoke(ctx, MembussNode_Seal_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *membussNodeClient) Unseal(ctx context.Context, in *UnsealRequest, opts ...grpc.CallOption) (*UnsealResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UnsealResponse)
+	err := c.cc.Invoke(ctx, MembussNode_Unseal_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *membussNodeClient) Stat(ctx context.Context, in *StatRequest, opts ...grpc.CallOption) (*StatResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StatResponse)
+	err := c.cc.Invoke(ctx, MembussNode_Stat_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *membussNodeClient) Peers(ctx context.Context, in *PeersRequest, opts ...grpc.CallOption) (*PeersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PeersResponse)
+	err := c.cc.Invoke(ctx, MembussNode_Peers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *membussNodeClient) DHTPeek(ctx context.Context, in *DHTPeekRequest, opts ...grpc.CallOption) (*DHTPeekResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DHTPeekResponse)
+	err := c.cc.Invoke(ctx, MembussNode_DHTPeek_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *membussNodeClient) GC(ctx context.Context, in *GCRequest, opts ...grpc.CallOption) (*GCResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GCResponse)
+	err := c.cc.Invoke(ctx, MembussNode_GC_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *membussNodeClient) AnchorStatus(ctx context.Context, in *AnchorStatusRequest, opts ...grpc.CallOption) (*AnchorStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AnchorStatusResponse)
+	err := c.cc.Invoke(ctx, MembussNode_AnchorStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// MembussNodeServer is the server API for MembussNode service.
+// All implementations must embed UnimplementedMembussNodeServer
+// for forward compatibility.
+//
+// MembussNode is the operator-facing daemon service. The CLI
+// dials this; humans usually interact with it through membuss-cli.
+type MembussNodeServer interface {
+	Add(context.Context, *AddRequest) (*AddResponse, error)
+	Get(*GetRequest, grpc.ServerStreamingServer[GetChunk]) error
+	Seal(context.Context, *SealRequest) (*SealResponse, error)
+	Unseal(context.Context, *UnsealRequest) (*UnsealResponse, error)
+	Stat(context.Context, *StatRequest) (*StatResponse, error)
+	Peers(context.Context, *PeersRequest) (*PeersResponse, error)
+	DHTPeek(context.Context, *DHTPeekRequest) (*DHTPeekResponse, error)
+	GC(context.Context, *GCRequest) (*GCResponse, error)
+	AnchorStatus(context.Context, *AnchorStatusRequest) (*AnchorStatusResponse, error)
+	mustEmbedUnimplementedMembussNodeServer()
+}
+
+// UnimplementedMembussNodeServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedMembussNodeServer struct{}
+
+func (UnimplementedMembussNodeServer) Add(context.Context, *AddRequest) (*AddResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Add not implemented")
+}
+func (UnimplementedMembussNodeServer) Get(*GetRequest, grpc.ServerStreamingServer[GetChunk]) error {
+	return status.Error(codes.Unimplemented, "method Get not implemented")
+}
+func (UnimplementedMembussNodeServer) Seal(context.Context, *SealRequest) (*SealResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Seal not implemented")
+}
+func (UnimplementedMembussNodeServer) Unseal(context.Context, *UnsealRequest) (*UnsealResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Unseal not implemented")
+}
+func (UnimplementedMembussNodeServer) Stat(context.Context, *StatRequest) (*StatResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Stat not implemented")
+}
+func (UnimplementedMembussNodeServer) Peers(context.Context, *PeersRequest) (*PeersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Peers not implemented")
+}
+func (UnimplementedMembussNodeServer) DHTPeek(context.Context, *DHTPeekRequest) (*DHTPeekResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DHTPeek not implemented")
+}
+func (UnimplementedMembussNodeServer) GC(context.Context, *GCRequest) (*GCResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GC not implemented")
+}
+func (UnimplementedMembussNodeServer) AnchorStatus(context.Context, *AnchorStatusRequest) (*AnchorStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AnchorStatus not implemented")
+}
+func (UnimplementedMembussNodeServer) mustEmbedUnimplementedMembussNodeServer() {}
+func (UnimplementedMembussNodeServer) testEmbeddedByValue()                     {}
+
+// UnsafeMembussNodeServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to MembussNodeServer will
+// result in compilation errors.
+type UnsafeMembussNodeServer interface {
+	mustEmbedUnimplementedMembussNodeServer()
+}
+
+func RegisterMembussNodeServer(s grpc.ServiceRegistrar, srv MembussNodeServer) {
+	// If the following call panics, it indicates UnimplementedMembussNodeServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&MembussNode_ServiceDesc, srv)
+}
+
+func _MembussNode_Add_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MembussNodeServer).Add(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MembussNode_Add_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MembussNodeServer).Add(ctx, req.(*AddRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MembussNode_Get_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(GetRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(MembussNodeServer).Get(m, &grpc.GenericServerStream[GetRequest, GetChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type MembussNode_GetServer = grpc.ServerStreamingServer[GetChunk]
+
+func _MembussNode_Seal_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SealRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MembussNodeServer).Seal(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MembussNode_Seal_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MembussNodeServer).Seal(ctx, req.(*SealRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MembussNode_Unseal_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnsealRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MembussNodeServer).Unseal(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MembussNode_Unseal_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MembussNodeServer).Unseal(ctx, req.(*UnsealRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MembussNode_Stat_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StatRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MembussNodeServer).Stat(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MembussNode_Stat_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MembussNodeServer).Stat(ctx, req.(*StatRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MembussNode_Peers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PeersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MembussNodeServer).Peers(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MembussNode_Peers_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MembussNodeServer).Peers(ctx, req.(*PeersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MembussNode_DHTPeek_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DHTPeekRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MembussNodeServer).DHTPeek(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MembussNode_DHTPeek_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MembussNodeServer).DHTPeek(ctx, req.(*DHTPeekRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MembussNode_GC_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GCRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MembussNodeServer).GC(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MembussNode_GC_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MembussNodeServer).GC(ctx, req.(*GCRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MembussNode_AnchorStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AnchorStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MembussNodeServer).AnchorStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MembussNode_AnchorStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MembussNodeServer).AnchorStatus(ctx, req.(*AnchorStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// MembussNode_ServiceDesc is the grpc.ServiceDesc for MembussNode service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var MembussNode_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "membuss.v1.MembussNode",
+	HandlerType: (*MembussNodeServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Add",
+			Handler:    _MembussNode_Add_Handler,
+		},
+		{
+			MethodName: "Seal",
+			Handler:    _MembussNode_Seal_Handler,
+		},
+		{
+			MethodName: "Unseal",
+			Handler:    _MembussNode_Unseal_Handler,
+		},
+		{
+			MethodName: "Stat",
+			Handler:    _MembussNode_Stat_Handler,
+		},
+		{
+			MethodName: "Peers",
+			Handler:    _MembussNode_Peers_Handler,
+		},
+		{
+			MethodName: "DHTPeek",
+			Handler:    _MembussNode_DHTPeek_Handler,
+		},
+		{
+			MethodName: "GC",
+			Handler:    _MembussNode_GC_Handler,
+		},
+		{
+			MethodName: "AnchorStatus",
+			Handler:    _MembussNode_AnchorStatus_Handler,
+		},
+	},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Get",
+			Handler:       _MembussNode_Get_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "membuss.proto",
 }

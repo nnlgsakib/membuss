@@ -1,4 +1,4 @@
-﻿// Wire schema for the Membuss libp2p protocols (PEX, Memex) and
+// Wire schema for the Membuss libp2p protocols (PEX, Memex) and
 // the CLI <-> daemon gRPC service.
 syntax = "proto3";
 
@@ -6,26 +6,146 @@ package membuss.v1;
 
 option go_package = "github.com/nnlgsakib/membuss/proto;membusspb";
 
-// Ping is a connectivity probe used by the CLI to verify the daemon
-// is reachable on the gRPC endpoint.
+// Node is a minimal connectivity probe used by the CLI to verify
+// the daemon is reachable on the gRPC endpoint. The full operator
+// surface lives on MembussNode below.
 service Node {
-  // Ping returns a static reply; useful for health checks and
-  // connection bring-up.
   rpc Ping(PingRequest) returns (PingResponse);
 }
 
 message PingRequest {
-  // Optional caller-supplied message echoed back in the response.
-  // Useful for round-trip checks.
   string message = 1;
 }
 
 message PingResponse {
-  // The echoed message (empty if the request had none).
   string message = 1;
-  // The daemon's build identifier (set at compile time).
   string build = 2;
 }
+
+// MembussNode is the operator-facing daemon service. The CLI
+// dials this; humans usually interact with it through membuss-cli.
+service MembussNode {
+  rpc Add(AddRequest) returns (AddResponse);
+  rpc Get(GetRequest) returns (stream GetChunk);
+  rpc Seal(SealRequest) returns (SealResponse);
+  rpc Unseal(UnsealRequest) returns (UnsealResponse);
+  rpc Stat(StatRequest) returns (StatResponse);
+  rpc Peers(PeersRequest) returns (PeersResponse);
+  rpc DHTPeek(DHTPeekRequest) returns (DHTPeekResponse);
+  rpc GC(GCRequest) returns (GCResponse);
+  rpc AnchorStatus(AnchorStatusRequest) returns (AnchorStatusResponse);
+}
+
+message AddRequest {
+  string path = 1;
+  string chunker = 2;
+  uint32 chunk_size = 3;
+  bool no_seal = 4;
+}
+
+message AddResponse {
+  string mid = 1;
+  uint64 size = 2;
+  uint64 blocks = 3;
+  bool sealed = 4;
+}
+
+message GetRequest {
+  string mid = 1;
+  uint64 offset = 2;
+  uint64 limit = 3;
+}
+
+message GetChunk {
+  bytes data = 1;
+  uint64 index = 2;
+  uint64 total = 3;
+}
+
+message SealRequest {
+  string mid = 1;
+  bool recursive = 2;
+}
+
+message SealResponse {
+  uint64 pinned = 1;
+  bool already = 2;
+}
+
+message UnsealRequest {
+  string mid = 1;
+}
+
+message UnsealResponse {
+  uint64 removed = 1;
+}
+
+message StatRequest {
+  string mid = 1;
+}
+
+message StatResponse {
+  bool present = 1;
+  uint64 size = 2;
+  uint64 blocks = 3;
+  bool sealed = 4;
+  uint64 codec = 5;
+  ErasureInfo erasure = 6;
+}
+
+message ErasureInfo {
+  uint32 data_shards = 1;
+  uint32 parity_shards = 2;
+  repeated string shard_mids = 3;
+}
+
+// NodePeerInfo is the gRPC-facing peer descriptor used by the
+// Peers and DHTPeek RPCs. The libp2p wire-level PeerInfo (used
+// by PEX) is defined further below.
+message NodePeerInfo {
+  string peer_id = 1;
+  repeated string addrs = 2;
+}
+
+message PeersRequest {
+  uint32 limit = 1;
+}
+
+message PeersResponse {
+  repeated NodePeerInfo peers = 1;
+  uint32 total = 2;
+}
+
+message DHTPeekRequest {
+  string mid = 1;
+  uint32 limit = 2;
+}
+
+message DHTPeekResponse {
+  repeated NodePeerInfo providers = 1;
+}
+
+message GCRequest {
+  bool all = 1;
+}
+
+message GCResponse {
+  uint64 bytes_freed = 1;
+  uint64 blocks_kept = 2;
+}
+
+message AnchorStatusRequest {}
+
+message AnchorStatusResponse {
+  string peer_id = 1;
+  int64 uptime_seconds = 2;
+  int64 blocks_held = 3;
+  int32 anchors = 4;
+  int32 backlog = 5;
+  int64 synced = 6;
+}
+
+// --- libp2p wire types (used by PEX and Memex) ---
 
 // Block is a single chunk of content, addressed by its MID.
 message Block {
@@ -60,53 +180,27 @@ message ErasureManifest {
 
 // PeerInfo is one entry in a PEX gossip payload.
 message PeerInfo {
-  // The peer ID (string form).
   string peer_id = 1;
-  // Multiaddrs the peer is reachable at.
   repeated string addrs = 2;
-  // Wall-clock time the peer was last seen, in seconds since
-  // the Unix epoch. Receivers use this to age out stale entries.
   int64 last_seen = 3;
 }
 
 // PEXMessage is the body of a /membuss/pex/1.0.0 gossip frame.
-// It carries a batch of PeerInfo entries.
 message PEXMessage {
-  // Sender's view of the network, up to 256 entries.
   repeated PeerInfo peers = 1;
 }
 
-// WantEntry is one entry in a Memex want list. A requester
-// asks a provider for a specific MID; the provider responds
-// with the corresponding Block (or signals "don't have").
+// WantEntry is one entry in a Memex want list.
 message WantEntry {
-  // The MID being requested. String form for protobuf
-  // compatibility.
   string mid = 1;
-  // Higher-priority wants are serviced first by the provider.
   int32 priority = 2;
-  // If true, the provider MUST reply with a have_mid entry
-  // even if it does not have the block, so the requester
-  // can move on quickly.
   bool send_dont_have = 3;
 }
 
 // MemexMessage is the body of a /membuss/memex/1.0.0 frame.
-// A single bidirectional stream may carry any combination of
-// these four sections; the requester may pipeline wants and
-// the responder may pipeline blocks. The session ends when
-// the requester's want list is empty and the stream is
-// closed.
 message MemexMessage {
-  // New wants the sender is asking for.
   repeated WantEntry wants = 1;
-  // Blocks the sender is delivering in response to prior wants.
   repeated Block blocks = 2;
-  // MIDs the sender has. When present alongside blocks,
-  // have_mids[i] corresponds to blocks[i]. When sent on its
-  // own (send_dont_have semantics), it indicates a MID the
-  // responder does NOT have.
   repeated string have_mids = 3;
-  // MIDs the sender no longer wants.
   repeated string cancel = 4;
 }
