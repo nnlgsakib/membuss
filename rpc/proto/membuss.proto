@@ -1,4 +1,5 @@
-// Phase 0 wire schema for the CLI <-> daemon gRPC service.
+﻿// Phase 1 wire schema for the CLI <-> daemon gRPC service and the
+// core content-addressed primitives.
 //
 // Real RPCs (Add, Seal, Resolve, Provide, etc.) are added in later
 // phases. This file exists so that the codegen pipeline and the
@@ -28,4 +29,28 @@ message PingResponse {
   string message = 1;
   // The daemon's build identifier (set at compile time).
   string build = 2;
+}
+
+// Block is a single chunk of content, addressed by its MID.
+message Block {
+  // Raw bytes of the chunk.
+  bytes data = 1;
+  // MID of this block (mem-prefixed multibase multihash string).
+  string mid = 2;
+  // Size in bytes of the data payload.
+  uint64 size = 3;
+}
+
+// DAGNode is one node in a Merkle DAG.
+//
+// Leaf nodes carry inline `data` and have empty `links`. Internal
+// nodes carry only `links` to their child MIDs. The `mid` field is
+// the MID of this node (derived from `links` and `data`).
+message DAGNode {
+  // MIDs of the children of this node, in order.
+  repeated string links = 1;
+  // Inline data for leaf nodes; empty for internal nodes.
+  bytes data = 2;
+  // MID of this node (mem-prefixed multibase multihash string).
+  string mid = 3;
 }
