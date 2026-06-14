@@ -18,14 +18,19 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/nnlgsakib/membuss/api"
+	memgate "github.com/nnlgsakib/membuss/gateway/memgate"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
@@ -167,6 +172,21 @@ func main() {
 	}
 	defer grpcSrv.GracefulStop()
 	fmt.Fprintf(os.Stdout, "  grpc_addr:      %s\n", cfg.GRPCAddr)
+	// 9) Mem-Gate: public HTTP gateway + CDN edge.
+	gateSrv, err := startGateway(cfg.GatewayAddr, newMemgateAdapter(backend))
+	if err != nil {
+		log.Fatalf("membuss: gateway: %v", err)
+	}
+	defer gateSrv.Close()
+	fmt.Fprintf(os.Stdout, "  gateway_addr:   %s\n", gateSrv.Addr())
+
+	// 10) Node API: local control plane over HTTP/JSON.
+	apiSrv, err := startNodeAPI(cfg.APIAddr, newAPIAdapter(backend))
+	if err != nil {
+		log.Fatalf("membuss: api: %v", err)
+	}
+	defer apiSrv.Close()
+	fmt.Fprintf(os.Stdout, "  api_addr:       %s\n", apiSrv.Addr())
 
 	// Wait for SIGINT/SIGTERM.
 	sigCh := make(chan os.Signal, 1)
@@ -184,8 +204,7 @@ func banner(cfg *config.Config, cfgPath string, inMemory, noAnchor bool) {
 			"  in_memory:        %t\n"+
 			"  no_anchor:        %t\n"+
 			"  bootstrap_peers:  %d\n"+
-			"  gateway_addr:     %s\n"+
-			"  api_addr:         %s\n"+
+			"  http_cfg_addrs:   gateway=%s api=%s\n"+
 			"  reprovide:        %s\n",
 		cfgPath, cfg.DataDir, inMemory, noAnchor,
 		len(cfg.BootstrapPeers),
@@ -276,3 +295,92 @@ func newServerGRPC() *serverGRPC {
 }
 
 func (s *serverGRPC) GracefulStop() { s.gsrv.GracefulStop() }
+
+// startGateway brings up the public Mem-Gate HTTP server
+// and returns a handle the caller can Close to shut it
+// down. The handler is mounted at "/".
+func startGateway(addr string, b memgate.Backend) (*httpServer, error) {
+	mg, err := memgate.New(memgate.Config{
+		Backend:       b,
+		MaxCacheBytes: 64 << 20, // 64 MiB LRU
+	})
+	if err != nil {
+		return nil, fmt.Errorf("memgate: %w", err)
+	}
+	return startHTTP(addr, "membuss-gateway", mg.Handler())
+}
+
+// startNodeAPI brings up the local Node control API. The
+// handler is mounted at "/api/v1" by api.Handler.
+func startNodeAPI(addr string, b api.Backend) (*httpServer, error) {
+	nodeAPI, err := api.New(api.Config{
+		Backend:        b,
+		MaxUploadBytes: 1 << 30, // 1 GiB
+	})
+	if err != nil {
+		return nil, fmt.Errorf("nodeapi: %w", err)
+	}
+	return startHTTP(addr, "membuss-api", nodeAPI.Handler())
+}
+
+// startHTTP binds an http.Handler to addr in a goroutine
+// and returns a handle whose Close method does a graceful
+// shutdown. A non-ErrServerClosed error from Serve is
+// logged.
+func startHTTP(addr, name string, h http.Handler) (*httpServer, error) {
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      h,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 5 * time.Minute,
+		IdleTimeout:  2 * time.Minute,
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen %s: %w", addr, err)
+	}
+	hs := &httpServer{name: name, srv: srv, ln: ln, boundAddr: ln.Addr().String()}
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("%s: serve: %v", name, err)
+		}
+	}()
+	return hs, nil
+}
+
+// httpServer is a thin wrapper around http.Server that
+// remembers its bound listener and a friendly name for
+// logs. Close performs a 5s graceful shutdown.
+type httpServer struct {
+	name string
+	srv  *http.Server
+	ln   net.Listener
+
+	// boundAddr is the address the OS assigned to the
+	// listener. Captured at startHTTP time and stable
+	// for the lifetime of the listener (useful when the
+	// caller passed ":0" and needs the resolved port).
+	boundAddr string
+}
+
+// Addr returns the address the server is listening on.
+// When the configured addr was ":0" the returned
+// string contains the OS-assigned port.
+func (h *httpServer) Addr() string {
+	if h == nil || h.ln == nil {
+		return ""
+	}
+	return h.ln.Addr().String()
+}
+
+// Close performs a graceful shutdown with a 5s budget.
+func (h *httpServer) Close() {
+	if h == nil || h.srv == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.srv.Shutdown(ctx); err != nil {
+		log.Printf("%s: shutdown: %v", h.name, err)
+	}
+}
