@@ -1,9 +1,5 @@
-﻿// Phase 1 wire schema for the CLI <-> daemon gRPC service and the
+﻿// Phase 1+ wire schema for the CLI <-> daemon gRPC service and the
 // core content-addressed primitives.
-//
-// Real RPCs (Add, Seal, Resolve, Provide, etc.) are added in later
-// phases. This file exists so that the codegen pipeline and the
-// go_package layout are exercised end-to-end from day one.
 syntax = "proto3";
 
 package membuss.v1;
@@ -53,4 +49,35 @@ message DAGNode {
   bytes data = 2;
   // MID of this node (mem-prefixed multibase multihash string).
   string mid = 3;
+}
+
+// Shard is one erasure-coded shard of a block. The shard's
+// payload is the raw bytes produced by Reed-Solomon; the MID is
+// its content identifier (shard-MID).
+message Shard {
+  // Raw bytes of the shard payload.
+  bytes data = 1;
+  // MID of this shard (mem-prefixed multibase multihash string).
+  string mid = 2;
+  // Index of this shard in the original block's shard matrix
+  // (0..data_shards+parity_shards-1).
+  uint32 index = 3;
+  // MID of the original block this shard was derived from.
+  string original_mid = 4;
+}
+
+// ErasureManifest is stored under the original block's MID in
+// the Mem-Store. It tells the decoder how many data and parity
+// shards were produced and which shard MIDs hold them.
+message ErasureManifest {
+  // MID of the original block (mem-prefixed string).
+  string original_mid = 1;
+  // Number of data shards produced (k).
+  uint32 data_shards = 2;
+  // Number of parity shards produced (m).
+  uint32 parity_shards = 3;
+  // MID of every shard, in index order (0..k+m-1).
+  repeated string shard_mids = 4;
+  // Size in bytes of the original block.
+  uint64 original_size = 5;
 }
