@@ -1,0 +1,173 @@
+﻿package memex
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"io"
+	"testing"
+	"time"
+
+	"github.com/libp2p/go-libp2p"
+	"github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/p2p/security/noise"
+	libp2pquic "github.com/libp2p/go-libp2p/p2p/transport/quic"
+	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
+	"github.com/multiformats/go-multiaddr"
+
+	"github.com/nnlgsakib/membuss/core/chunk"
+	"github.com/nnlgsakib/membuss/core/dag"
+	"github.com/nnlgsakib/membuss/core/mid"
+	"github.com/nnlgsakib/membuss/core/store"
+)
+
+func newTestHost(t *testing.T) host.Host {
+	t.Helper()
+	priv, _, err := crypto.GenerateEd25519Key(rand.Reader)
+	if err != nil {
+		t.Fatalf("gen key: %v", err)
+	}
+	tcpAddr, _ := multiaddr.NewMultiaddr("/ip4/127.0.0.1/tcp/0")
+	quicAddr, _ := multiaddr.NewMultiaddr("/ip4/127.0.0.1/udp/0/quic-v1")
+	h, err := libp2p.New(
+		libp2p.Identity(priv),
+		libp2p.ListenAddrs(tcpAddr, quicAddr),
+		libp2p.Transport(tcp.NewTCPTransport),
+		libp2p.Transport(libp2pquic.NewTransport),
+		libp2p.Security(noise.ID, noise.New),
+	)
+	if err != nil {
+		t.Fatalf("libp2p.New: %v", err)
+	}
+	return h
+}
+
+func newTestEngine(t *testing.T, h host.Host) (*Engine, *store.Memstore) {
+	t.Helper()
+	bs := store.NewMemstore()
+	eng, err := New(Config{Host: h, Blockstore: bs})
+	if err != nil {
+		t.Fatalf("memex.New: %v", err)
+	}
+	eng.Start()
+	t.Cleanup(eng.Stop)
+	return eng, bs
+}
+
+func makeContent(t *testing.T, n int) []byte {
+	t.Helper()
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte(i >> 16)
+	}
+	return b
+}
+
+func buildDAG(t *testing.T, content []byte, bs store.Blockstore) string {
+	t.Helper()
+	factory := chunk.NewFixed(256 * 1024)
+	ch, err := factory(bytes.NewReader(content))
+	if err != nil {
+		t.Fatalf("chunker: %v", err)
+	}
+	root, err := dag.NewBuilder(bs).Build(ch)
+	if err != nil {
+		t.Fatalf("dag build: %v", err)
+	}
+	return root.String()
+}
+
+// TestMemex_5MBRoundTrip is the headline integration test:
+// node A seals a 5MB file, node B requests the root MID, the
+// fetched bytes must match the original.
+func TestMemex_5MBRoundTrip(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	content := makeContent(t, 5*1024*1024)
+	sum := sha256.Sum256(content)
+
+	hA := newTestHost(t)
+	t.Cleanup(func() { _ = hA.Close() })
+	_, bsA := newTestEngine(t, hA)
+	rootStr := buildDAG(t, content, bsA)
+	if bsA.Len() < 20 {
+		t.Fatalf("provider blockstore unexpectedly small: %d", bsA.Len())
+	}
+
+	hB := newTestHost(t)
+	t.Cleanup(func() { _ = hB.Close() })
+	engB, _ := newTestEngine(t, hB)
+
+	if err := hA.Connect(ctx, peer.AddrInfo{ID: hB.ID(), Addrs: hB.Addrs()}); err != nil {
+		t.Fatalf("hA connect hB: %v", err)
+	}
+	if err := hB.Connect(ctx, peer.AddrInfo{ID: hA.ID(), Addrs: hA.Addrs()}); err != nil {
+		t.Fatalf("hB connect hA: %v", err)
+	}
+
+	root, err := mid.Parse(rootStr)
+	if err != nil {
+		t.Fatalf("parse root: %v", err)
+	}
+
+	sess, err := NewSession(SessionConfig{
+		Engine:    engB,
+		Root:      root,
+		Providers: []peer.AddrInfo{{ID: hA.ID(), Addrs: hA.Addrs()}},
+		Timeout:   45 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	rc, err := sess.Fetch(ctx)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(got) != len(content) {
+		t.Fatalf("len mismatch: got %d want %d", len(got), len(content))
+	}
+	if sha256.Sum256(got) != sum {
+		t.Fatalf("content mismatch")
+	}
+}
+
+// TestMemex_ServerHandlesEmptyStream ensures a peer opening a
+// stream and immediately closing it does not panic the
+// engine.
+func TestMemex_ServerHandlesEmptyStream(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	hA := newTestHost(t)
+	hB := newTestHost(t)
+	t.Cleanup(func() { _ = hA.Close(); _ = hB.Close() })
+	newTestEngine(t, hA)
+	newTestEngine(t, hB)
+
+	if err := hB.Connect(ctx, peer.AddrInfo{ID: hA.ID(), Addrs: hA.Addrs()}); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	stream, err := hB.NewStream(ctx, hA.ID(), ProtocolID)
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+	defer stream.Close()
+	_ = stream.SetDeadline(time.Now().Add(5 * time.Second))
+
+	// Server should close without sending anything.
+	buf := make([]byte, 1)
+	_, err = stream.Read(buf)
+	if err == nil {
+		t.Fatal("expected EOF, got nil")
+	}
+}

@@ -1,5 +1,5 @@
-﻿// Phase 4 wire schema for the libp2p-based PEX gossip protocol
-// and the CLI <-> daemon gRPC service.
+﻿// Wire schema for the Membuss libp2p protocols (PEX, Memex) and
+// the CLI <-> daemon gRPC service.
 syntax = "proto3";
 
 package membuss.v1;
@@ -74,4 +74,39 @@ message PeerInfo {
 message PEXMessage {
   // Sender's view of the network, up to 256 entries.
   repeated PeerInfo peers = 1;
+}
+
+// WantEntry is one entry in a Memex want list. A requester
+// asks a provider for a specific MID; the provider responds
+// with the corresponding Block (or signals "don't have").
+message WantEntry {
+  // The MID being requested. String form for protobuf
+  // compatibility.
+  string mid = 1;
+  // Higher-priority wants are serviced first by the provider.
+  int32 priority = 2;
+  // If true, the provider MUST reply with a have_mid entry
+  // even if it does not have the block, so the requester
+  // can move on quickly.
+  bool send_dont_have = 3;
+}
+
+// MemexMessage is the body of a /membuss/memex/1.0.0 frame.
+// A single bidirectional stream may carry any combination of
+// these four sections; the requester may pipeline wants and
+// the responder may pipeline blocks. The session ends when
+// the requester's want list is empty and the stream is
+// closed.
+message MemexMessage {
+  // New wants the sender is asking for.
+  repeated WantEntry wants = 1;
+  // Blocks the sender is delivering in response to prior wants.
+  repeated Block blocks = 2;
+  // MIDs the sender has. When present alongside blocks,
+  // have_mids[i] corresponds to blocks[i]. When sent on its
+  // own (send_dont_have semantics), it indicates a MID the
+  // responder does NOT have.
+  repeated string have_mids = 3;
+  // MIDs the sender no longer wants.
+  repeated string cancel = 4;
 }
