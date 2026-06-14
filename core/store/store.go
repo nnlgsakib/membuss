@@ -8,6 +8,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"sync"
 
@@ -21,25 +22,10 @@ var ErrNotFound = errors.New("store: block not found")
 // Blockstore is the interface a DAG builder / resolver reads and
 // writes blocks through. Implementations MUST be safe for
 // concurrent use.
-//
-// Put and Get take and return raw bytes; the MID is the
-// integrity-checked address.
 type Blockstore interface {
-	// Put stores data under the given MID. The data is
-	// integrity-checked: the SHA-256 digest of data MUST match
-	// the MID's digest, otherwise Put returns an error and no
-	// data is stored.
 	Put(m mid.MID, data []byte) error
-
-	// Get returns the bytes stored under m. It returns
-	// ErrNotFound if the block is not present.
 	Get(m mid.MID) ([]byte, error)
-
-	// Has reports whether a block is present.
 	Has(m mid.MID) (bool, error)
-
-	// Delete removes the block. It is not an error to delete a
-	// missing block.
 	Delete(m mid.MID) error
 }
 
@@ -49,6 +35,12 @@ type Blockstore interface {
 type Memstore struct {
 	mu     sync.RWMutex
 	blocks map[string][]byte
+
+	metaMu sync.RWMutex
+	meta   map[string][]byte
+
+	sealsMu sync.RWMutex
+	seals   map[string]struct{}
 }
 
 // NewMemstore returns an empty in-memory Blockstore.
@@ -56,8 +48,6 @@ func NewMemstore() *Memstore {
 	return &Memstore{blocks: make(map[string][]byte)}
 }
 
-// Put stores a copy of data under the MID after verifying the
-// integrity check (data hashes to MID).
 func (m *Memstore) Put(mid mid.MID, data []byte) error {
 	if err := verifyContent(mid, data); err != nil {
 		return err
@@ -70,7 +60,6 @@ func (m *Memstore) Put(mid mid.MID, data []byte) error {
 	return nil
 }
 
-// Get returns a defensive copy of the bytes stored under mid.
 func (m *Memstore) Get(mid mid.MID) ([]byte, error) {
 	m.mu.RLock()
 	b, ok := m.blocks[mid.String()]
@@ -83,7 +72,6 @@ func (m *Memstore) Get(mid mid.MID) ([]byte, error) {
 	return out, nil
 }
 
-// Has reports whether a block is present.
 func (m *Memstore) Has(mid mid.MID) (bool, error) {
 	m.mu.RLock()
 	_, ok := m.blocks[mid.String()]
@@ -91,7 +79,6 @@ func (m *Memstore) Has(mid mid.MID) (bool, error) {
 	return ok, nil
 }
 
-// Delete removes the block. Missing blocks are not an error.
 func (m *Memstore) Delete(mid mid.MID) error {
 	m.mu.Lock()
 	delete(m.blocks, mid.String())
@@ -99,11 +86,112 @@ func (m *Memstore) Delete(mid mid.MID) error {
 	return nil
 }
 
-// Len returns the number of blocks currently stored. It is intended
-// for tests and metrics; production code MUST NOT rely on it for
-// correctness.
+// AllSealed is a no-op on the in-memory store. It is part of
+// the herald SealedLister interface.
+func (m *Memstore) AllSealed() ([]mid.MID, error) {
+	return nil, nil
+}
+
+// AllBlocks returns every MID currently held in the in-memory
+// store. The order is unspecified.
+func (m *Memstore) AllBlocks() ([]mid.MID, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]mid.MID, 0, len(m.blocks))
+	for k := range m.blocks {
+		midID, err := mid.Parse(k)
+		if err != nil {
+			continue
+		}
+		out = append(out, midID)
+	}
+	return out, nil
+}
+
+// PutMeta stores a metadata key/value pair. The in-memory
+// store keeps meta in a side map so that PutMeta/GetMeta do
+// not interfere with content-addressed blocks.
+func (m *Memstore) PutMeta(key string, value []byte) error {
+	m.metaMu.Lock()
+	if m.meta == nil {
+		m.meta = make(map[string][]byte)
+	}
+	cp := make([]byte, len(value))
+	copy(cp, value)
+	m.meta[key] = cp
+	m.metaMu.Unlock()
+	return nil
+}
+
+// GetMeta returns a metadata value or ErrNotFound.
+func (m *Memstore) GetMeta(key string) ([]byte, error) {
+	m.metaMu.RLock()
+	v, ok := m.meta[key]
+	m.metaMu.RUnlock()
+	if !ok {
+		return nil, ErrNotFound
+	}
+	out := make([]byte, len(v))
+	copy(out, v)
+	return out, nil
+}
+
+// Size returns the approximate number of bytes held by
+// the store. For the in-memory store we approximate by
+// the sum of block sizes.
+func (m *Memstore) Size() (uint64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var n uint64
+	for _, b := range m.blocks {
+	n += uint64(len(b))
+	}
+	return n, nil
+}
+
+// Close releases any resources held by the store. The
+// in-memory store has nothing to release, so it is a
+// no-op. It is part of the store.Store interface so the
+// in-memory and BadgerDB implementations are drop-in.
+func (m *Memstore) Close() error { return nil }
+
+// Len returns the number of blocks currently stored. It is
+// intended for tests and metrics.
 func (m *Memstore) Len() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.blocks)
+}
+// Seal records a seal for the given MID. The in-memory
+// store does not enforce GC, but a seal record is needed
+// for tests and for the herald roots strategy.
+func (m *Memstore) Seal(root mid.MID, recursive bool) error {
+	m.sealsMu.Lock()
+	if m.seals == nil {
+		m.seals = make(map[string]struct{})
+	}
+	m.seals[root.String()] = struct{}{}
+	m.sealsMu.Unlock()
+	return nil
+}
+
+// Unseal removes a seal record.
+func (m *Memstore) Unseal(root mid.MID) error {
+	m.sealsMu.Lock()
+	delete(m.seals, root.String())
+	m.sealsMu.Unlock()
+	return nil
+}
+
+// IsSealed reports whether a direct seal record exists.
+func (m *Memstore) IsSealed(root mid.MID) (bool, error) {
+	m.sealsMu.RLock()
+	_, ok := m.seals[root.String()]
+	m.sealsMu.RUnlock()
+	return ok, nil
+}
+
+// GC is a no-op on the in-memory store.
+func (m *Memstore) GC(ctx context.Context) (uint64, error) {
+	return 0, nil
 }

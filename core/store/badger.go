@@ -59,6 +59,22 @@ type Store interface {
 	// Order is implementation-defined.
 	AllSealed() ([]mid.MID, error)
 
+	// AllBlocks returns every MID that has a block or DAG
+	// record in the store. Order is implementation-defined.
+	// This powers the herald's "all" strategy and the anchor
+	// engine's status reporter.
+	AllBlocks() ([]mid.MID, error)
+
+	// PutMeta stores an arbitrary key/value pair under the /m/
+	// namespace. Meta records are independent of blocks and
+	// DAG nodes; they are not part of the content-addressed
+	// data set and are never deleted by GC.
+	PutMeta(key string, value []byte) error
+
+	// GetMeta returns the value previously stored under key, or
+	// ErrNotFound if absent.
+	GetMeta(key string) ([]byte, error)
+
 	// GC walks every sealed DAG root, collects the reachable
 	// MID set, and deletes every key in the store that is NOT
 	// in that set. It returns the number of bytes freed (sum of
@@ -387,6 +403,45 @@ func bytesEqual(a, b []byte) bool {
 		}
 	}
 	return true
+}
+
+
+// AllBlocks returns every MID that has a block or DAG record
+// in the store. The result is the union of the /b/ and /d/
+// namespaces, deduplicated. Order is implementation-defined.
+func (s *MemStore) AllBlocks() ([]mid.MID, error) {
+	if s.db == nil {
+		return nil, errors.New("store: closed")
+	}
+	seen := make(map[string]struct{})
+	var out []mid.MID
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for _, prefix := range [][]byte{[]byte(prefixBlock), []byte(prefixDAG)} {
+			for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+				raw := append([]byte(nil), it.Item().Key()...)
+				raw = raw[len(prefix):]
+				m, err := mid.FromMultihash(mid.CodecRaw, raw)
+				if err != nil {
+					continue
+				}
+				key := m.String()
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
+				out = append(out, m)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: all blocks: %w", err)
+	}
+	return out, nil
 }
 
 // PutMeta stores an arbitrary key/value pair under the "/m/"

@@ -1,0 +1,174 @@
+package herald
+
+import (
+	"context"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/nnlgsakib/membuss/core/mid"
+)
+
+// fakeStore is a tiny in-memory SealedLister.
+type fakeStore struct {
+	mu     sync.Mutex
+	sealed []mid.MID
+	blocks []mid.MID
+}
+
+func (f *fakeStore) AllSealed() ([]mid.MID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]mid.MID, len(f.sealed))
+	copy(out, f.sealed)
+	return out, nil
+}
+
+func (f *fakeStore) AllBlocks() ([]mid.MID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]mid.MID, len(f.blocks))
+	copy(out, f.blocks)
+	return out, nil
+}
+
+func (f *fakeStore) Seal(m mid.MID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sealed = append(f.sealed, m)
+}
+
+func (f *fakeStore) AddBlock(m mid.MID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blocks = append(f.blocks, m)
+}
+
+// fakeProvider records every Provide call.
+type fakeProvider struct {
+	mu       sync.Mutex
+	provided []mid.MID
+}
+
+func (p *fakeProvider) Provide(ctx context.Context, m mid.MID) error {
+	p.mu.Lock()
+	p.provided = append(p.provided, m)
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *fakeProvider) Count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.provided)
+}
+
+func TestHerald_ReprovideSealed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	store := &fakeStore{}
+	store.Seal(mid.FromBytes([]byte("hello")))
+	store.Seal(mid.FromBytes([]byte("world")))
+
+	prov := &fakeProvider{}
+	h, err := New(Config{
+		Store:    store,
+		DHT:      prov,
+		Strategy: StrategyRoots,
+		Interval: time.Hour,
+		Rate:     1000, // no throttling in test
+		Burst:    32,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	n := h.RunOnce(ctx)
+	if n != 2 {
+		t.Fatalf("RunOnce: got %d, want 2", n)
+	}
+	if prov.Count() != 2 {
+		t.Fatalf("Provide count: got %d, want 2", prov.Count())
+	}
+	if h.LastCount() != 2 {
+		t.Fatalf("LastCount: got %d, want 2", h.LastCount())
+	}
+	if h.LastRun().IsZero() {
+		t.Fatal("LastRun should be set after RunOnce")
+	}
+}
+
+func TestHerald_StrategyAll(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	store := &fakeStore{}
+	store.AddBlock(mid.FromBytes([]byte("root")))
+	store.AddBlock(mid.FromBytes([]byte("block-1")))
+	store.AddBlock(mid.FromBytes([]byte("block-2")))
+
+	prov := &fakeProvider{}
+	h, err := New(Config{
+		Store:    store,
+		DHT:      prov,
+		Strategy: StrategyAll,
+		Interval: time.Hour,
+		Rate:     1000,
+		Burst:    32,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	n := h.RunOnce(ctx)
+	if n != 3 {
+		t.Fatalf("RunOnce: got %d, want 3", n)
+	}
+}
+
+func TestHerald_StartStop(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	store := &fakeStore{}
+	store.Seal(mid.FromBytes([]byte("only")))
+	prov := &fakeProvider{}
+	h, err := New(Config{
+		Store:    store,
+		DHT:      prov,
+		Strategy: StrategyRoots,
+		Interval: 50 * time.Millisecond,
+		Rate:     1000,
+		Burst:    32,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	h.Start(ctx)
+	h.Stop()
+	// Start's immediate pass should have provided at least
+	// once; the loop tick may have provided again.
+	if prov.Count() < 1 {
+		t.Fatalf("expected at least 1 provide, got %d", prov.Count())
+	}
+}
+
+func TestTokenBucket_BurstThenLimit(t *testing.T) {
+	now := time.Unix(0, 0)
+	tb := newTokenBucket(1.0, 3, func() time.Time { return now })
+
+	// First 3 should succeed (burst).
+	for i := 0; i < 3; i++ {
+		if err := tb.Wait(context.Background()); err != nil {
+			t.Fatalf("burst wait %d: %v", i, err)
+		}
+	}
+	// 4th should not be ready immediately. Use a
+	// short-deadline context to avoid hanging.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := tb.Wait(ctx); err == nil {
+		t.Fatal("expected bucket to be empty after burst")
+	}
+}
