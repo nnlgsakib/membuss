@@ -136,7 +136,7 @@ func (s *Session) Fetch(ctx context.Context) (io.Reader, error) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		t := time.NewTicker(25 * time.Millisecond)
+		t := time.NewTicker(5 * time.Millisecond)
 		defer t.Stop()
 		for {
 			if ctx.Err() != nil {
@@ -170,12 +170,11 @@ func (s *Session) Fetch(ctx context.Context) (io.Reader, error) {
 			}
 		}
 	}()
-	// Wait for the providers to finish (they exit when the
-	// session ends: pending is closed, context cancelled, or
-	// all MIDs resolved).
-	wg.Wait()
-	close(pending)
+	// When the closer signals done, we close the pending channel
+	// so the provider goroutines exit promptly.
 	<-done
+	close(pending)
+	wg.Wait()
 
 	// Final assembly.
 	if !allResolved() {
@@ -254,7 +253,6 @@ func (s *Session) readLoop(ctx context.Context, stream network.Stream, markResol
 			return ctx.Err()
 		}
 		buf := readFrame(stream)
-		fmt.Printf("read: got frame len=%d\\n", len(buf))
 		if buf == nil {
 			return nil
 		}
