@@ -11,8 +11,8 @@ import (
 	"github.com/nnlgsakib/membuss/net/memex"
 )
 
-// TestAnchor_5Node_FetchAfterProviderShutdown is the Phase 10
-// headline integration test: 5 in-process nodes, the publisher
+// TestAnchor_5Node_FetchAfterProviderShutdown is the headline
+// 5-node integration test: 5 in-process nodes, the publisher
 // adds and seals a 10 MB file, an anchor node syncs it via a
 // direct provider resolver (in-process DHT propagation between
 // hosts is unreliable), the publisher is shut down, and a third
