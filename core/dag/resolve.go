@@ -52,19 +52,17 @@ func (r *Resolver) Resolve(root mid.MID, visit func(mid.MID) error) (io.Reader, 
 // stream walks the DAG and pushes reassembled bytes into w. Any
 // error is delivered to the reader via w.CloseWithError.
 //
-// Note: cycle detection is intentionally NOT performed. DAGs are
+// Cycle detection is intentionally NOT performed. DAGs are
 // immutable and content-addressed, so a cycle can only be
 // produced by a malicious or buggy Blockstore, and a defensive
 // check would also raise false positives for legitimate content
-// that references the same byte sequence at multiple points. The
-// Blockstore is responsible for serving exactly the bytes its MID
-// names; any deviation is a corruption, not a cycle.
+// that references the same byte sequence at multiple points.
 func (r *Resolver) stream(root mid.MID, visit func(mid.MID) error, w *io.PipeWriter) {
 	defer w.Close()
 
 	var walk func(m mid.MID) error
 	walk = func(m mid.MID) error {
-		blk, err := r.bs.Get(m)
+		data, err := r.bs.Get(m)
 		if err != nil {
 			return fmt.Errorf("dag: get %s: %w", m.String(), err)
 		}
@@ -72,7 +70,7 @@ func (r *Resolver) stream(root mid.MID, visit func(mid.MID) error, w *io.PipeWri
 		// A block is an internal node iff its bytes unmarshal as
 		// a DAGNode AND the decoded form has at least one link.
 		var node membusspb.DAGNode
-		if uerr := proto.Unmarshal(blk.Data, &node); uerr == nil && len(node.Links) > 0 {
+		if uerr := proto.Unmarshal(data, &node); uerr == nil && len(node.Links) > 0 {
 			if visit != nil {
 				if err := visit(m); err != nil {
 					return err
@@ -91,7 +89,7 @@ func (r *Resolver) stream(root mid.MID, visit func(mid.MID) error, w *io.PipeWri
 		}
 
 		// Leaf: emit its raw bytes.
-		if _, err := w.Write(blk.Data); err != nil {
+		if _, err := w.Write(data); err != nil {
 			return err
 		}
 		return nil

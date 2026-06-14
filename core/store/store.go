@@ -2,13 +2,13 @@
 // reads from and writes to, plus an in-memory implementation used
 // for tests and for nodes that want ephemeral storage.
 //
-// Phase 1 ships only the interface and the memstore; Phase 2 will
-// add the BadgerDB-backed implementation.
+// Phase 1 ships the interface and the in-memory memstore.
+// Phase 2 adds the BadgerDB-backed MemStore behind the same
+// interface.
 package store
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 
 	"github.com/nnlgsakib/membuss/core/mid"
@@ -18,122 +18,77 @@ import (
 // block is not present in the store.
 var ErrNotFound = errors.New("store: block not found")
 
-// Block is the minimal block type stored by a Blockstore.
-type Block struct {
-	MID  mid.MID
-	Data []byte
-}
-
-// Clone returns a defensive copy of the block so the store can
-// hand blocks out without leaking internal state.
-func (b Block) Clone() Block {
-	if b.MID.IsZero() {
-		return Block{}
-	}
-	out := Block{MID: b.MID, Data: make([]byte, len(b.Data))}
-	copy(out.Data, b.Data)
-	return out
-}
-
 // Blockstore is the interface a DAG builder / resolver reads and
 // writes blocks through. Implementations MUST be safe for
 // concurrent use.
+//
+// Put and Get take and return raw bytes; the MID is the
+// integrity-checked address.
 type Blockstore interface {
-	// Put stores a copy of the block. The block is indexed by
-	// MID; Put returns an error if the MID's digest does not
-	// match the SHA-256 of the block's data.
-	Put(b Block) error
+	// Put stores data under the given MID. The data is
+	// integrity-checked: the SHA-256 digest of data MUST match
+	// the MID's digest, otherwise Put returns an error and no
+	// data is stored.
+	Put(m mid.MID, data []byte) error
 
-	// Get returns a defensive copy of the block addressed by m.
-	// It returns ErrNotFound if the block is not present.
-	Get(m mid.MID) (Block, error)
+	// Get returns the bytes stored under m. It returns
+	// ErrNotFound if the block is not present.
+	Get(m mid.MID) ([]byte, error)
 
 	// Has reports whether a block is present.
-	Has(m mid.MID) bool
+	Has(m mid.MID) (bool, error)
 
 	// Delete removes the block. It is not an error to delete a
 	// missing block.
 	Delete(m mid.MID) error
 }
 
-// verifyMID checks that the block's data hashes to the MID's
-// digest. We compare digests (not codec-tagged MIDs) so the same
-// store can hold both raw leaf bytes (CodecRaw) and protobuf
-// internal-node bytes (CodecDAGPB): what matters is the SHA-256
-// of the bytes, which is identical for both.
-func verifyMID(b Block) error {
-	want, err := b.MID.DigestBytes()
-	if err != nil {
-		return fmt.Errorf("store: claim MID has no digest: %w", err)
-	}
-	got := mid.FromBytes(b.Data)
-	gotDigest, err := got.DigestBytes()
-	if err != nil {
-		return fmt.Errorf("store: derive digest: %w", err)
-	}
-	if !bytesEqual(want, gotDigest) {
-		return fmt.Errorf("store: data does not hash to claimed MID %s", b.MID.String())
-	}
-	return nil
-}
-
-// bytesEqual is a constant-time byte slice compare. We use
-// crypto/subtle to avoid leaking length information through
-// timing, even though the inputs are not secrets.
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // Memstore is an in-memory Blockstore. It is safe for concurrent
-// use. Phase 2 will introduce a BadgerDB-backed implementation
-// behind the same interface.
+// use. Phase 2 introduces a BadgerDB-backed implementation
+// (MemStore) behind the same interface.
 type Memstore struct {
 	mu     sync.RWMutex
-	blocks map[string]Block
+	blocks map[string][]byte
 }
 
 // NewMemstore returns an empty in-memory Blockstore.
 func NewMemstore() *Memstore {
-	return &Memstore{blocks: make(map[string]Block)}
+	return &Memstore{blocks: make(map[string][]byte)}
 }
 
-// Put stores a copy of the block.
-func (m *Memstore) Put(b Block) error {
-	if err := verifyMID(b); err != nil {
+// Put stores a copy of data under the MID after verifying the
+// integrity check (data hashes to MID).
+func (m *Memstore) Put(mid mid.MID, data []byte) error {
+	if err := verifyContent(mid, data); err != nil {
 		return err
 	}
-	c := b.Clone()
+	cp := make([]byte, len(data))
+	copy(cp, data)
 	m.mu.Lock()
-	m.blocks[c.MID.String()] = c
+	m.blocks[mid.String()] = cp
 	m.mu.Unlock()
 	return nil
 }
 
-// Get returns a defensive copy of the block addressed by mid.
-func (m *Memstore) Get(mid mid.MID) (Block, error) {
+// Get returns a defensive copy of the bytes stored under mid.
+func (m *Memstore) Get(mid mid.MID) ([]byte, error) {
 	m.mu.RLock()
 	b, ok := m.blocks[mid.String()]
 	m.mu.RUnlock()
 	if !ok {
-		return Block{}, ErrNotFound
+		return nil, ErrNotFound
 	}
-	return b.Clone(), nil
+	out := make([]byte, len(b))
+	copy(out, b)
+	return out, nil
 }
 
 // Has reports whether a block is present.
-func (m *Memstore) Has(mid mid.MID) bool {
+func (m *Memstore) Has(mid mid.MID) (bool, error) {
 	m.mu.RLock()
 	_, ok := m.blocks[mid.String()]
 	m.mu.RUnlock()
-	return ok
+	return ok, nil
 }
 
 // Delete removes the block. Missing blocks are not an error.

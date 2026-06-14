@@ -134,7 +134,7 @@ func (b *Builder) collectLeaves(c chunk.Chunker) ([]mid.MID, error) {
 		if leafMID.IsZero() {
 			return nil, errors.New("dag: chunk has zero MID")
 		}
-		if err := b.bs.Put(store.Block{MID: leafMID, Data: blk.Data()}); err != nil {
+		if err := b.bs.Put(leafMID, blk.Data()); err != nil {
 			return nil, fmt.Errorf("dag: store leaf: %w", err)
 		}
 		leaves = append(leaves, leafMID)
@@ -167,7 +167,7 @@ func (b *Builder) reduceLevel(level []mid.MID) ([]mid.MID, error) {
 			return nil, fmt.Errorf("dag: marshal node: %w", err)
 		}
 		nodeMID := mid.FromBytes(raw)
-		if err := b.bs.Put(store.Block{MID: nodeMID, Data: raw}); err != nil {
+		if err := b.bs.Put(nodeMID, raw); err != nil {
 			return nil, fmt.Errorf("dag: store internal: %w", err)
 		}
 		parents = append(parents, nodeMID)
