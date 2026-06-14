@@ -1,0 +1,31 @@
+// Phase 0 wire schema for the CLI <-> daemon gRPC service.
+//
+// Real RPCs (Add, Seal, Resolve, Provide, etc.) are added in later
+// phases. This file exists so that the codegen pipeline and the
+// go_package layout are exercised end-to-end from day one.
+syntax = "proto3";
+
+package membuss.v1;
+
+option go_package = "github.com/nnlgsakib/membuss/proto;membusspb";
+
+// Ping is a connectivity probe used by the CLI to verify the daemon
+// is reachable on the gRPC endpoint.
+service Node {
+  // Ping returns a static reply; useful for health checks and
+  // connection bring-up.
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+message PingRequest {
+  // Optional caller-supplied message echoed back in the response.
+  // Useful for round-trip checks.
+  string message = 1;
+}
+
+message PingResponse {
+  // The echoed message (empty if the request had none).
+  string message = 1;
+  // The daemon's build identifier (set at compile time).
+  string build = 2;
+}

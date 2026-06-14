@@ -1,0 +1,34 @@
+# Default Membuss configuration.
+#
+# All fields are optional; anything you omit falls back to the safe
+# defaults compiled into the daemon. See config/config.go for the
+# authoritative default values.
+
+# libp2p multiaddrs the host binds to.
+listen_addrs:
+  - /ip4/0.0.0.0/tcp/4001
+  - /ip4/0.0.0.0/udp/4001/quic-v1
+
+# libp2p peer IDs (as multiaddrs) the DHT attempts to connect to on
+# startup. Leave empty for a fresh testnet or a single-node run.
+bootstrap_peers: []
+
+# Directory used by BadgerDB and the local block store. Created on
+# startup if it does not exist.
+data_dir: ./data
+
+# HTTP listen addresses for the public gateway and the local Node API.
+gateway_addr: 127.0.0.1:8080
+api_addr:     127.0.0.1:5001
+
+# gRPC listen address for the CLI <-> daemon transport.
+grpc_addr: 127.0.0.1:50051
+
+# When true, the Anchor Node full-sync engine mirrors all announced
+# content so it stays available when original providers go offline.
+anchor_mode: false
+
+# How often Mem-Herald re-announces this node's provider records to
+# the DHT. Accepts any value parseable by time.ParseDuration (e.g.
+# "30m", "12h", "24h").
+reprovide_interval: 12h
