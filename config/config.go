@@ -59,6 +59,31 @@ type Config struct {
 	MemexRetryBackoff RetryBackoffConfig `yaml:"memex_retry_backoff"`
 	BootstrapBackoff RetryBackoffConfig `yaml:"bootstrap_backoff"`
 	MetricsEnabled bool `yaml:"metrics_enabled"`
+
+	// --- Phase 11: NAT traversal + relay fallback ---
+
+	// RelayService enables the circuit v2 relay hop on this node so
+	// it can forward traffic for NATed peers. Anchor nodes should
+	// set this to true.
+	RelayService bool `yaml:"relay_service"`
+	// RelayMaxConns caps the number of simultaneously relayed
+	// circuits. Default 128.
+	RelayMaxConns int `yaml:"relay_max_conns"`
+	// RelayMaxReservations caps the number of active relay
+	// reservations. Default 128.
+	RelayMaxReservations int `yaml:"relay_max_reservations"`
+	// RelayBandwidthMB is the soft bandwidth cap (MB/s) the
+	// relay will budget for forwarded traffic. 0 disables the
+	// cap. Default 16.
+	RelayBandwidthMB int `yaml:"relay_bandwidth_mb"`
+	// ForceRelay, when true, makes this node always use a relay
+	// for outbound dials, skipping hole-punch. Useful for
+	// debugging.
+	ForceRelay bool `yaml:"force_relay"`
+	// NATWaitSeconds is how long the daemon waits on startup
+	// for AutoNAT to resolve reachability before continuing.
+	// Default 10s.
+	NATWaitSeconds int `yaml:"nat_wait_seconds"`
 }
 
 // TLSConfig is a pair of PEM file paths enabling HTTPS on an HTTP
@@ -112,6 +137,12 @@ func Default() *Config {
 			MaxAttempts: 0,
 		},
 		MetricsEnabled: true,
+		RelayService:         false,
+		RelayMaxConns:        128,
+		RelayMaxReservations: 128,
+		RelayBandwidthMB:     16,
+		ForceRelay:           false,
+		NATWaitSeconds:       10,
 	}
 }
 
@@ -179,6 +210,18 @@ func (c *Config) Validate() error {
 	}
 	if c.BootstrapBackoff.Factor < 1 {
 		return errors.New("bootstrap_backoff: factor must be >= 1")
+	}
+	if c.RelayMaxConns < 0 {
+		return errors.New("relay_max_conns must be >= 0")
+	}
+	if c.RelayMaxReservations < 0 {
+		return errors.New("relay_max_reservations must be >= 0")
+	}
+	if c.RelayBandwidthMB < 0 {
+		return errors.New("relay_bandwidth_mb must be >= 0")
+	}
+	if c.NATWaitSeconds < 0 {
+		return errors.New("nat_wait_seconds must be >= 0")
 	}
 	return nil
 }

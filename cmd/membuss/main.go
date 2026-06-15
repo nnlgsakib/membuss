@@ -1,4 +1,4 @@
-// Command membuss is the Membuss daemon entry point.
+﻿// Command membuss is the Membuss daemon entry point.
 //
 // Phase 7: the daemon boots the libp2p host, DHT, PEX,
 // Memex, Mem-Herald, and (optionally) the Anchor engine,
@@ -90,11 +90,25 @@ func main() {
 	}
 	defer bs.Close()
 
+	// Pre-parse bootstrap peers so the host can use them
+	// as AutoRelay static candidates.
+	bootstrapPeers, err := parsePeers(cfg.BootstrapPeers)
+	if err != nil {
+		logger.Error("parse bootstrap peers", "err", err.Error()); os.Exit(1)
+	}
+
 	// 2) libp2p host.
 	hostCfg := host.Config{
-		ListenAddrs: cfg.ListenAddrs,
-		DataDir:     cfg.DataDir,
-		UserAgent:   "membuss/" + *build,
+		ListenAddrs:       cfg.ListenAddrs,
+		DataDir:           cfg.DataDir,
+		UserAgent:         "membuss/" + *build,
+		StaticRelays:      bootstrapPeers,
+		// --- Phase 11: NAT traversal ---
+		RelayService:        cfg.RelayService,
+		RelayMaxConns:       cfg.RelayMaxConns,
+		RelayMaxReservations: cfg.RelayMaxReservations,
+		RelayBandwidthMB:    cfg.RelayBandwidthMB,
+		ForceRelay:          cfg.ForceRelay,
 	}
 	h, err := host.NewHost(hostCfg)
 	if err != nil {
@@ -103,15 +117,21 @@ func main() {
 	defer h.Close()
 	fmt.Fprintf(os.Stdout, "  peer_id:        %s\n", h.ID())
 	fmt.Fprintf(os.Stdout, "  listen_addrs:   %v\n", h.Addrs())
+	// Phase 11: wait for AutoNAT to resolve reachability.
+	wait := time.Duration(cfg.NATWaitSeconds) * time.Second
+	natStatus, natErr := h.WaitForNAT(ctx, wait)
+	if natErr != nil && !errors.Is(natErr, context.DeadlineExceeded) {
+		logger.Warn("nat wait", "err", natErr.Error())
+	}
+	fmt.Fprintf(os.Stdout, "  nat_status:     %s\n", natStatus)
+	if natStatus == "private" {
+		logger.Info("node is behind a NAT; relay addresses will be advertised")
+	}
 
 	// 3) DHT.
 	mdht, err := dht.New(ctx, dht.Config{Host: h})
 	if err != nil {
 		logger.Error("dht", "err", err.Error()); os.Exit(1)
-	}
-	bootstrapPeers, err := parsePeers(cfg.BootstrapPeers)
-	if err != nil {
-		logger.Error("parse bootstrap peers", "err", err.Error()); os.Exit(1)
 	}
 	if err := mdht.Bootstrap(ctx, bootstrapPeers); err != nil {
 		logger.Warn("dht bootstrap", "err", err.Error())
@@ -148,6 +168,24 @@ func main() {
 	}
 	hd.Start(ctx)
 	defer hd.Stop()
+
+	// Phase 11: relay announcer. Only wired when the
+	// node runs the relay service; other nodes just
+	// consume the DHT relay list when they bootstrap.
+	var relayAnnouncer *herald.RelayAnnouncer
+	if cfg.RelayService {
+		relayAnnouncer, err = herald.NewRelayAnnouncer(herald.RelayAnnouncer{
+			DHT:      mdht,
+			Interval: cfg.ReprovideInterval,
+			Logger:   logger,
+		})
+		if err != nil {
+			logger.Error("relay announcer", "err", err.Error()); os.Exit(1)
+		}
+		relayAnnouncer.Start(ctx)
+		defer func() { _ = relayAnnouncer }()
+		fmt.Fprintf(os.Stdout, "  relay_service:  enabled\n")
+	}
 
 	// 7) Optional Anchor engine.
 	var anchorEng *anchor.AnchorEngine
