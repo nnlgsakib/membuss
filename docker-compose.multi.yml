@@ -1,0 +1,142 @@
+# Membuss - multi-node docker compose (Phase 17 smoke test).
+#
+# Three daemons on a private user-defined bridge network with
+# explicit port publishing, suitable for Docker Desktop on
+# Windows / macOS (where `network_mode: host` is a no-op
+# because the daemon runs in a Linux VM).
+#
+# Each node:
+#   * unique data volume + identity (membuss-cli init runs on
+#     first boot via the static-Go entrypoint shim)
+#   * unique host-port mappings so all three can run
+#     side-by-side on one host
+#   * MEMBUSS_MDNS=true so libp2p peers auto-discover each
+#     other on the bridge. Docker's default bridge does
+#     forward multicast on user-defined networks, so mDNS
+#     (224.0.0.251) reaches the other containers.
+#
+# Usage:
+#   docker compose -f docker-compose.multi.yml build
+#   docker compose -f docker-compose.multi.yml up -d
+#   docker compose -f docker-compose.multi.yml ps
+#   docker compose -f docker-compose.multi.yml logs -f membuss-1
+#
+# Browse from the host (Windows / macOS / Linux):
+#   http://localhost:18080/explorer/   (node 1)
+#   http://localhost:18081/explorer/   (node 2)
+#   http://localhost:18082/explorer/   (node 3)
+#
+# Add a file on node 1 and read it on node 2 (mDNS handles
+# peer discovery; the cross-node get uses the DHT provider
+# record that Mem-Herald publishes):
+#   docker compose -f docker-compose.multi.yml exec -T membuss-1 \
+#     membuss-cli --addr 127.0.0.1:15051 add /etc/hostname
+#   # copy the printed MID, then on the host:
+#   docker compose -f docker-compose.multi.yml exec -T membuss-2 \
+#     membuss-cli --addr 127.0.0.1:15052 get <MID>
+#
+# Stop & wipe:
+#   docker compose -f docker-compose.multi.yml down -v
+services:
+  membuss-1:
+    image: membuss:local
+    container_name: membuss-1
+    hostname: membuss-1
+    restart: unless-stopped
+    ports:
+      - "14001:4001/tcp"
+      - "14001:4001/udp"
+      - "15001:5001/tcp"
+      - "15051:50051/tcp"
+      - "18080:8080/tcp"
+    volumes:
+      - membuss-data-1:/var/lib/membuss
+    environment:
+      MEMBUSS_DATA_DIR:     "/var/lib/membuss"
+      MEMBUSS_LISTEN_ADDRS: "/ip4/0.0.0.0/tcp/4001,/ip4/0.0.0.0/udp/4001/quic-v1"
+      MEMBUSS_GATEWAY_ADDR: "0.0.0.0:8080"
+      MEMBUSS_API_ADDR:     "0.0.0.0:5001"
+      MEMBUSS_GRPC_ADDR:    "0.0.0.0:50051"
+      MEMBUSS_MDNS:         "true"
+      MEMBUSS_BOOTSTRAP_PEERS: ""
+      MEMBUSS_LOG_LEVEL:    "info"
+      MEMBUSS_NO_ANCHOR:    "true"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/membuss-cli", "--addr", "127.0.0.1:50051", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  membuss-2:
+    image: membuss:local
+    container_name: membuss-2
+    hostname: membuss-2
+    restart: unless-stopped
+    ports:
+      - "14002:4001/tcp"
+      - "14002:4001/udp"
+      - "15002:5001/tcp"
+      - "15052:50051/tcp"
+      - "18081:8080/tcp"
+    volumes:
+      - membuss-data-2:/var/lib/membuss
+    environment:
+      MEMBUSS_DATA_DIR:     "/var/lib/membuss"
+      MEMBUSS_LISTEN_ADDRS: "/ip4/0.0.0.0/tcp/4001,/ip4/0.0.0.0/udp/4001/quic-v1"
+      MEMBUSS_GATEWAY_ADDR: "0.0.0.0:8080"
+      MEMBUSS_API_ADDR:     "0.0.0.0:5001"
+      MEMBUSS_GRPC_ADDR:    "0.0.0.0:50051"
+      MEMBUSS_MDNS:         "true"
+      MEMBUSS_BOOTSTRAP_PEERS: ""
+      MEMBUSS_LOG_LEVEL:    "info"
+      MEMBUSS_NO_ANCHOR:    "true"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/membuss-cli", "--addr", "127.0.0.1:50051", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  membuss-3:
+    image: membuss:local
+    container_name: membuss-3
+    hostname: membuss-3
+    restart: unless-stopped
+    ports:
+      - "14003:4001/tcp"
+      - "14003:4001/udp"
+      - "15003:5001/tcp"
+      - "15053:50051/tcp"
+      - "18082:8080/tcp"
+    volumes:
+      - membuss-data-3:/var/lib/membuss
+    environment:
+      MEMBUSS_DATA_DIR:     "/var/lib/membuss"
+      MEMBUSS_LISTEN_ADDRS: "/ip4/0.0.0.0/tcp/4001,/ip4/0.0.0.0/udp/4001/quic-v1"
+      MEMBUSS_GATEWAY_ADDR: "0.0.0.0:8080"
+      MEMBUSS_API_ADDR:     "0.0.0.0:5001"
+      MEMBUSS_GRPC_ADDR:    "0.0.0.0:50051"
+      MEMBUSS_MDNS:         "true"
+      MEMBUSS_BOOTSTRAP_PEERS: ""
+      MEMBUSS_LOG_LEVEL:    "info"
+      MEMBUSS_NO_ANCHOR:    "true"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/membuss-cli", "--addr", "127.0.0.1:50051", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+networks:
+  default:
+    name: membuss-net
+    driver: bridge
+
+volumes:
+  membuss-data-1:
+    name: membuss-data-1
+  membuss-data-2:
+    name: membuss-data-2
+  membuss-data-3:
+    name: membuss-data-3

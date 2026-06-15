@@ -27,7 +27,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -37,6 +36,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	"github.com/libp2p/go-libp2p/p2p/muxer/yamux"
 	"github.com/libp2p/go-libp2p/p2p/security/noise"
 	libp2pquic "github.com/libp2p/go-libp2p/p2p/transport/quic"
@@ -100,6 +100,20 @@ type Config struct {
 	// disables waiting entirely (NewHost returns
 	// immediately with NATStatus "unknown").
 	NATWait time.Duration
+
+	// MDNS enables libp2p mDNS discovery. When true the
+	// host broadcasts itself on the local network and
+	// dials every peer it hears about. Default false
+	// (sensible for production; ideal for the multi-node
+	// Docker smoke test, where every node on the bridge
+	// network finds every other one with zero
+	// configuration).
+	MDNS bool
+	// MDNSServiceName overrides the libp2p mDNS service
+	// tag. The default is mdns.ServiceName ("_p2p._udp").
+	// Useful when several Membuss clusters share the
+	// same broadcast domain.
+	MDNSServiceName string
 }
 
 // Host wraps a libp2p host.Host with Membuss-specific helpers
@@ -116,6 +130,10 @@ type Host struct {
 	mu           sync.RWMutex
 	reachability network.Reachability
 	eventSub     event.Subscription
+
+	// mdns, when non-nil, is the libp2p mDNS discovery
+	// service. It is closed by Host.Close.
+	mdns mdns.Service
 }
 
 // NewHost constructs a libp2p host according to cfg. The host
@@ -193,7 +211,13 @@ func NewHost(cfg Config) (*Host, error) {
 	if err != nil {
 		return nil, fmt.Errorf("host: build libp2p host: %w", err)
 	}
-	return wrapHost(h, false), nil
+	wh := wrapHost(h, false)
+	if cfg.MDNS {
+		// Non-fatal: the host still works, peers just
+		// have to find each other through other channels.
+		_ = wh.startMDNS(cfg.MDNSServiceName)
+	}
+	return wh, nil
 }
 
 // buildNATOptions assembles the libp2p options that enable
@@ -355,36 +379,95 @@ func (h *Host) Reachability() network.Reachability {
 	return h.reachability
 }
 
+// startMDNS attaches a libp2p mDNS discovery service to
+// the host. When the service observes a peer it calls
+// h.Connect in the background so the connection manager
+// immediately starts dialling. The service is closed by
+// Host.Close. serviceName is the DNS-SD service tag; pass
+// "" to use mdns.ServiceName ("_p2p._udp").
+func (h *Host) startMDNS(serviceName string) error {
+	if serviceName == "" {
+		serviceName = mdns.ServiceName
+	}
+	svc := mdns.NewMdnsService(h.Host, serviceName, &mdnsNotifee{h: h})
+	if err := svc.Start(); err != nil {
+		return fmt.Errorf("host: start mdns: %w", err)
+	}
+	h.mu.Lock()
+	h.mdns = svc
+	h.mu.Unlock()
+	return nil
+}
+
+// mdnsNotifee is a tiny adapter that translates libp2p
+// mDNS peer-found events into background dials. The dial
+// is best-effort; failure is silent because mDNS will
+// re-announce within a few seconds.
+type mdnsNotifee struct {
+	h *Host
+}
+
+func (n *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
+	if n == nil || n.h == nil || n.h.Host == nil {
+		return
+	}
+	if pi.ID == n.h.Host.ID() {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = n.h.Host.Connect(ctx, pi)
+	}()
+}
+
+// Close shuts down the Membuss-specific helpers (mDNS,
+// reachability subscription) and then closes the underlying
+// libp2p host. The mDNS service is closed first so we stop
+// emitting announcements while the host is tearing down.
+func (h *Host) Close() error {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	svc := h.mdns
+	h.mdns = nil
+	sub := h.eventSub
+	h.eventSub = nil
+	h.mu.Unlock()
+	if svc != nil {
+		_ = svc.Close()
+	}
+	if sub != nil {
+		_ = sub.Close()
+	}
+	if h.Host != nil {
+		return h.Host.Close()
+	}
+	return nil
+}
+
 // loadOrCreateIdentity loads the Ed25519 private key from
 // <dir>/identity.key, or generates a new one and saves it with
 // 0600 permissions. The returned key's PublicKey hashed to
 // libp2p's PeerID is the node's stable network identity.
+//
+// This is a thin wrapper around the public GenerateIdentity /
+// SaveIdentity / LoadIdentity helpers in identity.go; the split
+// exists so `membuss-cli init` can re-use the same persistence
+// logic without a host being constructed.
 func loadOrCreateIdentity(dir string) (crypto.PrivKey, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("mkdir data dir: %w", err)
-	}
-
-	path := filepath.Join(dir, IdentityFilename)
-	if data, err := os.ReadFile(path); err == nil {
-		priv, err := crypto.UnmarshalPrivateKey(data)
-		if err != nil {
-			return nil, fmt.Errorf("unmarshal identity: %w", err)
-		}
+	if priv, err := LoadIdentity(dir); err == nil {
 		return priv, nil
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read identity: %w", err)
 	}
-
-	priv, _, err := crypto.GenerateEd25519Key(rand.Reader)
+	priv, err := GenerateIdentity()
 	if err != nil {
-		return nil, fmt.Errorf("generate identity: %w", err)
+		return nil, err
 	}
-	raw, err := crypto.MarshalPrivateKey(priv)
-	if err != nil {
-		return nil, fmt.Errorf("marshal identity: %w", err)
-	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		return nil, fmt.Errorf("write identity: %w", err)
+	if err := SaveIdentity(dir, priv); err != nil {
+		return nil, err
 	}
 	return priv, nil
 }

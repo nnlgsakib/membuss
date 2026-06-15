@@ -14,7 +14,13 @@
 //  7. Start the gRPC server with a daemonBackend that wires
 //     every subsystem into the server.Backend interface.
 //  8. Wait for SIGINT / SIGTERM and shut everything down.
+//
+// Phase 17: the host optionally enables libp2p mDNS discovery
+// (Config.EnableMDNS / MEMBUSS_MDNS=true), so multiple daemons
+// on the same L2 network (e.g. a Docker bridge) auto-discover
+// each other without manual peer-ID wiring.
 package main
+
 
 import (
 	"context"
@@ -52,11 +58,23 @@ import (
 )
 
 func main() {
-	cfgPath := flag.String("config", "membuss.yaml", "path to YAML config file")
+	cfgPath := flag.String("config", "", "path to YAML config file (overridden by --datadir)")
+	datadirFlag := flag.String("datadir", "", "data directory (overrides --config; resolved via MEMBUSS_DATADIR / $HOME/.memdata)")
 	build := flag.String("build", "dev", "build identifier reported by Ping")
 	inMemory := flag.Bool("in-memory", false, "use an in-memory BadgerDB (no on-disk state)")
 	noAnchor := flag.Bool("no-anchor", false, "disable the anchor engine even if config enables it")
 	flag.Parse()
+
+	// Phase 16: --datadir wins over --config when both are set, and falls
+	// back to MEMBUSS_DATADIR / $HOME/.memdata. The init-required guard
+	// below relies on a non-empty datadir so the error message can name
+	// the right path.
+	resolvedDatadir := config.ResolveDataDir(*datadirFlag)
+	if resolvedDatadir != "" {
+		*cfgPath = config.DefaultConfigPath(resolvedDatadir)
+	} else if *cfgPath == "" {
+		*cfgPath = "membuss.yaml"
+	}
 
 	// Build identifier flows into Ping responses.
 	serverpkg.Build = *build
@@ -64,6 +82,19 @@ func main() {
 	// Construct a bootstrap logger at info level until we have
 	// the real config. The real logger is built after Load.
 	bootLogger := logging.New(os.Stdout, "info")
+	if !*inMemory {
+		// Phase 16: refuse to start with a clear hint when the
+		// operator has not run `membuss-cli init` yet.
+		if _, statErr := os.Stat(*cfgPath); statErr != nil {
+			dd := config.ResolveDataDir(*datadirFlag)
+			fmt.Fprintf(os.Stderr,
+				"membuss: node not initialized.\n"+
+					"  config: %s\n"+
+					"  run:    membuss-cli init --datadir %s\n",
+				*cfgPath, dd)
+			os.Exit(1)
+		}
+	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		bootLogger.Error("config load failed", "err", err.Error())
@@ -126,10 +157,11 @@ func main() {
 
 	// 2) libp2p host.
 	hostCfg := host.Config{
-		ListenAddrs:  cfg.ListenAddrs,
-		DataDir:      cfg.DataDir,
-		UserAgent:    "membuss/" + *build,
-		StaticRelays: bootstrapPeers,
+		ListenAddrs:        cfg.ListenAddrs,
+		DataDir:            cfg.DataDir,
+		UserAgent:          "membuss/" + *build,
+		StaticRelays:       bootstrapPeers,
+		MDNS:               os.Getenv("MEMBUSS_MDNS") == "true",
 		// --- Phase 11: NAT traversal ---
 		RelayService:         cfg.RelayService,
 		RelayMaxConns:        cfg.RelayMaxConns,

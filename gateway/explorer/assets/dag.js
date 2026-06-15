@@ -50,16 +50,22 @@
     row.appendChild(document.createTextNode(" "));
     row.appendChild(code);
     row.appendChild(meta);
-    return row;
+    // Return both the row and the meta so expandNode can
+    // update meta.textContent without index-arithmetic
+    // into row.children (which is brittle when the row
+    // layout changes).
+    return { row: row, meta: meta };
   }
 
   function renderLi(mid, depth) {
     var li = el("li", { class: "node" });
     li.dataset.mid = mid;
     li.dataset.depth = String(depth);
-    var row = makeRow(mid);
-    li.appendChild(row);
+    var built = makeRow(mid);
+    li.appendChild(built.row);
     li.appendChild(el("ul", { class: "collapsed" }));
+    li._meta = built.meta;
+    li._toggle = built.row.children[0];
     return li;
   }
 
@@ -69,40 +75,40 @@
     if (childUl.children.length > 0) {
       // Already expanded; toggle to collapsed.
       childUl.classList.toggle("collapsed", true);
-      li.children[0].children[0].textContent = "[+]";
+      li._toggle.textContent = "[+]";
       return;
     }
-    li.children[0].children[0].textContent = "[..]";
+    li._toggle.textContent = "[..]";
     childUl.classList.remove("collapsed");
     childUl.appendChild(el("li", { class: "loading", text: "loading..." }));
     fetchNode(mid).then(function(node) {
       // remove loading
       while (childUl.firstChild) childUl.removeChild(childUl.firstChild);
       var links = (node && node.links) || [];
-      var meta = li.children[0].children[3];
-      meta.textContent = "size=" + (node && node.size != null ? node.size : "?") + " children=" + links.length;
+      li._meta.textContent = "size=" + (node && node.size != null ? node.size : "?") + " children=" + links.length;
       if (links.length === 0) {
         li.classList.add("leaf");
-        li.children[0].children[0].textContent = " ";
+        li._toggle.textContent = " ";
         return;
       }
       li.classList.add("internal");
-      li.children[0].children[0].textContent = "[-]";
+      li._toggle.textContent = "[-]";
       for (var i = 0; i < links.length; i++) {
         var childLi = renderLi(links[i], parseInt(li.dataset.depth, 10) + 1);
         childUl.appendChild(childLi);
+        attachToggle(childLi);
       }
     }).catch(function(err) {
       while (childUl.firstChild) childUl.removeChild(childUl.firstChild);
       childUl.appendChild(el("li", { class: "error", text: "fetch error: " + err.message }));
-      li.children[0].children[0].textContent = "[!]";
+      li._toggle.textContent = "[!]";
     });
   }
 
   function collapseNode(li) {
     var childUl = li.children[1];
     childUl.classList.toggle("collapsed", true);
-    li.children[0].children[0].textContent = "[+]";
+    li._toggle.textContent = "[+]";
   }
 
   function attachToggle(li) {

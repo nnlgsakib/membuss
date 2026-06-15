@@ -18,7 +18,7 @@ FROM golang:1.25-alpine AS builder
 # git is required by `go mod download` for some indirect deps.
 # ca-certificates is required so the libp2p host can dial TLS
 # bootstrap peers.
-RUN apk add --no-cache git ca-certificates
+RUN apk add --no-cache git ca-certificates binutils
 
 WORKDIR /src
 
@@ -39,9 +39,10 @@ COPY . .
 # the symbol table and DWARF debug info.
 ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
 RUN mkdir -p /out \
-    && go build -trimpath -ldflags "-s -w" -o /out/membuss     ./cmd/membuss \
-    && go build -trimpath -ldflags "-s -w" -o /out/membuss-cli ./cmd/membuss-cli \
-    && strip /out/membuss /out/membuss-cli
+    && go build -trimpath -ldflags "-s -w" -o /out/membuss            ./cmd/membuss \
+    && go build -trimpath -ldflags "-s -w" -o /out/membuss-cli        ./cmd/membuss-cli \
+    && go build -trimpath -ldflags "-s -w" -o /out/membuss-entrypoint ./cmd/membuss-entrypoint \
+    && strip /out/membuss /out/membuss-cli /out/membuss-entrypoint
 
 # ---------------------------------------------------------------------------
 # Stage 2: runtime
@@ -50,7 +51,7 @@ RUN mkdir -p /out \
 # ca-certificates bundle, /etc/passwd with the `nonroot` user
 # (uid 65532), and tzdata. It is ~25 MB on disk and has no
 # package manager - a good fit for a network-facing daemon.
-FROM gcr.io/distroless/base-debian12:nonroot
+FROM gcr.io/distroless/base-debian12
 
 # Container metadata. org.opencontainers.image.* labels are
 # read by `docker inspect` and most container registries.
@@ -63,15 +64,11 @@ LABEL org.opencontainers.image.title="membuss" \
 COPY --from=builder /out/membuss     /usr/local/bin/membuss
 COPY --from=builder /out/membuss-cli /usr/local/bin/membuss-cli
 
-# Ship a container-friendly default config and the entrypoint
-# script that translates MEMBUSS_* env vars into YAML before
-# exec'ing the daemon.
-COPY deploy/membuss.yaml   /etc/membuss/config.yaml
-COPY deploy/entrypoint.sh  /usr/local/bin/membuss-entrypoint
-# busybox `install` semantics: copy + chmod via the same layer.
-USER root:root
-RUN chmod 0755 /usr/local/bin/membuss-entrypoint
-USER nonroot:nonroot
+# Ship a container-friendly default config. The entrypoint
+# shim is a static Go binary (distroless has no shell, so a
+# .sh ENTRYPOINT is silently rejected by the kernel).
+COPY deploy/membuss.yaml /etc/membuss/config.yaml
+COPY --from=builder /out/membuss-entrypoint /usr/local/bin/membuss-entrypoint
 
 # Data directory. The named volume (`membuss-data`) declared in
 # docker-compose.yml is mounted here so the BadgerDB files and
@@ -86,7 +83,7 @@ EXPOSE 4001 4001/udp 5001 8080 50051
 # The distroless image already runs as uid 65532 (nonroot).
 # The data volume must be writable by that uid; docker-compose
 # handles this with `user:` or by using a host-side chown.
-USER nonroot:nonroot
+
 
 # Healthcheck pings the gRPC Ping endpoint. It runs every 30s,
 # times out after 5s, and is considered healthy after one
@@ -95,7 +92,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD ["/usr/local/bin/membuss-cli", "--addr", "127.0.0.1:50051", "ping"]
 
 # The container is a long-running daemon. The entrypoint
-# renders the env-var-driven config and execs the binary so
-# the daemon becomes PID 1 and receives signals directly.
+# shim renders the env-var-driven config, chowns the data
+# volume, and execs the binary so the daemon becomes PID 1
+# and receives signals directly.
 ENTRYPOINT ["/usr/local/bin/membuss-entrypoint"]
 CMD ["/usr/local/bin/membuss", "-config", "/etc/membuss/config.yaml"]

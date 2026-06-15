@@ -209,8 +209,24 @@ func (m *MemGate) handleGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad mid: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	format := r.URL.Query().Get("format")
-	switch format {
+	q := r.URL.Query()
+
+	// If the caller asked for a download, set the
+	// Content-Disposition header BEFORE the body handler
+	// runs. Once the inner handler has called WriteHeader /
+	// written bytes, the headers are flushed and any
+	// later Set is a no-op. The default filename falls
+	// back to <mid>.bin.
+	if q.Get("download") == "1" {
+		name := q.Get("filename")
+		if name == "" {
+			name = midStr + ".bin"
+		}
+		w.Header().Set("Content-Disposition",
+			`attachment; filename="`+name+`"`)
+	}
+
+	switch q.Get("format") {
 	case "dag-json":
 		m.handleDAGJSON(w, r, root)
 	case "raw":

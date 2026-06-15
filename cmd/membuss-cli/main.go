@@ -48,12 +48,15 @@ func newRootCmd() *cobra.Command {
 		Long: `membuss-cli talks to a locally-running membuss daemon over gRPC.
 
 It mirrors the MembussNode service:
-  add, get, seal, unseal, stat, peers, dht, gc, anchor, daemon.`,
+  add, get, seal, unseal, stat, peers, dht, gc, anchor, daemon.
+
+Run "membuss-cli init" first to set up the data directory.`,
 		SilenceUsage:  true,
 		SilenceErrors: false,
 	}
 	root.PersistentFlags().StringVar(&globalAddr, "addr", "", "daemon gRPC address (default: from config)")
 	root.PersistentFlags().StringVar(&globalConfigPath, "config", "membuss.yaml", "config file used to locate the daemon")
+	root.PersistentFlags().String("datadir", "", "data directory (default $HOME/.memdata; overrides MEMBUSS_DATADIR)")
 
 	root.AddCommand(
 		newAddCmd(),
@@ -67,6 +70,7 @@ It mirrors the MembussNode service:
 		newAnchorCmd(),
 		newPingCmd(),
 		newDaemonCmd(),
+		newInitCmd(),
 	)
 	return root
 }
@@ -74,8 +78,12 @@ It mirrors the MembussNode service:
 // --- connection helpers ---
 
 // resolveAddr returns the gRPC endpoint the CLI should dial.
-// Priority: --addr flag, then $MEMBUSS_ADDR, then the config's
-// grpc_addr, then 127.0.0.1:50051.
+// Priority:
+//  1. --addr flag
+//  2. $MEMBUSS_ADDR
+//  3. config.yaml in --datadir (or $MEMBUSS_DATADIR or $HOME/.memdata)
+//  4. config.yaml at the legacy --config path
+//  5. 127.0.0.1:50051
 func resolveAddr() (string, error) {
 	if globalAddr != "" {
 		return globalAddr, nil
@@ -83,8 +91,12 @@ func resolveAddr() (string, error) {
 	if v := os.Getenv("MEMBUSS_ADDR"); v != "" {
 		return v, nil
 	}
-	cfg, err := config.Load(globalConfigPath)
-	if err == nil && cfg.GRPCAddr != "" {
+	if datadir := config.ResolveDataDir(""); datadir != "" {
+		if cfg, err := config.LoadConfig(datadir); err == nil && cfg.GRPCAddr != "" {
+			return cfg.GRPCAddr, nil
+		}
+	}
+	if cfg, err := config.Load(globalConfigPath); err == nil && cfg.GRPCAddr != "" {
 		return cfg.GRPCAddr, nil
 	}
 	return "127.0.0.1:50051", nil

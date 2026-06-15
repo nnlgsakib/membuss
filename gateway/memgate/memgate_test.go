@@ -462,3 +462,57 @@ func TestDetectContentType_HTMLByExtension(t *testing.T) {
 		t.Errorf("html: %q", ct)
 	}
 }
+
+// TestDownloadDisposition verifies that ?download=1 sets
+// Content-Disposition: attachment so the browser saves the
+// file instead of rendering it. Without ?download=1 the
+// header must NOT be set (preserves the existing CDN
+// behaviour: the gateway renders content directly).
+func TestDownloadDisposition(t *testing.T) {
+	be := newMemBackend()
+	m := mid.FromBytes([]byte("hello world"))
+	be.put(m, []byte("hello world"), "text/plain")
+	mg, err := New(Config{Backend: be, MaxCacheBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(mg.Router())
+	defer srv.Close()
+	url := srv.URL + "/mem/" + m.String()
+
+	// 1) Without ?download=1: header absent.
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got := resp.Header.Get("Content-Disposition"); got != "" {
+		t.Fatalf("default Content-Disposition: got %q, want empty", got)
+	}
+
+	// 2) ?download=1: header set to attachment, default filename.
+	resp2, err := http.Get(url + "?download=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	disp := resp2.Header.Get("Content-Disposition")
+	if !strings.HasPrefix(disp, "attachment;") {
+		t.Fatalf("download=1 Content-Disposition: got %q, want attachment prefix", disp)
+	}
+	if !strings.Contains(disp, m.String()) {
+		t.Fatalf("download=1 Content-Disposition should include MID: %q", disp)
+	}
+
+	// 3) ?download=1&filename=foo.txt: header honours the override.
+	custom := "myreport.txt"
+	resp3, err := http.Get(url + "?download=1&filename=" + custom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp3.Body.Close()
+	disp3 := resp3.Header.Get("Content-Disposition")
+	if !strings.Contains(disp3, custom) {
+		t.Fatalf("custom filename: got %q, want substring %q", disp3, custom)
+	}
+}

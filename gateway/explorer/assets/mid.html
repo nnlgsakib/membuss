@@ -23,7 +23,7 @@
         <dt>Content-Type</dt><dd>{{if .ContentType}}{{.ContentType}}{{else}}(unknown){{end}}</dd>
       </dl>
       <div class="actions">
-        <a class="btn" href="/mem/{{.MID}}" target="_blank">Download</a>
+        <a class="btn" href="/mem/{{.MID}}?download=1&amp;filename={{.MID}}.bin" target="_self" download>Download</a>
         <a class="btn" href="/explorer/mid/{{.MID}}/dag">DAG</a>
         {{if .Sealed}}
         <form method="POST" action="/explorer/mid/{{.MID}}/unseal" style="display:inline">
