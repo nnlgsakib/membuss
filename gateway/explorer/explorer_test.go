@@ -24,6 +24,10 @@ type memBackend struct {
 	sealed     map[string]bool
 	providers  map[string][]string
 	anchorMode bool
+	// resolveOK is flipped by individual tests to
+	// exercise the "DHT had providers and the
+	// resolve succeeded" branch of the explorer.
+	resolveOK bool
 	started    time.Time
 }
 
@@ -87,6 +91,30 @@ func (b *memBackend) Providers(ctx context.Context, m mid.MID, limit int) ([]str
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+// Resolve is the test-backend stub. By default it
+// returns ErrNotFound (the explorer renders "not
+// found" for an empty providers list). Tests that
+// want to exercise the "DHT had providers but fetch
+// failed" branch can flip b.resolveOK to true; tests
+// that want the "found it" branch can pre-populate
+// b.store with the right bytes via put().
+func (b *memBackend) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser, ContentInfo, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	has := len(b.providers[m.String()]) > 0
+	resolveOK := b.resolveOK
+	data, stored := b.content[m.String()]
+	if !resolveOK || !has || !stored {
+		return nil, ContentInfo{}, ErrNotFound
+	}
+	return io.NopCloser(strings.NewReader(string(data))), ContentInfo{
+		MID:    m.String(),
+		Size:   uint64(len(data)),
+		Blocks: 1,
+		Sealed: false,
+	}, nil
 }
 
 func (b *memBackend) Peers(ctx context.Context, limit int) ([]PeerInfo, error) {
@@ -250,6 +278,87 @@ func TestMIDNotFound(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "not present in the local store") {
 		t.Errorf("body missing 'not present' message: %s", string(body))
+	}
+}
+
+
+// TestMIDNotFoundNoProviders covers the branch where the
+// MID is not local and the DHT has no provider records.
+// The page must still render the "not present" message
+// plus a "not found in the DHT" hint and the empty
+// providers list.
+func TestMIDNotFoundNoProviders(t *testing.T) {
+	srv, _ := newTestServer(t)
+	m := mid.FromBytes([]byte("missing-noprov"))
+	resp, body := get(t, srv, "/mid/"+m.String())
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: %d body=%s", resp.StatusCode, string(body))
+	}
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "not present in the local store") {
+		t.Errorf("body missing 'not present' message")
+	}
+	if !strings.Contains(bodyStr, "Not found") {
+		t.Errorf("body missing 'Not found' hint: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "(no providers found)") {
+		t.Errorf("body missing empty providers hint: %s", bodyStr)
+	}
+}
+
+// TestMIDNotFoundAttempted covers the branch where the
+// DHT has providers but the Memex fetch failed. The page
+// should tell the user to try again later and still list
+// the known providers.
+func TestMIDNotFoundAttempted(t *testing.T) {
+	srv, b := newTestServer(t)
+	m := mid.FromBytes([]byte("missing-attempted"))
+	b.addProvider(m, "12D3KooProvider1")
+	// resolveOK is left false, so Resolve returns
+	// ErrNotFound; handleMID classifies it as
+	// ResolveAttempted because Providers() still
+	// returns >= 1 entry.
+	resp, body := get(t, srv, "/mid/"+m.String())
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "not present in the local store") {
+		t.Errorf("body missing 'not present' message")
+	}
+	if !strings.Contains(bodyStr, "try again later") {
+		t.Errorf("body missing 'try again later' hint: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "12D3KooProvider1") {
+		t.Errorf("body missing provider entry: %s", bodyStr)
+	}
+}
+
+// TestMIDNotFoundResolved covers the branch where the
+// DHT has providers AND the Memex fetch succeeded. After
+// the fetch, handleMID re-stats and the page renders as
+// if the content had always been local.
+func TestMIDNotFoundResolved(t *testing.T) {
+	srv, b := newTestServer(t)
+	m := mid.FromBytes([]byte("resolved-by-dht"))
+	b.addProvider(m, "12D3KooProvider1")
+	// put() seeds the in-memory content; resolveOK
+	// controls whether Resolve returns success.
+	b.put(m, []byte("resolved-by-dht"))
+	b.resolveOK = true
+	resp, body := get(t, srv, "/mid/"+m.String())
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	bodyStr := string(body)
+	if strings.Contains(bodyStr, "not present in the local store") {
+		t.Errorf("body should NOT show not-present after successful resolve: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "Download") {
+		t.Errorf("body should show Download link after successful resolve: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, m.String()) {
+		t.Errorf("body missing the MID: %s", bodyStr)
 	}
 }
 

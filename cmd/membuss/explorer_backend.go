@@ -8,12 +8,15 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"github.com/nnlgsakib/membuss/core/mid"
 	explorer "github.com/nnlgsakib/membuss/gateway/explorer"
+	"github.com/nnlgsakib/membuss/gateway/memgate"
+	"github.com/nnlgsakib/membuss/net/memex"
 )
 
 var _ explorer.Backend = (*explorerAdapter)(nil)
@@ -102,6 +105,87 @@ func (a *explorerAdapter) Providers(ctx context.Context, m mid.MID, limit int) (
 	}
 	return out, nil
 }
+
+// Resolve mirrors memgateAdapter.Resolve: when the MID is
+// not local it asks the DHT for providers and runs a
+// Memex session to fetch the missing blocks. The returned
+// reader streams the reassembled DAG; the explorer closes
+// it after draining.
+//
+// explorer.ErrNotFound is returned when the local store
+// is empty AND the DHT has no provider records. The
+// explorer package uses this to distinguish "not found"
+// from "DHT had providers but Memex failed" so the
+// template can show a "try again later" message instead
+// of a hard 404.
+func (a *explorerAdapter) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser, explorer.ContentInfo, error) {
+	b := a.b
+	if b.store == nil {
+		return nil, explorer.ContentInfo{}, errors.New("explorer: no store")
+	}
+	has, err := b.store.Has(m)
+	if err != nil {
+		return nil, explorer.ContentInfo{}, err
+	}
+	if !has && b.dht != nil && b.memex != nil {
+		provCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		provs, perr := b.dht.FindProviders(provCtx, m)
+		cancel()
+		if perr != nil || len(provs) == 0 {
+			// No DHT providers -> explorer will render
+			// "not found". Returning a typed error
+			// keeps the explorer template free of
+			// string matching on transport errors.
+			return nil, explorer.ContentInfo{}, explorer.ErrNotFound
+		}
+		sess, serr := memex.NewSession(memex.SessionConfig{
+			Engine:    b.memex,
+			Root:      m,
+			Providers: provs,
+			Timeout:   30 * time.Second,
+		})
+		if serr == nil {
+			if _, ferr := sess.Fetch(ctx); ferr == nil {
+			has = true
+		} else {
+			// Providers existed but the Memex
+			// session failed. The caller
+			// (explorer.handleMID) re-checks
+			// Providers() to distinguish
+			// ResolveAttempted from
+			// ResolveNoProviders, so we
+			// return ErrNotFound here and let
+			// that classification happen.
+			return nil, explorer.ContentInfo{}, explorer.ErrNotFound
+		}
+		}
+	}
+	if !has {
+		return nil, explorer.ContentInfo{}, explorer.ErrNotFound
+	}
+	// Reuse the memgate adapter's Resolve so the size /
+	// blocks / sealed numbers are computed exactly the
+	// same way the public gateway would compute them.
+	mg := &memgateAdapter{b: b}
+	rc, info, err := mg.Resolve(ctx, m)
+	if err != nil {
+		if errors.Is(err, errMGNotFound) {
+			return nil, explorer.ContentInfo{}, explorer.ErrNotFound
+		}
+		return nil, explorer.ContentInfo{}, err
+	}
+	return rc, explorer.ContentInfo{
+		MID:    info.MID,
+		Size:   info.Size,
+		Blocks: info.Blocks,
+		Sealed: info.Sealed,
+	}, nil
+}
+
+// memgate.ContentInfo is referenced via the embedded
+// memgateAdapter call; keep an unused import guard so
+// the file compiles even if the type is removed.
+var _ memgate.ContentInfo
 
 // Peers returns the local PEX peer table.
 func (a *explorerAdapter) Peers(ctx context.Context, limit int) ([]explorer.PeerInfo, error) {

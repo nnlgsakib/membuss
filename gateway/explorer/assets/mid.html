@@ -8,9 +8,24 @@
 
   {{if .NotFound}}
     <p class="warn">This MID is not present in the local store.</p>
-    <p class="muted">DHT lookup for providers:</p>
-    <pre class="providers">{{range .Providers}}{{.}}
+	{{if eq .ResolveStatus 1}}
+		<p class="ok">Resolved from DHT: {{.ResolveMessage}}</p>
+	{{else if eq .ResolveStatus 2}}
+		<p class="warn">Not available right now &mdash; {{.ResolveMessage}}</p>
+		<p class="muted">Reloading this page will re-run the DHT lookup and try a fresh Memex fetch.</p>
+	{{else if eq .ResolveStatus 3}}
+		<p class="warn">Not found &mdash; {{.ResolveMessage}}</p>
+		<p class="muted">The MID may not be pinned on any node. If a peer is supposed to have it, ask them to <code>membuss-cli seal &lt;MID&gt;</code>.</p>
+	{{else if eq .ResolveStatus 4}}
+		<p class="warn">DHT lookup error &mdash; {{.ResolveMessage}}</p>
+	{{else}}
+		<p class="muted">DHT lookup for providers:</p>
+	{{end}}
+	<pre class="providers">{{range .Providers}}{{.}}
 {{end}}{{if not .Providers}}(no providers found){{end}}</pre>
+	<form method="GET" action="/explorer/mid/{{.MID}}" style="margin-top:0.5rem">
+		<button class="btn" type="submit">Retry DHT lookup</button>
+	</form>
   {{else}}
   <div class="grid">
     <div class="card">

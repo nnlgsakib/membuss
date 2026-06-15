@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"net/http"
 	"path"
 	"sort"
@@ -28,6 +29,62 @@ import (
 
 //go:embed assets/*.html assets/*.css assets/*.js
 var assetFS embed.FS
+
+// ResolveStatus is the outcome of the explorer's "fetch
+// from DHT" attempt on a MID the local store did not
+// have on the first try. The three values are mutually
+// exclusive and drive the NotFound / NotAvailable /
+// Fetching states of the MID detail page.
+type ResolveStatus int
+
+const (
+	// ResolveNone means no DHT fetch was attempted
+	// (the MID was found locally, or the page is being
+	// served in pure static mode).
+	ResolveNone ResolveStatus = iota
+	// ResolveFound means the MID was not local but the
+	// DHT had a provider and the Memex session
+	// successfully retrieved the content. The page
+	// renders the metadata as if the MID had always
+	// been local.
+	ResolveFound
+	// ResolveAttempted means the DHT reported providers
+	// but the Memex fetch failed (timeout, no usable
+	// peer, range not satisfiable, ...). The page
+	// tells the user "not available right now, try
+	// again later" and lists the providers we know
+	// about so the operator can chase them manually.
+	ResolveAttempted
+	// ResolveNoProviders means the DHT has no provider
+	// records for this MID at all. The page renders
+	// "not found" and offers a retry link that will
+	// re-run FindProviders with a fresh timeout.
+	ResolveNoProviders
+	// ResolveError means the DHT lookup itself errored
+	// (e.g. context deadline exceeded while talking to
+	// the DHT). The page renders the error so the
+	// operator can tell transient DHT outage apart
+	// from "definitively unknown".
+	ResolveError
+)
+
+// ContentInfo is the metadata returned by Backend.Resolve
+// and Backend.Stat. It mirrors the X-Membuss-* response
+// headers the public Mem-Gate gateway returns, so a single
+// struct drives both the gateway and the explorer.
+type ContentInfo struct {
+	MID         string
+	Size        uint64
+	Blocks      uint64
+	ContentType string
+	Sealed      bool
+}
+
+// ErrNotFound is returned by Backend.Resolve when the MID
+// is neither in the local store nor reachable from any DHT
+// provider. The explorer page translates this into the
+// "not found" branch of the template.
+var ErrNotFound = errors.New("explorer: not found locally and no provider reachable")
 
 // PeerInfo is a minimal copy of the PEX peer table row the
 // explorer renders. Defined here so the explorer package
@@ -67,6 +124,17 @@ type Backend interface {
 	Unseal(ctx context.Context, m mid.MID) error
 	// Providers returns DHT-known providers for m.
 	Providers(ctx context.Context, m mid.MID, limit int) ([]string, error)
+	// Resolve fetches the content addressed by m. When the
+	// MID is not in the local store the implementation
+	// MUST consult the DHT for providers and run a
+	// Memex session to retrieve the missing blocks, the
+	// same way the public Mem-Gate gateway does. The
+	// returned reader is the reassembled DAG; the caller
+	// is responsible for closing it. Returns an error
+	// (typically explorer.ErrNotFound) when the MID is
+	// neither local nor reachable from any known
+	// provider.
+	Resolve(ctx context.Context, m mid.MID) (io.ReadCloser, ContentInfo, error)
 	// Peers returns the local PEX peer table.
 	Peers(ctx context.Context, limit int) ([]PeerInfo, error)
 	// SealedMIDs lists all sealed MIDs in the local store.
@@ -113,6 +181,12 @@ type Config struct {
 	// PeerLimit caps the number of peers listed on the
 	// peers page.
 	PeerLimit int
+	// ResolveTimeout caps how long the explorer spends
+	// on the DHT+Memex fallback when a MID is not in
+	// the local store. Zero defaults to 30s. Set this
+	// lower on page-loaded UIs where users notice a
+	// stalled render.
+	ResolveTimeout time.Duration
 }
 
 // Explorer is the built-in web UI.
@@ -258,6 +332,21 @@ type midData struct {
 	Health        string
 	HealthLabel   string
 	Providers     []string
+	// ResolveStatus reports what the explorer's
+	// background fetch attempt did when the MID was
+	// not local. The four interesting values are
+	// ResolveNone (local hit, no fetch needed),
+	// ResolveFound (DHT + Memex succeeded, page
+	// renders as if local), ResolveAttempted (DHT
+	// had providers but Memex failed - the page
+	// shows "not available, try again later"), and
+	// ResolveNoProviders (DHT has nothing, page
+	// shows "not found" with a retry link).
+	ResolveStatus ResolveStatus
+	// ResolveMessage is the human-readable message
+	// that goes with ResolveStatus. It is empty
+	// for ResolveNone and ResolveFound.
+	ResolveMessage string
 }
 
 func (e *Explorer) handleMID(w http.ResponseWriter, r *http.Request) {
@@ -274,13 +363,32 @@ func (e *Explorer) handleMID(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "stat: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	provs, _ := b.Providers(ctx, root, e.cfg.ProviderLimit)
 	data := midData{
 		Title:    "MID " + midStr,
 		MID:      midStr,
 		NotFound: !present,
-		Providers: provs,
 	}
+	// Phase 18: when the MID is not local, fall back to
+	// the DHT + Memex pipeline the public Mem-Gate
+	// gateway uses. The page then renders the same
+	// content view as a local hit, or a structured
+	// "not available / try again" message with the
+	// known provider list. This matches what the
+	// Mem-Gate CDN does for /mem/<MID>.
+	if !present {
+		e.resolveFromDHT(ctx, b, root, &data)
+		// Re-stat now that Resolve may have populated
+		// the local store. The metadata fields below
+		// are only filled in when the second stat
+		// reports present=true.
+		if p2, sz2, b2, sl2, cd2, err2 := b.Stat(ctx, root); err2 == nil && p2 {
+			present = true
+			size, blocks, sealed, codec = sz2, b2, sl2, cd2
+			data.NotFound = false
+		}
+	}
+	provs, _ := b.Providers(ctx, root, e.cfg.ProviderLimit)
+	data.Providers = provs
 	if present {
 		data.Size = size
 		data.Blocks = blocks
@@ -295,6 +403,62 @@ func (e *Explorer) handleMID(w http.ResponseWriter, r *http.Request) {
 		data.HealthLabel = "OK"
 	}
 	e.render(w, "mid.html", data)
+}
+
+// resolveFromDHT runs the "ask the DHT, then try a
+// Memex session" pipeline on a MID the local store
+// does not have. The outcome is recorded in data.ResolveStatus
+// (and data.ResolveMessage) so the template can render
+// the right "fetching" / "not available" / "not found"
+// message.
+//
+// The implementation is intentionally a thin wrapper
+// over Backend.Resolve: that method already does the
+// DHT lookup + Memex session under the hood. We just
+// translate the three terminal outcomes (success,
+// "no providers", "providers but fetch failed") into
+// the explorer's ResolveStatus enum.
+func (e *Explorer) resolveFromDHT(ctx context.Context, b Backend, m mid.MID, data *midData) {
+	timeout := e.cfg.ResolveTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	rctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	rc, info, err := b.Resolve(rctx, m)
+	if rc != nil {
+		// We don't need the bytes themselves for the
+		// detail page; what matters is whether the
+		// session got the content into the local
+		// store. Drain + close so the underlying
+		// Memex session releases its provider
+		// slots immediately.
+		_, _ = io.Copy(io.Discard, rc)
+		_ = rc.Close()
+	}
+	switch {
+	case err == nil:
+		data.ResolveStatus = ResolveFound
+		data.ResolveMessage = fmt.Sprintf("fetched %d bytes from DHT in %s", info.Size, "background")
+	case errors.Is(err, ErrNotFound):
+		// Backend.Resolve could not find a provider.
+		// Distinguish "DHT has nothing" from
+		// "DHT had something but the session failed"
+		// by checking Providers() ourselves - that
+		// is the same call the page already makes
+		// after this returns, so we use the limit
+		// only as a hint.
+		if provs, perr := b.Providers(rctx, m, e.cfg.ProviderLimit); perr == nil && len(provs) > 0 {
+			data.ResolveStatus = ResolveAttempted
+			data.ResolveMessage = "DHT reported providers but the Memex fetch failed; try again later"
+		} else {
+			data.ResolveStatus = ResolveNoProviders
+			data.ResolveMessage = "no DHT provider records for this MID; the content may not be pinned anywhere on the network"
+		}
+	default:
+		data.ResolveStatus = ResolveError
+		data.ResolveMessage = "DHT lookup error: " + err.Error()
+	}
 }
 
 func (e *Explorer) handleDAG(w http.ResponseWriter, r *http.Request) {
