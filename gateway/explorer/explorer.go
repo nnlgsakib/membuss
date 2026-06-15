@@ -78,6 +78,13 @@ type ContentInfo struct {
 	Blocks      uint64
 	ContentType string
 	Sealed      bool
+	Present bool
+	Codec       uint64
+	// Phase 19: human-friendly metadata captured at Add
+	// time. Empty when the content was added by an
+	// older daemon.
+	Name     string
+	MimeType string
 }
 
 // ErrNotFound is returned by Backend.Resolve when the MID
@@ -115,9 +122,12 @@ type AnchorInfo struct {
 // daemon supplies a real implementation; tests inject a
 // memBackend.
 type Backend interface {
-	// Stat returns a metadata snapshot for m. ok=false
-	// means the MID is not present in the local store.
-	Stat(ctx context.Context, m mid.MID) (present bool, size, blocks uint64, sealed bool, codec uint64, err error)
+	// Stat returns a metadata snapshot for m. Present=false
+	// means the MID is not in the local store. Phase 19:
+	// the returned ContentInfo carries the uploader-supplied
+	// Name and MimeType so the explorer can render the
+	// CDN-style View button + the human-friendly filename.
+	Stat(ctx context.Context, m mid.MID) (ContentInfo, error)
 	// Seal pins m recursively.
 	Seal(ctx context.Context, m mid.MID) error
 	// Unseal removes the pin on m.
@@ -135,6 +145,10 @@ type Backend interface {
 	// neither local nor reachable from any known
 	// provider.
 	Resolve(ctx context.Context, m mid.MID) (io.ReadCloser, ContentInfo, error)
+	// Add ingests content from a reader and returns the
+	// resulting MID + metadata. name is the original
+	// filename (used for Content-Disposition on download).
+	Add(ctx context.Context, name string, r io.Reader) (ContentInfo, error)
 	// Peers returns the local PEX peer table.
 	Peers(ctx context.Context, limit int) ([]PeerInfo, error)
 	// SealedMIDs lists all sealed MIDs in the local store.
@@ -256,6 +270,8 @@ func (e *Explorer) buildRouter() http.Handler {
 	r.Get("/anchors", e.handleAnchors)
 	r.Get("/node", e.handleNode)
 	r.Post("/search", e.handleSearch)
+	r.Get("/upload", e.handleUploadPage)
+	r.Post("/upload", e.handleUpload)
 
 	// Static assets.
 	r.Get("/static/style.css", e.handleStatic("style.css", "text/css; charset=utf-8"))
@@ -332,6 +348,8 @@ type midData struct {
 	Health        string
 	HealthLabel   string
 	Providers     []string
+	Name          string
+	MimeType      string
 	// ResolveStatus reports what the explorer's
 	// background fetch attempt did when the MID was
 	// not local. The four interesting values are
@@ -358,15 +376,19 @@ func (e *Explorer) handleMID(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	b := e.cfg.Backend
-	present, size, blocks, sealed, codec, err := b.Stat(ctx, root)
+	info, err := b.Stat(ctx, root)
 	if err != nil {
 		http.Error(w, "stat: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	present := info.Present
+	size, blocks, sealed, codec := info.Size, info.Blocks, info.Sealed, info.Codec
 	data := midData{
 		Title:    "MID " + midStr,
 		MID:      midStr,
 		NotFound: !present,
+		Name:     info.Name,
+		MimeType: info.MimeType,
 	}
 	// Phase 18: when the MID is not local, fall back to
 	// the DHT + Memex pipeline the public Mem-Gate
@@ -381,10 +403,12 @@ func (e *Explorer) handleMID(w http.ResponseWriter, r *http.Request) {
 		// the local store. The metadata fields below
 		// are only filled in when the second stat
 		// reports present=true.
-		if p2, sz2, b2, sl2, cd2, err2 := b.Stat(ctx, root); err2 == nil && p2 {
+		if p2, err2 := b.Stat(ctx, root); err2 == nil && p2.Present {
 			present = true
-			size, blocks, sealed, codec = sz2, b2, sl2, cd2
+			size, blocks, sealed, codec = p2.Size, p2.Blocks, p2.Sealed, p2.Codec
 			data.NotFound = false
+			data.Name = p2.Name
+			data.MimeType = p2.MimeType
 		}
 	}
 	provs, _ := b.Providers(ctx, root, e.cfg.ProviderLimit)
@@ -394,7 +418,7 @@ func (e *Explorer) handleMID(w http.ResponseWriter, r *http.Request) {
 		data.Blocks = blocks
 		data.Sealed = sealed
 		data.Codec = codec
-		data.ContentType = "" // TODO: surface from gateway if available
+		data.ContentType = data.MimeType
 		// Default RS layout per constitution (10+4).
 		data.DataShards = 10
 		data.ParityShards = 4
@@ -578,6 +602,34 @@ func (e *Explorer) handleSearch(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/explorer/mid/"+midStr, http.StatusSeeOther)
 }
 
+func (e *Explorer) handleUploadPage(w http.ResponseWriter, r *http.Request) {
+	e.render(w, "upload.html", map[string]any{
+		"Title": "Upload",
+	})
+}
+
+func (e *Explorer) handleUpload(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(1 << 30); err != nil {
+		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "no file: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	ctx := r.Context()
+	b := e.cfg.Backend
+	res, err := b.Add(ctx, header.Filename, file)
+	if err != nil {
+		http.Error(w, "add: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/explorer/mid/"+res.MID, http.StatusSeeOther)
+}
+
 // handleStatic serves an embedded asset file.
 func (e *Explorer) handleStatic(name, contentType string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -610,6 +662,7 @@ func buildPages(master *template.Template) (map[string]*template.Template, error
 		"peers.html":   "peers_body",
 		"anchors.html": "anchors_body",
 		"node.html":    "node_body",
+		"upload.html":  "upload_body",
 	}
 	pages := make(map[string]*template.Template, len(pb))
 	for page, bodyName := range pb {

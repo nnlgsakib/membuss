@@ -9,11 +9,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"github.com/nnlgsakib/membuss/core/mid"
+	"github.com/nnlgsakib/membuss/core/store"
 	explorer "github.com/nnlgsakib/membuss/gateway/explorer"
 	"github.com/nnlgsakib/membuss/gateway/memgate"
 	"github.com/nnlgsakib/membuss/net/memex"
@@ -39,24 +41,34 @@ func newExplorerAdapter(b *daemonBackend, anchorMode bool) *explorerAdapter {
 }
 
 // Stat returns a metadata snapshot.
-func (a *explorerAdapter) Stat(ctx context.Context, m mid.MID) (bool, uint64, uint64, bool, uint64, error) {
+func (a *explorerAdapter) Stat(ctx context.Context, m mid.MID) (explorer.ContentInfo, error) {
 	b := a.b
 	if b.store == nil {
-		return false, 0, 0, false, 0, errors.New("explorer: no store")
+		return explorer.ContentInfo{}, errors.New("explorer: no store")
 	}
 	has, err := b.store.Has(m)
 	if err != nil {
-		return false, 0, 0, false, 0, err
+		return explorer.ContentInfo{}, err
 	}
 	if !has {
-		return false, 0, 0, false, 0, nil
+		return explorer.ContentInfo{}, nil
 	}
 	sealed, _ := b.store.IsSealed(m)
 	blocks, size, err := countDAG(b.store, m)
 	if err != nil {
-		return false, 0, 0, false, 0, err
+		return explorer.ContentInfo{}, err
 	}
-	return true, size, blocks, sealed, m.Codec(), nil
+	oi, _ := store.GetObjectInfo(b.store, m)
+	return explorer.ContentInfo{
+		MID:      m.String(),
+		Size:     size,
+		Blocks:   blocks,
+		Sealed:   sealed,
+		Present:  true,
+		Codec:    m.Codec(),
+		Name:     oi.Name,
+		MimeType: oi.MimeType,
+	}, nil
 }
 
 // Seal pins m recursively. We delegate to daemonBackend.
@@ -175,10 +187,12 @@ func (a *explorerAdapter) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser
 		return nil, explorer.ContentInfo{}, err
 	}
 	return rc, explorer.ContentInfo{
-		MID:    info.MID,
-		Size:   info.Size,
-		Blocks: info.Blocks,
-		Sealed: info.Sealed,
+		MID:      info.MID,
+		Size:     info.Size,
+		Blocks:   info.Blocks,
+		Sealed:   info.Sealed,
+		Name:     info.Name,
+		MimeType: info.MimeType,
 	}, nil
 }
 
@@ -350,4 +364,43 @@ func joinStrings(parts []string, sep string) string {
 		out += sep + parts[i]
 	}
 	return out
+}
+
+// Add ingests a stream from the explorer upload form. The
+// implementation writes to a temp file, calls daemonBackend.Add,
+// and removes the temp file.
+func (a *explorerAdapter) Add(ctx context.Context, name string, r io.Reader) (explorer.ContentInfo, error) {
+	b := a.b
+	if b == nil || b.store == nil {
+		return explorer.ContentInfo{}, errors.New("explorer: no backend")
+	}
+	if r == nil {
+		return explorer.ContentInfo{}, errors.New("explorer: nil reader")
+	}
+	f, err := os.CreateTemp("", "membuss-explorer-add-*")
+	if err != nil {
+		return explorer.ContentInfo{}, err
+	}
+	tmpPath := f.Name()
+	defer os.Remove(tmpPath)
+	if _, err := io.Copy(f, r); err != nil {
+		f.Close()
+		return explorer.ContentInfo{}, err
+	}
+	if err := f.Close(); err != nil {
+		return explorer.ContentInfo{}, err
+	}
+	res, err := b.Add(ctx, tmpPath, "", 0, true, name, "")
+	if err != nil {
+		return explorer.ContentInfo{}, err
+	}
+	return explorer.ContentInfo{
+		MID:      res.MID,
+		Size:     res.Size,
+		Blocks:   res.Blocks,
+		Sealed:   res.Sealed,
+		Name:     res.Name,
+		MimeType: res.MimeType,
+		Present:  true,
+	}, nil
 }

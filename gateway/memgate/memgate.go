@@ -62,11 +62,24 @@ type ContentInfo struct {
 	// the content consists of.
 	Blocks uint64
 	// ContentType, if non-empty, is the MIME type returned
-	// in the Content-Type response header.
+	// in the Content-Type response header. Phase 19:
+	// preferred over the extension-based sniff when the
+	// uploader supplied an explicit MimeType.
 	ContentType string
 	// Sealed is true if the content is currently pinned in
 	// the local store. Surfaced as X-Membuss-Sealed.
 	Sealed bool
+	// Name is the file name the uploader supplied (or the
+	// basename of the source file when nothing was set).
+	// Surfaced as the filename= parameter of
+	// Content-Disposition and as X-Membuss-Name.
+	Name string
+	// MimeType is the explicit MIME type the uploader
+	// supplied (or empty, in which case Mem-Gate falls
+	// back to a filepath-extension sniff and then
+	// application/octet-stream). Surfaced as
+	// X-Membuss-MimeType.
+	MimeType string
 }
 
 // Config configures a MemGate.
@@ -195,9 +208,19 @@ func (m *MemGate) handleHead(w http.ResponseWriter, r *http.Request) {
 	h.Set("ETag", `"`+info.MID+`"`)
 	h.Set("Accept-Ranges", "bytes")
 	h.Set("Content-Length", strconv.FormatUint(info.Size, 10))
-	if info.ContentType != "" {
-		h.Set("Content-Type", info.ContentType)
+	// Content-Type: prefer the uploader-supplied MimeType,
+	// fall back to the path-based ContentType the backend
+	// filled in. Both are surfaced so the test suite and
+	// direct API consumers can tell them apart.
+	ct := info.MimeType
+	if ct == "" {
+		ct = info.ContentType
 	}
+	if ct != "" {
+		h.Set("Content-Type", ct)
+	}
+	h.Set("X-Membuss-Name", info.Name)
+	h.Set("X-Membuss-MimeType", info.MimeType)
 	h.Set("Cache-Control", "public, immutable, max-age=31536000")
 	w.WriteHeader(http.StatusOK)
 }
@@ -211,19 +234,42 @@ func (m *MemGate) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 
-	// If the caller asked for a download, set the
-	// Content-Disposition header BEFORE the body handler
-	// runs. Once the inner handler has called WriteHeader /
-	// written bytes, the headers are flushed and any
-	// later Set is a no-op. The default filename falls
-	// back to <mid>.bin.
-	if q.Get("download") == "1" {
-		name := q.Get("filename")
+	// Phase 19: resolve the content info FIRST so we can
+	// set the right Content-Type and Content-Disposition
+	// headers before the body handler writes a single byte.
+	// The CDN-style behavior is: explicit ?download=1
+	// forces attachment, ?view=1 (or absence of either)
+	// defaults to inline so the browser renders images,
+	// text, video, etc. directly.
+	preInfo, preErr := m.cfg.Backend.Stat(r.Context(), root)
+	if preErr == nil {
+		if preInfo.MimeType != "" && w.Header().Get("Content-Type") == "" {
+			w.Header().Set("Content-Type", preInfo.MimeType)
+		}
+		// Default filename for Content-Disposition. The
+		// uploader-supplied name wins; falls back to
+		// <mid>.bin. The disposition is set below.
+		name := preInfo.Name
 		if name == "" {
 			name = midStr + ".bin"
 		}
-		w.Header().Set("Content-Disposition",
-			`attachment; filename="`+name+`"`)
+		disp := "inline"
+		if q.Get("download") == "1" {
+			disp = "attachment"
+			if fn := q.Get("filename"); fn != "" {
+				name = fn
+			}
+		}
+		// Once-only: do not overwrite a header the
+		// caller set explicitly (e.g. tests).
+		if w.Header().Get("Content-Disposition") == "" {
+			w.Header().Set("Content-Disposition",
+				fmt.Sprintf(`%s; filename=%q`, disp, name))
+		}
+		// X-Membuss-* mirrors for tooling that cannot
+		// read Content-Disposition reliably.
+		w.Header().Set("X-Membuss-Name", preInfo.Name)
+		w.Header().Set("X-Membuss-MimeType", preInfo.MimeType)
 	}
 
 	switch q.Get("format") {

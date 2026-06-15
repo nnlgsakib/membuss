@@ -56,9 +56,13 @@ type Backend interface {
 
 // AddResult is the return value of Backend.Add.
 type AddResult struct {
-	MID    string
-	Size   uint64
-	Blocks uint64
+	MID      string
+	Size     uint64
+	Blocks   uint64
+	// Name and MimeType are the per-MID ObjectInfo
+	// that the HTTP API captured at upload time.
+	Name     string
+	MimeType string
 }
 
 // SealResult is the return value of Backend.Seal.
@@ -69,10 +73,15 @@ type SealResult struct {
 
 // StatInfo is the return value of Backend.Stat.
 type StatInfo struct {
-	Present bool
-	Size    uint64
-	Blocks  uint64
-	Sealed  bool
+	Present  bool
+	Size     uint64
+	Blocks   uint64
+	Sealed   bool
+	// Name and MimeType are the per-MID ObjectInfo
+	// captured at Add time, or empty for content
+	// added by an older daemon.
+	Name     string
+	MimeType string
 }
 
 // PeerInfo is one row of the local peer table.

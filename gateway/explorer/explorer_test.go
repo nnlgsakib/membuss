@@ -5,6 +5,7 @@ package explorer
 
 import (
 	"context"
+	"crypto/sha256"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -59,14 +60,20 @@ func (b *memBackend) setAnchorMode(v bool) {
 	b.anchorMode = v
 }
 
-func (b *memBackend) Stat(ctx context.Context, m mid.MID) (bool, uint64, uint64, bool, uint64, error) {
+func (b *memBackend) Stat(ctx context.Context, m mid.MID) (ContentInfo, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	data, ok := b.content[m.String()]
 	if !ok {
-		return false, 0, 0, false, 0, nil
+		return ContentInfo{}, nil
 	}
-	return true, uint64(len(data)), 1, true, m.Codec(), nil
+	return ContentInfo{
+		MID:    m.String(),
+		Size:   uint64(len(data)),
+		Blocks: 1,
+		Sealed: true,
+		Present: true,
+	}, nil
 }
 
 func (b *memBackend) Seal(ctx context.Context, m mid.MID) error {
@@ -183,6 +190,27 @@ func (b *memBackend) LocalAddrs(ctx context.Context) []string {
 func (b *memBackend) NodeVersion(ctx context.Context) (string, string) { return "0.1.0", "test" }
 func (b *memBackend) Uptime(ctx context.Context) time.Duration         { return time.Since(b.started) }
 func (b *memBackend) AnchorMode(ctx context.Context) bool              { return b.anchorMode }
+
+func (b *memBackend) Add(ctx context.Context, name string, r io.Reader) (ContentInfo, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return ContentInfo{}, err
+	}
+	h := sha256.Sum256(data)
+	// Build a fake MID from the hash. In tests we use
+	// mid.FromBytes which does exactly this internally.
+	m := mid.FromBytes(data)
+	b.put(m, data)
+	return ContentInfo{
+		MID:      m.String(),
+		Size:     uint64(len(data)),
+		Blocks:   1,
+		Sealed:   true,
+		Present:  true,
+		Name:     name,
+		MimeType: "application/octet-stream",
+	}, nil
+}
 
 // --- helpers ---
 

@@ -22,6 +22,7 @@ package memex
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -313,6 +314,17 @@ func (e *Engine) serveWants(wants []*membusspb.WantEntry) *membusspb.MemexMessag
 				Data: data,
 				Size: uint64(len(data)),
 			})
+			// Phase 19: if the blockstore supports
+			// GetMeta, look up ObjectInfo for this MID
+			// and include it in the response so the
+			// requester can persist the filename + MIME
+			// type locally.
+			if oi, ok := e.objectInfoFor(id); ok {
+				if resp.ObjectInfos == nil {
+					resp.ObjectInfos = make(map[string]*membusspb.ObjectInfo)
+				}
+				resp.ObjectInfos[w.Mid] = oi
+			}
 			continue
 		}
 		if w.SendDontHave {
@@ -320,6 +332,36 @@ func (e *Engine) serveWants(wants []*membusspb.WantEntry) *membusspb.MemexMessag
 		}
 	}
 	return resp
+}
+
+// objectInfoFor looks up the per-MID ObjectInfo stored in
+// the meta namespace. Returns nil, false when the store
+// does not support GetMeta or when no descriptor exists.
+func (e *Engine) objectInfoFor(m mid.MID) (*membusspb.ObjectInfo, bool) {
+	type metaGetter interface {
+		GetMeta(key string) ([]byte, error)
+	}
+	mg, ok := e.bs.(metaGetter)
+	if !ok {
+		return nil, false
+	}
+	raw, err := mg.GetMeta("obj/" + m.String())
+	if err != nil || len(raw) == 0 {
+		return nil, false
+	}
+	var info struct {
+		Name     string `json:"name,omitempty"`
+		MimeType string `json:"mime_type,omitempty"`
+		Size     uint64 `json:"size,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return nil, false
+	}
+	return &membusspb.ObjectInfo{
+		Name:     info.Name,
+		MimeType: info.MimeType,
+		Size:     info.Size,
+	}, true
 }
 
 // ReadResult is the success outcome of a Session.Fetch call.

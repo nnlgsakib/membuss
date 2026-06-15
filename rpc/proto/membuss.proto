@@ -41,6 +41,14 @@ message AddRequest {
   string chunker = 2;
   uint32 chunk_size = 3;
   bool no_seal = 4;
+  // Phase 19: optional human-friendly metadata captured at
+  // upload time and replayed on download. Filename is the
+  // client-side file name (drives the Content-Disposition
+  // header on the gateway). MimeType overrides the
+  // extension-based sniff when the gateway serves the
+  // content (e.g. "text/html; charset=utf-8").
+  string name = 5;
+  string mime_type = 6;
 }
 
 message AddResponse {
@@ -91,6 +99,9 @@ message StatResponse {
   bool sealed = 4;
   uint64 codec = 5;
   ErasureInfo erasure = 6;
+  // Phase 19: human-friendly metadata stored at Add time.
+  string name = 7;
+  string mime_type = 8;
 }
 
 message ErasureInfo {
@@ -221,6 +232,22 @@ message MemexMessage {
   repeated Block blocks = 2;
   repeated string have_mids = 3;
   repeated string cancel = 4;
+  // Phase 19: per-MID object metadata (filename, MIME type)
+  // travels alongside blocks so the receiver can persist it
+  // locally. Only populated for the root block of a DAG.
+  map<string, ObjectInfo> object_infos = 5;
+}
+
+// ObjectInfo carries the user-facing metadata that
+// content-addressed stores usually lose: the original
+// filename and MIME type. It is stored side-band under
+// the /m/ namespace and exchanged via Memex so every
+// node in the network can serve content with the right
+// Content-Type and Content-Disposition.
+message ObjectInfo {
+  string name = 1;
+  string mime_type = 2;
+  uint64 size = 3;
 }
 
 // BloomAnnouncement is the body of a /membuss/memex-bloom/1.0.0

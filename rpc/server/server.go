@@ -25,8 +25,10 @@ type Backend interface {
 	// Add ingests a local file. The chunker selection
 	// (chunk.NewFixed or chunk.NewRabin) and chunk size are
 	// honored when non-zero. If sealRoot is true, the root is
-	// sealed before returning.
-	Add(ctx context.Context, path, chunker string, chunkSize uint32, sealRoot bool) (AddResult, error)
+	// sealed before returning. Name and mimeType are
+	// persisted as the per-MID ObjectInfo so the gateway
+	// can reproduce the user-facing metadata on download.
+	Add(ctx context.Context, path, chunker string, chunkSize uint32, sealRoot bool, name, mimeType string) (AddResult, error)
 	// Get resolves a MID locally if present; otherwise it falls
 	// back to fetching via Memex. The returned ReadCloser
 	// streams the bytes.
@@ -49,10 +51,16 @@ type Backend interface {
 
 // AddResult is the return value of Backend.Add.
 type AddResult struct {
-	MID    string
-	Size   uint64
-	Blocks uint64
-	Sealed bool
+	MID      string
+	Size     uint64
+	Blocks   uint64
+	Sealed   bool
+	// Name and MimeType echo back the values the
+	// caller passed in (after defaults / sniffing
+	// applied by the daemon) so the CLI / explorer
+	// can show them without a second round-trip.
+	Name     string
+	MimeType string
 }
 
 // SealResult is the return value of Backend.Seal.
@@ -63,12 +71,17 @@ type SealResult struct {
 
 // StatInfo is the return value of Backend.Stat.
 type StatInfo struct {
-	Present bool
-	Size    uint64
-	Blocks  uint64
-	Sealed  bool
-	Codec   uint64
-	Erasure *ErasureInfo
+	Present  bool
+	Size     uint64
+	Blocks   uint64
+	Sealed   bool
+	Codec    uint64
+	Erasure  *ErasureInfo
+	// Name and MimeType are the per-MID ObjectInfo
+	// captured at Add time, or empty for content
+	// added by an older daemon.
+	Name     string
+	MimeType string
 }
 
 // ErasureInfo mirrors the ErasureInfo proto, kept separate so
@@ -139,7 +152,7 @@ func (s *Server) Add(ctx context.Context, req *membusspb.AddRequest) (*membusspb
 	if req.GetPath() == "" {
 		return nil, status.Error(codes.InvalidArgument, "add: path required")
 	}
-	res, err := s.Backend.Add(ctx, req.GetPath(), req.GetChunker(), req.GetChunkSize(), !req.GetNoSeal())
+	res, err := s.Backend.Add(ctx, req.GetPath(), req.GetChunker(), req.GetChunkSize(), !req.GetNoSeal(), req.GetName(), req.GetMimeType())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "add: %v", err)
 	}
@@ -220,11 +233,13 @@ func (s *Server) Stat(ctx context.Context, req *membusspb.StatRequest) (*membuss
 		return nil, status.Errorf(codes.Internal, "stat: %v", err)
 	}
 	resp := &membusspb.StatResponse{
-		Present: info.Present,
-		Size:    info.Size,
-		Blocks:  info.Blocks,
-		Sealed:  info.Sealed,
-		Codec:   info.Codec,
+		Present:  info.Present,
+		Size:     info.Size,
+		Blocks:   info.Blocks,
+		Sealed:   info.Sealed,
+		Codec:    info.Codec,
+		Name:     info.Name,
+		MimeType: info.MimeType,
 	}
 	if info.Erasure != nil {
 		resp.Erasure = &membusspb.ErasureInfo{

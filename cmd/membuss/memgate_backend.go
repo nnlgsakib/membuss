@@ -15,6 +15,7 @@ import (
 
 	"github.com/nnlgsakib/membuss/core/dag"
 	"github.com/nnlgsakib/membuss/core/mid"
+	"github.com/nnlgsakib/membuss/core/store"
 	"github.com/nnlgsakib/membuss/net/memex"
 	memgate "github.com/nnlgsakib/membuss/gateway/memgate"
 )
@@ -71,11 +72,21 @@ func (a *memgateAdapter) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser,
 	if err != nil {
 		return nil, memgate.ContentInfo{}, err
 	}
+	// Phase 19: surface the uploader-supplied name and
+	// MIME type so the gateway can serve with the right
+	// Content-Type and Content-Disposition.
+	oi, _ := store.GetObjectInfo(b.store, m)
 	return io.NopCloser(rc), memgate.ContentInfo{
-		MID:    m.String(),
-		Size:   size,
-		Blocks: blocks,
-		Sealed: sealed,
+		MID:        m.String(),
+		Size:       size,
+		Blocks:     blocks,
+		Sealed:     sealed,
+		Name:       oi.Name,
+		MimeType:   oi.MimeType,
+		// ContentType is the legacy / extension-based
+		// fallback. The handleGet handler prefers
+		// MimeType when both are set.
+		ContentType: detectContentType(m.String(), nil, oi.MimeType),
 	}, nil
 }
 
@@ -134,11 +145,17 @@ func (a *memgateAdapter) Stat(ctx context.Context, m mid.MID) (memgate.ContentIn
 		return memgate.ContentInfo{}, err
 	}
 	sealed, _ := b.store.IsSealed(m)
+	// Phase 19: surface Name + MimeType from the
+	// per-MID ObjectInfo (see core/store.ObjectInfo).
+	oi, _ := store.GetObjectInfo(b.store, m)
 	return memgate.ContentInfo{
-		MID:    m.String(),
-		Size:   size,
-		Blocks: blocks,
-		Sealed: sealed,
+		MID:         m.String(),
+		Size:        size,
+		Blocks:      blocks,
+		Sealed:      sealed,
+		Name:        oi.Name,
+		MimeType:    oi.MimeType,
+		ContentType: detectContentType(m.String(), nil, oi.MimeType),
 	}, nil
 }
 

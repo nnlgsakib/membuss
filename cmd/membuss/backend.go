@@ -73,7 +73,7 @@ var _ serverpkg.Backend = (*daemonBackend)(nil)
 // Add reads the file, builds the DAG, seals the root, and
 // announces it to the DHT. chunker/chunkSize come from the
 // gRPC request; if empty/zero, fixed 256 KiB is used.
-func (b *daemonBackend) Add(ctx context.Context, path, chunker string, chunkSize uint32, sealRoot bool) (serverpkg.AddResult, error) {
+func (b *daemonBackend) Add(ctx context.Context, path, chunker string, chunkSize uint32, sealRoot bool, name, mimeType string) (serverpkg.AddResult, error) {
 	if path == "" {
 		return serverpkg.AddResult{}, errors.New("add: empty path")
 	}
@@ -119,6 +119,25 @@ func (b *daemonBackend) Add(ctx context.Context, path, chunker string, chunkSize
 		return serverpkg.AddResult{}, fmt.Errorf("add: count: %w", err)
 	}
 
+	// Phase 19: persist the per-MID ObjectInfo so the
+	// gateway can reproduce the user-facing metadata
+	// on download. Name defaults to the file's
+	// basename; MimeType defaults to an extension
+	// sniff (see core/store.SniffMime).
+	if name == "" {
+		name = filepath.Base(path)
+	}
+	if mimeType == "" {
+		mimeType = store.SniffMime(name)
+	}
+	if err := store.SetObjectInfo(b.store, root, store.ObjectInfo{
+		Name:     name,
+		MimeType: mimeType,
+		Size:     size,
+	}); err != nil {
+		return serverpkg.AddResult{}, fmt.Errorf("add: objectinfo: %w", err)
+	}
+
 	if sealRoot {
 		if err := b.store.Seal(root, true); err != nil {
 			return serverpkg.AddResult{}, fmt.Errorf("add: seal: %w", err)
@@ -132,10 +151,12 @@ func (b *daemonBackend) Add(ctx context.Context, path, chunker string, chunkSize
 	}
 
 	return serverpkg.AddResult{
-		MID:    root.String(),
-		Size:   size,
-		Blocks: blocks,
-		Sealed: sealRoot,
+		MID:      root.String(),
+		Size:     size,
+		Blocks:   blocks,
+		Sealed:   sealRoot,
+		Name:     name,
+		MimeType: mimeType,
 	}, nil
 }
 
@@ -255,12 +276,18 @@ func (b *daemonBackend) Stat(ctx context.Context, midStr string) (serverpkg.Stat
 	if err != nil {
 		return serverpkg.StatInfo{}, err
 	}
+	// Phase 19: attach the per-MID ObjectInfo so the
+	// CLI and the explorer can show / render the
+	// upload name and the sniffed MIME type.
+	oi, _ := store.GetObjectInfo(b.store, root)
 	info := serverpkg.StatInfo{
-		Present: true,
-		Size:    size,
-		Blocks:  blocks,
-		Sealed:  sealed,
-		Codec:   root.Codec(),
+		Present:  true,
+		Size:     size,
+		Blocks:   blocks,
+		Sealed:   sealed,
+		Codec:    root.Codec(),
+		Name:     oi.Name,
+		MimeType: oi.MimeType,
 	}
 	return info, nil
 }

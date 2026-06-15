@@ -2,6 +2,7 @@ package memex
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -292,6 +293,44 @@ func (s *Session) readLoop(ctx context.Context, stream network.Stream, markResol
 			}
 			markResolved(id)
 		}
+		// Phase 19: persist any ObjectInfo metadata the
+		// provider sent alongside the blocks. This is how
+		// filename + MIME type travel across the network.
+		if len(msg.ObjectInfos) > 0 {
+			s.storeObjectInfos(msg.ObjectInfos)
+		}
+	}
+}
+
+// storeObjectInfos persists received ObjectInfo descriptors
+// into the local store's meta namespace. It is best-effort;
+// errors are silently ignored so a corrupt descriptor from
+// a remote peer cannot break the session.
+func (s *Session) storeObjectInfos(infos map[string]*membusspb.ObjectInfo) {
+	type metaPutter interface {
+		PutMeta(key string, value []byte) error
+	}
+	mp, ok := s.cfg.Engine.bs.(metaPutter)
+	if !ok {
+		return
+	}
+	for midStr, oi := range infos {
+		if midStr == "" || oi == nil {
+			continue
+		}
+		raw, err := json.Marshal(struct {
+			Name     string `json:"name,omitempty"`
+			MimeType string `json:"mime_type,omitempty"`
+			Size     uint64 `json:"size,omitempty"`
+		}{
+			Name:     oi.Name,
+			MimeType: oi.MimeType,
+			Size:     oi.Size,
+		})
+		if err != nil {
+			continue
+		}
+		_ = mp.PutMeta("obj/"+midStr, raw)
 	}
 }
 
@@ -331,6 +370,19 @@ func (a *memexBlockstoreAdapter) Put(m mid.MID, data []byte) error { return a.b.
 func (a *memexBlockstoreAdapter) Get(m mid.MID) ([]byte, error)    { return a.b.Get(m) }
 func (a *memexBlockstoreAdapter) Has(m mid.MID) (bool, error)      { return a.b.Has(m) }
 func (a *memexBlockstoreAdapter) Delete(m mid.MID) error           { return nil }
+// PutMeta / GetMeta are not part of the narrower
+// memex.Blockstore contract. They are added here so
+// the adapter satisfies the (now larger) store.Blockstore
+// interface that the dag.Resolver depends on. Reads
+// return ErrNotFound (no metadata access from this
+// adapter); writes are no-ops. In practice the
+// engine always passes a real store.Blockstore
+// (see asBlockstore's fast path), so these methods
+// are only exercised in tests.
+func (a *memexBlockstoreAdapter) PutMeta(key string, value []byte) error { return nil }
+func (a *memexBlockstoreAdapter) GetMeta(key string) ([]byte, error) {
+	return nil, store.ErrNotFound
+}
 
 // RetryConfig configures FetchWithBackoff's exponential retry
 // schedule. Zero values fall back to sane defaults.

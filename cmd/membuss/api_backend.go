@@ -48,14 +48,18 @@ func (a *apiAdapter) Add(ctx context.Context, name string, r io.Reader) (api.Add
 	if err := f.Close(); err != nil {
 		return api.AddResult{}, err
 	}
-	res, err := b.Add(ctx, tmpPath, "", 0, true)
+	// Phase 19: forward the caller-supplied name so the
+	// daemon can persist it as the per-MID ObjectInfo.
+	res, err := b.Add(ctx, tmpPath, "", 0, true, name, "")
 	if err != nil {
 		return api.AddResult{}, err
 	}
 	return api.AddResult{
-		MID:    res.MID,
-		Size:   res.Size,
-		Blocks: res.Blocks,
+		MID:      res.MID,
+		Size:     res.Size,
+		Blocks:   res.Blocks,
+		Name:     res.Name,
+		MimeType: res.MimeType,
 	}, nil
 }
 

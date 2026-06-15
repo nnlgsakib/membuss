@@ -123,3 +123,10 @@ ul.dag-tree ul.collapsed { display: none; }
   max-width: 1100px; margin: 32px auto 24px; padding: 0 18px;
   display: flex; justify-content: space-between; color: #6b7280; font-size: 12px;
 }
+
+.upload { max-width: 600px; margin: 0 auto; }
+.upload h1 { margin: 0 0 12px; }
+.upload-form { margin-top: 24px; }
+.form-group { margin-bottom: 16px; }
+.form-group label { display: block; font-weight: 600; margin-bottom: 6px; }
+.form-group input[type="file"] { width: 100%; padding: 10px; border: 1px solid #c8ccd4; border-radius: 4px; }

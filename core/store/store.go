@@ -27,6 +27,13 @@ type Blockstore interface {
 	Get(m mid.MID) ([]byte, error)
 	Has(m mid.MID) (bool, error)
 	Delete(m mid.MID) error
+	// PutMeta stores an arbitrary key/value pair under
+	// the /m/ namespace. Used by per-MID descriptors
+	// (see ObjectInfo), GC timestamps, etc.
+	PutMeta(key string, value []byte) error
+	// GetMeta returns the value previously stored
+	// under key, or ErrNotFound when absent.
+	GetMeta(key string) ([]byte, error)
 }
 
 // Memstore is an in-memory Blockstore. It is safe for concurrent

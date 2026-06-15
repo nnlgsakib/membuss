@@ -176,11 +176,19 @@ func (x *PingResponse) GetBuild() string {
 }
 
 type AddRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	Chunker       string                 `protobuf:"bytes,2,opt,name=chunker,proto3" json:"chunker,omitempty"`
-	ChunkSize     uint32                 `protobuf:"varint,3,opt,name=chunk_size,json=chunkSize,proto3" json:"chunk_size,omitempty"`
-	NoSeal        bool                   `protobuf:"varint,4,opt,name=no_seal,json=noSeal,proto3" json:"no_seal,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Path      string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Chunker   string                 `protobuf:"bytes,2,opt,name=chunker,proto3" json:"chunker,omitempty"`
+	ChunkSize uint32                 `protobuf:"varint,3,opt,name=chunk_size,json=chunkSize,proto3" json:"chunk_size,omitempty"`
+	NoSeal    bool                   `protobuf:"varint,4,opt,name=no_seal,json=noSeal,proto3" json:"no_seal,omitempty"`
+	// Phase 19: optional human-friendly metadata captured at
+	// upload time and replayed on download. Filename is the
+	// client-side file name (drives the Content-Disposition
+	// header on the gateway). MimeType overrides the
+	// extension-based sniff when the gateway serves the
+	// content (e.g. "text/html; charset=utf-8").
+	Name          string `protobuf:"bytes,5,opt,name=name,proto3" json:"name,omitempty"`
+	MimeType      string `protobuf:"bytes,6,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -241,6 +249,20 @@ func (x *AddRequest) GetNoSeal() bool {
 		return x.NoSeal
 	}
 	return false
+}
+
+func (x *AddRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *AddRequest) GetMimeType() string {
+	if x != nil {
+		return x.MimeType
+	}
+	return ""
 }
 
 type AddResponse struct {
@@ -668,13 +690,16 @@ func (x *StatRequest) GetMid() string {
 }
 
 type StatResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Present       bool                   `protobuf:"varint,1,opt,name=present,proto3" json:"present,omitempty"`
-	Size          uint64                 `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
-	Blocks        uint64                 `protobuf:"varint,3,opt,name=blocks,proto3" json:"blocks,omitempty"`
-	Sealed        bool                   `protobuf:"varint,4,opt,name=sealed,proto3" json:"sealed,omitempty"`
-	Codec         uint64                 `protobuf:"varint,5,opt,name=codec,proto3" json:"codec,omitempty"`
-	Erasure       *ErasureInfo           `protobuf:"bytes,6,opt,name=erasure,proto3" json:"erasure,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Present bool                   `protobuf:"varint,1,opt,name=present,proto3" json:"present,omitempty"`
+	Size    uint64                 `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
+	Blocks  uint64                 `protobuf:"varint,3,opt,name=blocks,proto3" json:"blocks,omitempty"`
+	Sealed  bool                   `protobuf:"varint,4,opt,name=sealed,proto3" json:"sealed,omitempty"`
+	Codec   uint64                 `protobuf:"varint,5,opt,name=codec,proto3" json:"codec,omitempty"`
+	Erasure *ErasureInfo           `protobuf:"bytes,6,opt,name=erasure,proto3" json:"erasure,omitempty"`
+	// Phase 19: human-friendly metadata stored at Add time.
+	Name          string `protobuf:"bytes,7,opt,name=name,proto3" json:"name,omitempty"`
+	MimeType      string `protobuf:"bytes,8,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -749,6 +774,20 @@ func (x *StatResponse) GetErasure() *ErasureInfo {
 		return x.Erasure
 	}
 	return nil
+}
+
+func (x *StatResponse) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *StatResponse) GetMimeType() string {
+	if x != nil {
+		return x.MimeType
+	}
+	return ""
 }
 
 type ErasureInfo struct {
@@ -1740,11 +1779,15 @@ func (x *WantEntry) GetSendDontHave() bool {
 
 // MemexMessage is the body of a /membuss/memex/1.0.0 frame.
 type MemexMessage struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Wants         []*WantEntry           `protobuf:"bytes,1,rep,name=wants,proto3" json:"wants,omitempty"`
-	Blocks        []*Block               `protobuf:"bytes,2,rep,name=blocks,proto3" json:"blocks,omitempty"`
-	HaveMids      []string               `protobuf:"bytes,3,rep,name=have_mids,json=haveMids,proto3" json:"have_mids,omitempty"`
-	Cancel        []string               `protobuf:"bytes,4,rep,name=cancel,proto3" json:"cancel,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Wants    []*WantEntry           `protobuf:"bytes,1,rep,name=wants,proto3" json:"wants,omitempty"`
+	Blocks   []*Block               `protobuf:"bytes,2,rep,name=blocks,proto3" json:"blocks,omitempty"`
+	HaveMids []string               `protobuf:"bytes,3,rep,name=have_mids,json=haveMids,proto3" json:"have_mids,omitempty"`
+	Cancel   []string               `protobuf:"bytes,4,rep,name=cancel,proto3" json:"cancel,omitempty"`
+	// Phase 19: per-MID object metadata (filename, MIME type)
+	// travels alongside blocks so the receiver can persist it
+	// locally. Only populated for the root block of a DAG.
+	ObjectInfos   map[string]*ObjectInfo `protobuf:"bytes,5,rep,name=object_infos,json=objectInfos,proto3" json:"object_infos,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1807,6 +1850,79 @@ func (x *MemexMessage) GetCancel() []string {
 	return nil
 }
 
+func (x *MemexMessage) GetObjectInfos() map[string]*ObjectInfo {
+	if x != nil {
+		return x.ObjectInfos
+	}
+	return nil
+}
+
+// ObjectInfo carries the user-facing metadata that
+// content-addressed stores usually lose: the original
+// filename and MIME type. It is stored side-band under
+// the /m/ namespace and exchanged via Memex so every
+// node in the network can serve content with the right
+// Content-Type and Content-Disposition.
+type ObjectInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	MimeType      string                 `protobuf:"bytes,2,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
+	Size          uint64                 `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ObjectInfo) Reset() {
+	*x = ObjectInfo{}
+	mi := &file_membuss_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ObjectInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ObjectInfo) ProtoMessage() {}
+
+func (x *ObjectInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_membuss_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ObjectInfo.ProtoReflect.Descriptor instead.
+func (*ObjectInfo) Descriptor() ([]byte, []int) {
+	return file_membuss_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *ObjectInfo) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ObjectInfo) GetMimeType() string {
+	if x != nil {
+		return x.MimeType
+	}
+	return ""
+}
+
+func (x *ObjectInfo) GetSize() uint64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
 // BloomAnnouncement is the body of a /membuss/memex-bloom/1.0.0
 // frame (Phase 13). Peers periodically broadcast the bloom
 // filter of their sealed MID set so Memex sessions can avoid
@@ -1823,7 +1939,7 @@ type BloomAnnouncement struct {
 
 func (x *BloomAnnouncement) Reset() {
 	*x = BloomAnnouncement{}
-	mi := &file_membuss_proto_msgTypes[30]
+	mi := &file_membuss_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1835,7 +1951,7 @@ func (x *BloomAnnouncement) String() string {
 func (*BloomAnnouncement) ProtoMessage() {}
 
 func (x *BloomAnnouncement) ProtoReflect() protoreflect.Message {
-	mi := &file_membuss_proto_msgTypes[30]
+	mi := &file_membuss_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1848,7 +1964,7 @@ func (x *BloomAnnouncement) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BloomAnnouncement.ProtoReflect.Descriptor instead.
 func (*BloomAnnouncement) Descriptor() ([]byte, []int) {
-	return file_membuss_proto_rawDescGZIP(), []int{30}
+	return file_membuss_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *BloomAnnouncement) GetBloomFilter() []byte {
@@ -1889,14 +2005,16 @@ const file_membuss_proto_rawDesc = "" +
 	"\amessage\x18\x01 \x01(\tR\amessage\">\n" +
 	"\fPingResponse\x12\x18\n" +
 	"\amessage\x18\x01 \x01(\tR\amessage\x12\x14\n" +
-	"\x05build\x18\x02 \x01(\tR\x05build\"r\n" +
+	"\x05build\x18\x02 \x01(\tR\x05build\"\xa3\x01\n" +
 	"\n" +
 	"AddRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x18\n" +
 	"\achunker\x18\x02 \x01(\tR\achunker\x12\x1d\n" +
 	"\n" +
 	"chunk_size\x18\x03 \x01(\rR\tchunkSize\x12\x17\n" +
-	"\ano_seal\x18\x04 \x01(\bR\x06noSeal\"c\n" +
+	"\ano_seal\x18\x04 \x01(\bR\x06noSeal\x12\x12\n" +
+	"\x04name\x18\x05 \x01(\tR\x04name\x12\x1b\n" +
+	"\tmime_type\x18\x06 \x01(\tR\bmimeType\"c\n" +
 	"\vAddResponse\x12\x10\n" +
 	"\x03mid\x18\x01 \x01(\tR\x03mid\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x16\n" +
@@ -1922,14 +2040,16 @@ const file_membuss_proto_rawDesc = "" +
 	"\x0eUnsealResponse\x12\x18\n" +
 	"\aremoved\x18\x01 \x01(\x04R\aremoved\"\x1f\n" +
 	"\vStatRequest\x12\x10\n" +
-	"\x03mid\x18\x01 \x01(\tR\x03mid\"\xb5\x01\n" +
+	"\x03mid\x18\x01 \x01(\tR\x03mid\"\xe6\x01\n" +
 	"\fStatResponse\x12\x18\n" +
 	"\apresent\x18\x01 \x01(\bR\apresent\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x16\n" +
 	"\x06blocks\x18\x03 \x01(\x04R\x06blocks\x12\x16\n" +
 	"\x06sealed\x18\x04 \x01(\bR\x06sealed\x12\x14\n" +
 	"\x05codec\x18\x05 \x01(\x04R\x05codec\x121\n" +
-	"\aerasure\x18\x06 \x01(\v2\x17.membuss.v1.ErasureInfoR\aerasure\"r\n" +
+	"\aerasure\x18\x06 \x01(\v2\x17.membuss.v1.ErasureInfoR\aerasure\x12\x12\n" +
+	"\x04name\x18\a \x01(\tR\x04name\x12\x1b\n" +
+	"\tmime_type\x18\b \x01(\tR\bmimeType\"r\n" +
 	"\vErasureInfo\x12\x1f\n" +
 	"\vdata_shards\x18\x01 \x01(\rR\n" +
 	"dataShards\x12#\n" +
@@ -2001,12 +2121,21 @@ const file_membuss_proto_rawDesc = "" +
 	"\tWantEntry\x12\x10\n" +
 	"\x03mid\x18\x01 \x01(\tR\x03mid\x12\x1a\n" +
 	"\bpriority\x18\x02 \x01(\x05R\bpriority\x12$\n" +
-	"\x0esend_dont_have\x18\x03 \x01(\bR\fsendDontHave\"\x9b\x01\n" +
+	"\x0esend_dont_have\x18\x03 \x01(\bR\fsendDontHave\"\xc1\x02\n" +
 	"\fMemexMessage\x12+\n" +
 	"\x05wants\x18\x01 \x03(\v2\x15.membuss.v1.WantEntryR\x05wants\x12)\n" +
 	"\x06blocks\x18\x02 \x03(\v2\x11.membuss.v1.BlockR\x06blocks\x12\x1b\n" +
 	"\thave_mids\x18\x03 \x03(\tR\bhaveMids\x12\x16\n" +
-	"\x06cancel\x18\x04 \x03(\tR\x06cancel\"\x8a\x01\n" +
+	"\x06cancel\x18\x04 \x03(\tR\x06cancel\x12L\n" +
+	"\fobject_infos\x18\x05 \x03(\v2).membuss.v1.MemexMessage.ObjectInfosEntryR\vobjectInfos\x1aV\n" +
+	"\x10ObjectInfosEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12,\n" +
+	"\x05value\x18\x02 \x01(\v2\x16.membuss.v1.ObjectInfoR\x05value:\x028\x01\"Q\n" +
+	"\n" +
+	"ObjectInfo\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1b\n" +
+	"\tmime_type\x18\x02 \x01(\tR\bmimeType\x12\x12\n" +
+	"\x04size\x18\x03 \x01(\x04R\x04size\"\x8a\x01\n" +
 	"\x11BloomAnnouncement\x12!\n" +
 	"\fbloom_filter\x18\x01 \x01(\fR\vbloomFilter\x12\x1d\n" +
 	"\n" +
@@ -2046,7 +2175,7 @@ func file_membuss_proto_rawDescGZIP() []byte {
 }
 
 var file_membuss_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_membuss_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
+var file_membuss_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
 var file_membuss_proto_goTypes = []any{
 	(Reachability)(0),            // 0: membuss.v1.Reachability
 	(*PingRequest)(nil),          // 1: membuss.v1.PingRequest
@@ -2079,7 +2208,9 @@ var file_membuss_proto_goTypes = []any{
 	(*PEXMessage)(nil),           // 28: membuss.v1.PEXMessage
 	(*WantEntry)(nil),            // 29: membuss.v1.WantEntry
 	(*MemexMessage)(nil),         // 30: membuss.v1.MemexMessage
-	(*BloomAnnouncement)(nil),    // 31: membuss.v1.BloomAnnouncement
+	(*ObjectInfo)(nil),           // 31: membuss.v1.ObjectInfo
+	(*BloomAnnouncement)(nil),    // 32: membuss.v1.BloomAnnouncement
+	nil,                          // 33: membuss.v1.MemexMessage.ObjectInfosEntry
 }
 var file_membuss_proto_depIdxs = []int32{
 	13, // 0: membuss.v1.StatResponse.erasure:type_name -> membuss.v1.ErasureInfo
@@ -2089,31 +2220,33 @@ var file_membuss_proto_depIdxs = []int32{
 	27, // 4: membuss.v1.PEXMessage.peers:type_name -> membuss.v1.PeerInfo
 	29, // 5: membuss.v1.MemexMessage.wants:type_name -> membuss.v1.WantEntry
 	23, // 6: membuss.v1.MemexMessage.blocks:type_name -> membuss.v1.Block
-	1,  // 7: membuss.v1.Node.Ping:input_type -> membuss.v1.PingRequest
-	3,  // 8: membuss.v1.MembussNode.Add:input_type -> membuss.v1.AddRequest
-	5,  // 9: membuss.v1.MembussNode.Get:input_type -> membuss.v1.GetRequest
-	7,  // 10: membuss.v1.MembussNode.Seal:input_type -> membuss.v1.SealRequest
-	9,  // 11: membuss.v1.MembussNode.Unseal:input_type -> membuss.v1.UnsealRequest
-	11, // 12: membuss.v1.MembussNode.Stat:input_type -> membuss.v1.StatRequest
-	15, // 13: membuss.v1.MembussNode.Peers:input_type -> membuss.v1.PeersRequest
-	17, // 14: membuss.v1.MembussNode.DHTPeek:input_type -> membuss.v1.DHTPeekRequest
-	19, // 15: membuss.v1.MembussNode.GC:input_type -> membuss.v1.GCRequest
-	21, // 16: membuss.v1.MembussNode.AnchorStatus:input_type -> membuss.v1.AnchorStatusRequest
-	2,  // 17: membuss.v1.Node.Ping:output_type -> membuss.v1.PingResponse
-	4,  // 18: membuss.v1.MembussNode.Add:output_type -> membuss.v1.AddResponse
-	6,  // 19: membuss.v1.MembussNode.Get:output_type -> membuss.v1.GetChunk
-	8,  // 20: membuss.v1.MembussNode.Seal:output_type -> membuss.v1.SealResponse
-	10, // 21: membuss.v1.MembussNode.Unseal:output_type -> membuss.v1.UnsealResponse
-	12, // 22: membuss.v1.MembussNode.Stat:output_type -> membuss.v1.StatResponse
-	16, // 23: membuss.v1.MembussNode.Peers:output_type -> membuss.v1.PeersResponse
-	18, // 24: membuss.v1.MembussNode.DHTPeek:output_type -> membuss.v1.DHTPeekResponse
-	20, // 25: membuss.v1.MembussNode.GC:output_type -> membuss.v1.GCResponse
-	22, // 26: membuss.v1.MembussNode.AnchorStatus:output_type -> membuss.v1.AnchorStatusResponse
-	17, // [17:27] is the sub-list for method output_type
-	7,  // [7:17] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	33, // 7: membuss.v1.MemexMessage.object_infos:type_name -> membuss.v1.MemexMessage.ObjectInfosEntry
+	31, // 8: membuss.v1.MemexMessage.ObjectInfosEntry.value:type_name -> membuss.v1.ObjectInfo
+	1,  // 9: membuss.v1.Node.Ping:input_type -> membuss.v1.PingRequest
+	3,  // 10: membuss.v1.MembussNode.Add:input_type -> membuss.v1.AddRequest
+	5,  // 11: membuss.v1.MembussNode.Get:input_type -> membuss.v1.GetRequest
+	7,  // 12: membuss.v1.MembussNode.Seal:input_type -> membuss.v1.SealRequest
+	9,  // 13: membuss.v1.MembussNode.Unseal:input_type -> membuss.v1.UnsealRequest
+	11, // 14: membuss.v1.MembussNode.Stat:input_type -> membuss.v1.StatRequest
+	15, // 15: membuss.v1.MembussNode.Peers:input_type -> membuss.v1.PeersRequest
+	17, // 16: membuss.v1.MembussNode.DHTPeek:input_type -> membuss.v1.DHTPeekRequest
+	19, // 17: membuss.v1.MembussNode.GC:input_type -> membuss.v1.GCRequest
+	21, // 18: membuss.v1.MembussNode.AnchorStatus:input_type -> membuss.v1.AnchorStatusRequest
+	2,  // 19: membuss.v1.Node.Ping:output_type -> membuss.v1.PingResponse
+	4,  // 20: membuss.v1.MembussNode.Add:output_type -> membuss.v1.AddResponse
+	6,  // 21: membuss.v1.MembussNode.Get:output_type -> membuss.v1.GetChunk
+	8,  // 22: membuss.v1.MembussNode.Seal:output_type -> membuss.v1.SealResponse
+	10, // 23: membuss.v1.MembussNode.Unseal:output_type -> membuss.v1.UnsealResponse
+	12, // 24: membuss.v1.MembussNode.Stat:output_type -> membuss.v1.StatResponse
+	16, // 25: membuss.v1.MembussNode.Peers:output_type -> membuss.v1.PeersResponse
+	18, // 26: membuss.v1.MembussNode.DHTPeek:output_type -> membuss.v1.DHTPeekResponse
+	20, // 27: membuss.v1.MembussNode.GC:output_type -> membuss.v1.GCResponse
+	22, // 28: membuss.v1.MembussNode.AnchorStatus:output_type -> membuss.v1.AnchorStatusResponse
+	19, // [19:29] is the sub-list for method output_type
+	9,  // [9:19] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_membuss_proto_init() }
@@ -2127,7 +2260,7 @@ func file_membuss_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_membuss_proto_rawDesc), len(file_membuss_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   31,
+			NumMessages:   33,
 			NumExtensions: 0,
 			NumServices:   2,
 		},
