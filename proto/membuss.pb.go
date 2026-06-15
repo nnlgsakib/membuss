@@ -1807,6 +1807,78 @@ func (x *MemexMessage) GetCancel() []string {
 	return nil
 }
 
+// BloomAnnouncement is the body of a /membuss/memex-bloom/1.0.0
+// frame (Phase 13). Peers periodically broadcast the bloom
+// filter of their sealed MID set so Memex sessions can avoid
+// asking providers that are guaranteed not to have a block.
+type BloomAnnouncement struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	BloomFilter   []byte                 `protobuf:"bytes,1,opt,name=bloom_filter,json=bloomFilter,proto3" json:"bloom_filter,omitempty"` // serialized bloom filter (MarshalBinary)
+	ItemCount     uint64                 `protobuf:"varint,2,opt,name=item_count,json=itemCount,proto3" json:"item_count,omitempty"`      // approximate MIDs represented
+	Capacity      uint64                 `protobuf:"varint,3,opt,name=capacity,proto3" json:"capacity,omitempty"`                         // configured capacity
+	FpRate        float64                `protobuf:"fixed64,4,opt,name=fp_rate,json=fpRate,proto3" json:"fp_rate,omitempty"`              // configured false-positive rate
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BloomAnnouncement) Reset() {
+	*x = BloomAnnouncement{}
+	mi := &file_membuss_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BloomAnnouncement) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BloomAnnouncement) ProtoMessage() {}
+
+func (x *BloomAnnouncement) ProtoReflect() protoreflect.Message {
+	mi := &file_membuss_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BloomAnnouncement.ProtoReflect.Descriptor instead.
+func (*BloomAnnouncement) Descriptor() ([]byte, []int) {
+	return file_membuss_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *BloomAnnouncement) GetBloomFilter() []byte {
+	if x != nil {
+		return x.BloomFilter
+	}
+	return nil
+}
+
+func (x *BloomAnnouncement) GetItemCount() uint64 {
+	if x != nil {
+		return x.ItemCount
+	}
+	return 0
+}
+
+func (x *BloomAnnouncement) GetCapacity() uint64 {
+	if x != nil {
+		return x.Capacity
+	}
+	return 0
+}
+
+func (x *BloomAnnouncement) GetFpRate() float64 {
+	if x != nil {
+		return x.FpRate
+	}
+	return 0
+}
+
 var File_membuss_proto protoreflect.FileDescriptor
 
 const file_membuss_proto_rawDesc = "" +
@@ -1934,7 +2006,13 @@ const file_membuss_proto_rawDesc = "" +
 	"\x05wants\x18\x01 \x03(\v2\x15.membuss.v1.WantEntryR\x05wants\x12)\n" +
 	"\x06blocks\x18\x02 \x03(\v2\x11.membuss.v1.BlockR\x06blocks\x12\x1b\n" +
 	"\thave_mids\x18\x03 \x03(\tR\bhaveMids\x12\x16\n" +
-	"\x06cancel\x18\x04 \x03(\tR\x06cancel*D\n" +
+	"\x06cancel\x18\x04 \x03(\tR\x06cancel\"\x8a\x01\n" +
+	"\x11BloomAnnouncement\x12!\n" +
+	"\fbloom_filter\x18\x01 \x01(\fR\vbloomFilter\x12\x1d\n" +
+	"\n" +
+	"item_count\x18\x02 \x01(\x04R\titemCount\x12\x1a\n" +
+	"\bcapacity\x18\x03 \x01(\x04R\bcapacity\x12\x17\n" +
+	"\afp_rate\x18\x04 \x01(\x01R\x06fpRate*D\n" +
 	"\fReachability\x12\v\n" +
 	"\aUNKNOWN\x10\x00\x12\n" +
 	"\n" +
@@ -1968,7 +2046,7 @@ func file_membuss_proto_rawDescGZIP() []byte {
 }
 
 var file_membuss_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_membuss_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
+var file_membuss_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
 var file_membuss_proto_goTypes = []any{
 	(Reachability)(0),            // 0: membuss.v1.Reachability
 	(*PingRequest)(nil),          // 1: membuss.v1.PingRequest
@@ -2001,6 +2079,7 @@ var file_membuss_proto_goTypes = []any{
 	(*PEXMessage)(nil),           // 28: membuss.v1.PEXMessage
 	(*WantEntry)(nil),            // 29: membuss.v1.WantEntry
 	(*MemexMessage)(nil),         // 30: membuss.v1.MemexMessage
+	(*BloomAnnouncement)(nil),    // 31: membuss.v1.BloomAnnouncement
 }
 var file_membuss_proto_depIdxs = []int32{
 	13, // 0: membuss.v1.StatResponse.erasure:type_name -> membuss.v1.ErasureInfo
@@ -2048,7 +2127,7 @@ func file_membuss_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_membuss_proto_rawDesc), len(file_membuss_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   30,
+			NumMessages:   31,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

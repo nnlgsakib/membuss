@@ -1,4 +1,4 @@
-﻿// Package store: BadgerDB-backed implementation of the Store and
+// Package store: BadgerDB-backed implementation of the Store and
 // Blockstore interfaces.
 //
 // Key layout (all keys are byte strings, sortable, no length prefix):
@@ -19,6 +19,11 @@
 // whichever hits first. This matches the Blockstore contract
 // used by core/dag, which only knows the MID of a node and
 // never needs to know whether the node is a leaf or internal.
+//
+// Phase 13: an in-memory bloom filter (see bloom.go) sits in
+// front of BadgerDB on the Has/HasDAG path. The filter gives
+// "definitely absent" answers for free; only "maybe present"
+// answers fall through to a real DB lookup.
 package store
 
 import (
@@ -96,7 +101,8 @@ type Store interface {
 // MemStore is the BadgerDB-backed Store implementation. A zero
 // value is invalid; use NewMemStore.
 type MemStore struct {
-	db *badger.DB
+	db    *badger.DB
+	bloom *bloomIndex
 }
 
 // Options configures a MemStore at construction time.
@@ -115,11 +121,23 @@ type Options struct {
 
 	// Logger, if non-nil, is passed to BadgerDB. nil = silent.
 	Logger badger.Logger
+
+	// Bloom configures the in-memory bloom filter that backs
+	// Has() lookups (Phase 13). The zero value applies the
+	// package defaults (10M capacity, 0.1% FPRate, no snapshot
+	// persistence). Set Bloom.Disabled = true to opt out of
+	// the filter entirely (Has then always goes to BadgerDB).
+	Bloom BloomConfig
 }
 
 // NewMemStore opens (or creates) a MemStore at opts.Path.
 //
-// The caller MUST call Close when done.
+// On success, the returned MemStore owns an in-memory bloom
+// filter over every block/DAG MID. If opts.Bloom.SnapshotPath
+// is set and points at a readable file, the filter is loaded
+// from that file; otherwise the filter is rebuilt from the
+// contents of the freshly-opened BadgerDB. The caller MUST
+// call Close when done so the snapshot can be flushed.
 func NewMemStore(opts Options) (*MemStore, error) {
 	if !opts.InMemory && filepath.Clean(opts.Path) == "" {
 		return nil, errors.New("store: empty path")
@@ -134,7 +152,42 @@ func NewMemStore(opts Options) (*MemStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: open badger at %q: %w", opts.Path, err)
 	}
-	return &MemStore{db: db}, nil
+
+	s := &MemStore{db: db}
+	if err := s.initBloom(opts.Bloom); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: init bloom: %w", err)
+	}
+	return s, nil
+}
+
+// initBloom brings up the bloom index. The lookup order is:
+//  1. Load from opts.SnapshotPath if it is set and readable.
+//  2. Otherwise rebuild from the just-opened BadgerDB.
+//
+// The filter always covers BOTH the /b/ and /d/ namespaces.
+func (s *MemStore) initBloom(cfg BloomConfig) error {
+	if cfg.Disabled {
+		// Caller explicitly opted out. Has() falls through
+		// to BadgerDB on every call.
+		s.bloom = nil
+		return nil
+	}
+	idx, err := newBloomIndex(cfg)
+	if err != nil {
+		return err
+	}
+	// Ensure the filter knows about every MID already on
+	// disk: when the snapshot was loadable newBloomIndex
+	// returns early and fromDB is a no-op (it would just
+	// re-add the same MIDs); when no snapshot existed the
+	// filter is empty and we must backfill before the
+	// first Has() runs.
+	if err := idx.fromDB(s.db); err != nil {
+		return err
+	}
+	s.bloom = idx
+	return nil
 }
 
 // Put stores data under the given MID. The data is recorded as a
@@ -151,9 +204,15 @@ func (s *MemStore) Put(m mid.MID, data []byte) error {
 		return err
 	}
 	key := blockKey(m)
-	return s.db.Update(func(txn *badger.Txn) error {
+	if err := s.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(key, append([]byte(nil), data...))
-	})
+	}); err != nil {
+		return err
+	}
+	if s.bloom != nil {
+		s.bloom.add(m)
+	}
+	return nil
 }
 
 // PutDAG stores data under the given MID as a DAG node
@@ -170,17 +229,27 @@ func (s *MemStore) PutDAG(m mid.MID, data []byte) error {
 		return err
 	}
 	key := dagKey(m)
-	return s.db.Update(func(txn *badger.Txn) error {
+	if err := s.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(key, append([]byte(nil), data...))
-	})
+	}); err != nil {
+		return err
+	}
+	if s.bloom != nil {
+		s.bloom.add(m)
+	}
+	return nil
 }
 
 // Get returns the bytes stored under m, looking in BOTH the
 // block and DAG namespaces. The first namespace to return a
 // match wins; the lookup order is /b/ then /d/. This matches the
-// Blockstore contract used by core/dag, where a caller only
-// knows the MID and does not want to know whether the node is a
-// leaf or an internal node.
+// Blockstore contract used by core/dag, which only knows the
+// MID of a node and never needs to know whether the node is a
+// leaf or internal.
+//
+// Phase 13: the bloom filter is consulted first. A negative
+// result is conclusive; a positive result is verified against
+// BadgerDB.
 func (s *MemStore) Get(m mid.MID) ([]byte, error) {
 	if s.db == nil {
 		return nil, errors.New("store: closed")
@@ -188,54 +257,33 @@ func (s *MemStore) Get(m mid.MID) ([]byte, error) {
 	if m.IsZero() {
 		return nil, errors.New("store: zero MID")
 	}
-	var out []byte
-	err := s.db.View(func(txn *badger.Txn) error {
-		// Try /b/ first.
-		if item, gerr := txn.Get(blockKey(m)); gerr == nil {
-			out = make([]byte, item.ValueSize())
-			return item.Value(func(v []byte) error {
-				copy(out, v)
-				return nil
-			})
-		} else if !errors.Is(gerr, badger.ErrKeyNotFound) {
-			return gerr
-		}
-		// Fall back to /d/.
-		item, gerr := txn.Get(dagKey(m))
-		if gerr != nil {
-			return gerr
-		}
-		out = make([]byte, item.ValueSize())
-		return item.Value(func(v []byte) error {
-			copy(out, v)
-			return nil
-		})
-	})
-	if errors.Is(err, badger.ErrKeyNotFound) {
+	if s.bloom != nil && !s.bloom.maybeTest(m) {
 		return nil, ErrNotFound
 	}
-	if err != nil {
-		return nil, fmt.Errorf("store: get %s: %w", m.String(), err)
+	if b, err := s.getFrom(blockKey(m)); err == nil {
+		return b, nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return nil, err
 	}
-	return out, nil
+	return s.getFrom(dagKey(m))
 }
 
-// GetDAG returns the DAG-node bytes for m, looking ONLY in the
-// DAG namespace. Use Get for the more common cross-namespace
-// lookup.
+// GetDAG returns the bytes stored under m in the DAG
+// namespace only.
 func (s *MemStore) GetDAG(m mid.MID) ([]byte, error) {
 	return s.getFrom(dagKey(m))
 }
 
+// getFrom is the BadgerDB read primitive.
 func (s *MemStore) getFrom(key []byte) ([]byte, error) {
 	if s.db == nil {
 		return nil, errors.New("store: closed")
 	}
 	var out []byte
 	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(key)
-		if err != nil {
-			return err
+		item, gerr := txn.Get(key)
+		if gerr != nil {
+			return gerr
 		}
 		out = make([]byte, item.ValueSize())
 		return item.Value(func(v []byte) error {
@@ -254,12 +302,19 @@ func (s *MemStore) getFrom(key []byte) ([]byte, error) {
 
 // Has reports whether a block OR a DAG node exists for m. It
 // returns true if the MID is present in either namespace.
+//
+// Phase 13: the bloom filter is consulted first. A negative
+// result is conclusive; a positive result is verified against
+// BadgerDB.
 func (s *MemStore) Has(m mid.MID) (bool, error) {
 	if s.db == nil {
 		return false, errors.New("store: closed")
 	}
 	if m.IsZero() {
 		return false, errors.New("store: zero MID")
+	}
+	if s.bloom != nil && !s.bloom.maybeTest(m) {
+		return false, nil
 	}
 	var found bool
 	err := s.db.View(func(txn *badger.Txn) error {
@@ -286,6 +341,15 @@ func (s *MemStore) Has(m mid.MID) (bool, error) {
 // HasDAG reports whether a DAG node exists for m. It looks ONLY
 // in the DAG namespace.
 func (s *MemStore) HasDAG(m mid.MID) (bool, error) {
+	if s.db == nil {
+		return false, errors.New("store: closed")
+	}
+	if m.IsZero() {
+		return false, errors.New("store: zero MID")
+	}
+	if s.bloom != nil && !s.bloom.maybeTest(m) {
+		return false, nil
+	}
 	return s.hasKey(dagKey(m))
 }
 
@@ -313,11 +377,17 @@ func (s *MemStore) hasKey(key []byte) (bool, error) {
 
 // Delete removes the block for m from BOTH namespaces. Missing
 // keys are not an error. Use DeleteDAG to remove only from /d/.
+//
+// Phase 13: the bloom library does not support removal, so
+// Delete triggers a one-time rebuild of the filter from
+// BadgerDB. The cost is bounded by the number of MIDs in the
+// store, which is acceptable because Delete is rare and
+// operates out-of-band from the request path.
 func (s *MemStore) Delete(m mid.MID) error {
 	if s.db == nil {
 		return errors.New("store: closed")
 	}
-	return s.db.Update(func(txn *badger.Txn) error {
+	if err := s.db.Update(func(txn *badger.Txn) error {
 		for _, key := range [][]byte{blockKey(m), dagKey(m)} {
 			err := txn.Delete(key)
 			if err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
@@ -325,12 +395,28 @@ func (s *MemStore) Delete(m mid.MID) error {
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	if s.bloom != nil {
+		if rerr := s.bloom.rebuildFromDB(s.db); rerr != nil {
+			return fmt.Errorf("store: bloom rebuild after delete: %w", rerr)
+		}
+	}
+	return nil
 }
 
 // DeleteDAG removes the DAG node for m.
 func (s *MemStore) DeleteDAG(m mid.MID) error {
-	return s.deleteKey(dagKey(m))
+	if err := s.deleteKey(dagKey(m)); err != nil {
+		return err
+	}
+	if s.bloom != nil {
+		if rerr := s.bloom.rebuildFromDB(s.db); rerr != nil {
+			return fmt.Errorf("store: bloom rebuild after delete: %w", rerr)
+		}
+	}
+	return nil
 }
 
 func (s *MemStore) deleteKey(key []byte) error {
@@ -348,13 +434,27 @@ func (s *MemStore) deleteKey(key []byte) error {
 
 // Close releases the underlying BadgerDB handle. After Close all
 // other methods return errors.
+//
+// Phase 13: the bloom filter is serialized to its snapshot
+// path (if configured) before the DB closes so the next
+// NewMemStore can skip the rebuild. Snapshot errors are
+// surfaced to the caller but do not block DB close.
 func (s *MemStore) Close() error {
 	if s.db == nil {
 		return nil
 	}
-	err := s.db.Close()
+	var snapErr error
+	if s.bloom != nil {
+	
+		snapErr = s.bloom.saveSnapshot()
+	}
+	dbErr := s.db.Close()
 	s.db = nil
-	return err
+	s.bloom = nil
+	if dbErr != nil {
+		return dbErr
+	}
+	return snapErr
 }
 
 // Size returns the approximate on-disk size in bytes. The value
@@ -404,7 +504,6 @@ func bytesEqual(a, b []byte) bool {
 	}
 	return true
 }
-
 
 // AllBlocks returns every MID that has a block or DAG record
 // in the store. The result is the union of the /b/ and /d/

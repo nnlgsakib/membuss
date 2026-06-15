@@ -1,4 +1,4 @@
-﻿// Package config defines the on-disk and in-memory configuration model for
+// Package config defines the on-disk and in-memory configuration model for
 // the Membuss daemon and loads it from a YAML file.
 package config
 
@@ -84,6 +84,22 @@ type Config struct {
 	// for AutoNAT to resolve reachability before continuing.
 	// Default 10s.
 	NATWaitSeconds int `yaml:"nat_wait_seconds"`
+
+	// --- Phase 13: Bloom filters ---
+
+	// BloomCapacity is the expected number of MIDs the in-memory
+	// block-existence filter will hold. Default 10_000_000.
+	BloomCapacity uint `yaml:"bloom_capacity"`
+	// BloomFPRate is the target false positive rate for the
+	// block-existence filter. Default 0.001.
+	BloomFPRate float64 `yaml:"bloom_fp_rate"`
+	// BloomDisabled turns the in-memory filter off entirely.
+	BloomDisabled bool `yaml:"bloom_disabled"`
+	// MemexBloomAnnounceInterval controls how often the local
+	// node broadcasts its sealed-MID bloom filter to directly
+	// connected peers. Default 5m. Set to 0 to disable the
+	// gossip.
+	MemexBloomAnnounceInterval time.Duration `yaml:"memex_bloom_announce_interval"`
 }
 
 // TLSConfig is a pair of PEM file paths enabling HTTPS on an HTTP
@@ -143,6 +159,10 @@ func Default() *Config {
 		RelayBandwidthMB:     16,
 		ForceRelay:           false,
 		NATWaitSeconds:       10,
+		BloomCapacity:                  10_000_000,
+		BloomFPRate:                    0.001,
+		BloomDisabled:                  false,
+		MemexBloomAnnounceInterval:     5 * time.Minute,
 	}
 }
 
@@ -222,6 +242,13 @@ func (c *Config) Validate() error {
 	}
 	if c.NATWaitSeconds < 0 {
 		return errors.New("nat_wait_seconds must be >= 0")
+	}
+
+	if c.BloomFPRate < 0 || c.BloomFPRate >= 1 {
+		return errors.New("bloom_fp_rate must be in [0, 1)")
+	}
+	if c.MemexBloomAnnounceInterval < 0 {
+		return errors.New("memex_bloom_announce_interval must be >= 0")
 	}
 	return nil
 }

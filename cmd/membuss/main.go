@@ -1,4 +1,4 @@
-﻿// Command membuss is the Membuss daemon entry point.
+// Command membuss is the Membuss daemon entry point.
 //
 // Phase 7: the daemon boots the libp2p host, DHT, PEX,
 // Memex, Mem-Herald, and (optionally) the Anchor engine,
@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	cryptoTLS "crypto/tls"
+	"path/filepath"
 	"errors"
 	"flag"
 	"fmt"
@@ -146,8 +147,21 @@ func main() {
 	px.Start(ctx)
 	defer px.Stop()
 
-	// 5) Memex engine.
-	mx, err := memex.New(memex.Config{Host: h, Blockstore: bs})
+	// 5a) Memex bloom manager (peer filter exchange, Phase 13).
+	// Constructed first so we can wire it into the engine.
+	bloomMgr, err := memex.NewBloomManager(memex.BloomConfig{
+		Host:     h,
+		Sealed:   bs,
+		Interval: cfg.MemexBloomAnnounceInterval,
+	})
+	if err != nil {
+		logger.Error("memex bloom", "err", err.Error()); os.Exit(1)
+	}
+	bloomMgr.Start()
+	defer bloomMgr.Stop()
+
+	// 5b) Memex engine.
+	mx, err := memex.New(memex.Config{Host: h, Blockstore: bs, Bloom: bloomMgr})
 	if err != nil {
 		logger.Error("memex", "err", err.Error()); os.Exit(1)
 	}
@@ -292,10 +306,18 @@ func banner(cfg *config.Config, cfgPath string, inMemory, noAnchor bool) {
 // its contents on Close. The data dir is still passed through
 // to subsystems that need it (host identity, etc.).
 func openStore(cfg *config.Config, inMemory bool) (store.Store, error) {
-	if inMemory {
-		return store.NewMemStore(store.Options{InMemory: true})
+	bloom := store.BloomConfig{
+		Capacity: cfg.BloomCapacity,
+		FPRate:   cfg.BloomFPRate,
+		Disabled: cfg.BloomDisabled,
 	}
-	return store.NewMemStore(store.Options{Path: cfg.DataDir})
+	if !inMemory && !cfg.BloomDisabled {
+		bloom.SnapshotPath = filepath.Join(cfg.DataDir, "bloom.bin")
+	}
+	if inMemory {
+		return store.NewMemStore(store.Options{InMemory: true, Bloom: bloom})
+	}
+	return store.NewMemStore(store.Options{Path: cfg.DataDir, Bloom: bloom})
 }
 
 // parsePeers converts a list of "peerID+multiaddr" strings

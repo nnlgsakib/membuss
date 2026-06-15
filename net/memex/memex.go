@@ -1,4 +1,4 @@
-﻿// Package memex implements Memex, the Membuss block exchange
+// Package memex implements Memex, the Membuss block exchange
 // protocol over libp2p streams.
 //
 // Memex is a simple want/have/block protocol inspired by
@@ -129,12 +129,20 @@ type Engine struct {
 	host host.Host
 	bs   Blockstore
 	wm   *wantManager
+	// bloom is the optional peer filter exchange. nil
+	// disables the Phase 13 want-list optimization. Set
+	// by New(Bloom: mgr).
+	bloom *BloomManager
 }
 
 // Config configures an Engine.
 type Config struct {
 	Host      host.Host
 	Blockstore Blockstore
+	// Bloom is the optional peer filter exchange. When
+	// non-nil the engine uses it to skip providers that
+	// are guaranteed not to have a given block.
+	Bloom *BloomManager
 }
 
 // New constructs an Engine. Call Start to register the
@@ -150,6 +158,7 @@ func New(cfg Config) (*Engine, error) {
 		host: cfg.Host,
 		bs:   cfg.Blockstore,
 		wm:   newWantManager(),
+	bloom: cfg.Bloom,
 	}, nil
 }
 
@@ -199,6 +208,11 @@ func (e *Engine) Blockstore() Blockstore { return e.bs }
 // WantManager returns the in-process want manager. Tests use
 // it to wait for an inbound block delivery.
 func (e *Engine) WantManager() *wantManager { return e.wm }
+
+// BloomManager returns the peer-filter exchange, or nil if
+// none was configured. Sessions consult it to skip
+// providers that are guaranteed not to have a given block.
+func (e *Engine) BloomManager() *BloomManager { return e.bloom }
 
 // handleStream is the inbound /membuss/memex/1.0.0 handler.
 // Each frame read from the stream is dispatched: incoming

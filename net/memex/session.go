@@ -1,4 +1,4 @@
-﻿package memex
+package memex
 
 import (
 	"context"
@@ -113,6 +113,22 @@ func (s *Session) Fetch(ctx context.Context) (io.Reader, error) {
 		return true
 	}
 
+	// Phase 13: filter the provider list through the
+	// bloom manager. A provider whose stored filter
+	// reports "definitely absent" for the root is
+	// excluded; unknown peers are kept.
+	filtered := s.selectPeersForMID(s.cfg.Root)
+	if len(filtered) == 0 {
+		return nil, errors.New("memex session: no provider after bloom filter")
+	}
+	// Replace the fan-out's provider list for the rest
+	// of this session.
+	liveProviders := filtered
+	// Honor the user-requested fanout bound.
+	if fanout > len(liveProviders) {
+		fanout = len(liveProviders)
+	}
+
 	// Seed with the root.
 	addEnqueued(s.cfg.Root)
 	pending <- s.cfg.Root
@@ -123,7 +139,7 @@ func (s *Session) Fetch(ctx context.Context) (io.Reader, error) {
 	var wg sync.WaitGroup
 	wg.Add(fanout)
 	for i := 0; i < fanout; i++ {
-		provider := s.cfg.Providers[i]
+	provider := liveProviders[i]
 		go func() {
 			defer wg.Done()
 			_ = s.runProvider(ctx, provider, pending, markResolved)
@@ -417,4 +433,20 @@ func isRetryableMemexErr(err error) bool {
 		return false
 	}
 	return true
+}
+
+// selectPeersForMID applies the Phase 13 bloom filter
+// optimization to a provider list. A provider whose
+// stored filter says "definitely absent" for want is
+// excluded. Providers for which the manager has no
+// information are kept (the safe default).
+//
+// The returned slice is a fresh copy: callers may
+// freely mutate it.
+func (s *Session) selectPeersForMID(want mid.MID) []peer.AddrInfo {
+	mgr := s.cfg.Engine.BloomManager()
+	if mgr == nil {
+		return s.cfg.Providers
+	}
+	return mgr.FilteredProviders(want, s.cfg.Providers)
 }

@@ -222,3 +222,14 @@ message MemexMessage {
   repeated string have_mids = 3;
   repeated string cancel = 4;
 }
+
+// BloomAnnouncement is the body of a /membuss/memex-bloom/1.0.0
+// frame (Phase 13). Peers periodically broadcast the bloom
+// filter of their sealed MID set so Memex sessions can avoid
+// asking providers that are guaranteed not to have a block.
+message BloomAnnouncement {
+  bytes  bloom_filter  = 1;   // serialized bloom filter (MarshalBinary)
+  uint64 item_count    = 2;   // approximate MIDs represented
+  uint64 capacity      = 3;   // configured capacity
+  double fp_rate       = 4;   // configured false-positive rate
+}
