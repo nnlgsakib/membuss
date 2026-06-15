@@ -19,7 +19,6 @@ package main
 import (
 	"context"
 	cryptoTLS "crypto/tls"
-	"path/filepath"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,12 +27,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/nnlgsakib/membuss/api"
-	memgate "github.com/nnlgsakib/membuss/gateway/memgate"
 	explorerPkg "github.com/nnlgsakib/membuss/gateway/explorer"
+	memgate "github.com/nnlgsakib/membuss/gateway/memgate"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
@@ -87,33 +87,60 @@ func main() {
 	// 1) Block store.
 	bs, err := openStore(cfg, *inMemory)
 	if err != nil {
-		logger.Error("open store", "err", err.Error()); os.Exit(1)
+		logger.Error("open store", "err", err.Error())
+		os.Exit(1)
 	}
 	defer bs.Close()
+
+	// Phase 14: verify the on-disk store is v1-compatible.
+	// The MID format changed in Phase 14 (legacy base58 -> CIDv1+base32lower)
+	// but the on-disk multihash key layout is format-agnostic, so the
+	// migration is a consistency check rather than a rewriter. We also
+	// emit a warning if the operator has explicitly asked for the
+	// legacy format in config.
+	if !*inMemory {
+		if ms, ok := bs.(*store.MemStore); ok {
+			if res, err := store.MigrateToV1MIDs(ms); err != nil {
+				logger.Warn("mid migration scan", "err", err.Error())
+			} else if len(res.Legacy) > 0 {
+				logger.Warn("legacy MIDs detected in store",
+					"count", len(res.Legacy),
+					"inspected", res.Inspected)
+			} else {
+				logger.Info("MID format: v1 (CIDv1 + base32lower)",
+					"inspected", res.Inspected)
+			}
+		}
+	}
+	if cfg.MIDVersion == "legacy" {
+		logger.Warn("MIDVersion=legacy: new content will be emitted in the pre-Phase-14 base58 form")
+	}
 
 	// Pre-parse bootstrap peers so the host can use them
 	// as AutoRelay static candidates.
 	bootstrapPeers, err := parsePeers(cfg.BootstrapPeers)
 	if err != nil {
-		logger.Error("parse bootstrap peers", "err", err.Error()); os.Exit(1)
+		logger.Error("parse bootstrap peers", "err", err.Error())
+		os.Exit(1)
 	}
 
 	// 2) libp2p host.
 	hostCfg := host.Config{
-		ListenAddrs:       cfg.ListenAddrs,
-		DataDir:           cfg.DataDir,
-		UserAgent:         "membuss/" + *build,
-		StaticRelays:      bootstrapPeers,
+		ListenAddrs:  cfg.ListenAddrs,
+		DataDir:      cfg.DataDir,
+		UserAgent:    "membuss/" + *build,
+		StaticRelays: bootstrapPeers,
 		// --- Phase 11: NAT traversal ---
-		RelayService:        cfg.RelayService,
-		RelayMaxConns:       cfg.RelayMaxConns,
+		RelayService:         cfg.RelayService,
+		RelayMaxConns:        cfg.RelayMaxConns,
 		RelayMaxReservations: cfg.RelayMaxReservations,
-		RelayBandwidthMB:    cfg.RelayBandwidthMB,
-		ForceRelay:          cfg.ForceRelay,
+		RelayBandwidthMB:     cfg.RelayBandwidthMB,
+		ForceRelay:           cfg.ForceRelay,
 	}
 	h, err := host.NewHost(hostCfg)
 	if err != nil {
-		logger.Error("host", "err", err.Error()); os.Exit(1)
+		logger.Error("host", "err", err.Error())
+		os.Exit(1)
 	}
 	defer h.Close()
 	fmt.Fprintf(os.Stdout, "  peer_id:        %s\n", h.ID())
@@ -132,7 +159,8 @@ func main() {
 	// 3) DHT.
 	mdht, err := dht.New(ctx, dht.Config{Host: h})
 	if err != nil {
-		logger.Error("dht", "err", err.Error()); os.Exit(1)
+		logger.Error("dht", "err", err.Error())
+		os.Exit(1)
 	}
 	if err := mdht.Bootstrap(ctx, bootstrapPeers); err != nil {
 		logger.Warn("dht bootstrap", "err", err.Error())
@@ -142,7 +170,8 @@ func main() {
 	// 4) PEX.
 	px, err := pex.New(pex.Config{Host: h})
 	if err != nil {
-		logger.Error("pex", "err", err.Error()); os.Exit(1)
+		logger.Error("pex", "err", err.Error())
+		os.Exit(1)
 	}
 	px.Start(ctx)
 	defer px.Stop()
@@ -155,7 +184,8 @@ func main() {
 		Interval: cfg.MemexBloomAnnounceInterval,
 	})
 	if err != nil {
-		logger.Error("memex bloom", "err", err.Error()); os.Exit(1)
+		logger.Error("memex bloom", "err", err.Error())
+		os.Exit(1)
 	}
 	bloomMgr.Start()
 	defer bloomMgr.Stop()
@@ -163,7 +193,8 @@ func main() {
 	// 5b) Memex engine.
 	mx, err := memex.New(memex.Config{Host: h, Blockstore: bs, Bloom: bloomMgr})
 	if err != nil {
-		logger.Error("memex", "err", err.Error()); os.Exit(1)
+		logger.Error("memex", "err", err.Error())
+		os.Exit(1)
 	}
 	mx.Start()
 	defer mx.Stop()
@@ -178,7 +209,8 @@ func main() {
 		Burst:    8,
 	})
 	if err != nil {
-		logger.Error("herald", "err", err.Error()); os.Exit(1)
+		logger.Error("herald", "err", err.Error())
+		os.Exit(1)
 	}
 	hd.Start(ctx)
 	defer hd.Stop()
@@ -194,7 +226,8 @@ func main() {
 			Logger:   logger,
 		})
 		if err != nil {
-			logger.Error("relay announcer", "err", err.Error()); os.Exit(1)
+			logger.Error("relay announcer", "err", err.Error())
+			os.Exit(1)
 		}
 		relayAnnouncer.Start(ctx)
 		defer func() { _ = relayAnnouncer }()
@@ -214,10 +247,12 @@ func main() {
 			DiscoveryInterval: 30 * time.Second,
 		})
 		if err != nil {
-			logger.Error("anchor", "err", err.Error()); os.Exit(1)
+			logger.Error("anchor", "err", err.Error())
+			os.Exit(1)
 		}
 		if err := anchorEng.Start(ctx); err != nil {
-			logger.Error("anchor start", "err", err.Error()); os.Exit(1)
+			logger.Error("anchor start", "err", err.Error())
+			os.Exit(1)
 		}
 		defer anchorEng.Stop()
 		fmt.Fprintf(os.Stdout, "  anchor_mode:    enabled\n")
@@ -241,20 +276,23 @@ func main() {
 	}
 	grpcSrv, err := startGRPC(cfg.GRPCAddr, backend)
 	if err != nil {
-		logger.Error("grpc", "err", err.Error()); os.Exit(1)
+		logger.Error("grpc", "err", err.Error())
+		os.Exit(1)
 	}
 	fmt.Fprintf(os.Stdout, "  grpc_addr:      %s\n", cfg.GRPCAddr)
 	// 9) Mem-Gate: public HTTP gateway + CDN edge.
 	gateSrv, err := startGateway(cfg.GatewayAddr, newMemgateAdapter(backend), newExplorerAdapter(backend, cfg.AnchorMode), cfg.GatewayRateLimitPerMin, cfg.GatewayTLS)
 	if err != nil {
-		logger.Error("gateway", "err", err.Error()); os.Exit(1)
+		logger.Error("gateway", "err", err.Error())
+		os.Exit(1)
 	}
 	fmt.Fprintf(os.Stdout, "  gateway_addr:   %s\n", gateSrv.Addr())
 
 	// 10) Node API: local control plane over HTTP/JSON.
 	apiSrv, err := startNodeAPI(cfg.APIAddr, newAPIAdapter(backend), mtrx, cfg.APIKey, cfg.APITLS)
 	if err != nil {
-		logger.Error("api", "err", err.Error()); os.Exit(1)
+		logger.Error("api", "err", err.Error())
+		os.Exit(1)
 	}
 	fmt.Fprintf(os.Stdout, "  api_addr:       %s\n", apiSrv.Addr())
 

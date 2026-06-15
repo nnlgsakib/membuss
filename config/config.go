@@ -100,6 +100,16 @@ type Config struct {
 	// connected peers. Default 5m. Set to 0 to disable the
 	// gossip.
 	MemexBloomAnnounceInterval time.Duration `yaml:"memex_bloom_announce_interval"`
+
+	// --- Phase 14: MID version ---
+
+	// MIDVersion selects which MID string format the
+	// daemon uses. v1 is the canonical CIDv1 +
+	// base32lower form (default). legacy is the
+	// pre-Phase-14 base58 form, supported for one
+	// release cycle so operators can drain
+	// pre-upgrade stores.
+	MIDVersion string `yaml:"mid_version"`
 }
 
 // TLSConfig is a pair of PEM file paths enabling HTTPS on an HTTP
@@ -163,6 +173,7 @@ func Default() *Config {
 		BloomFPRate:                    0.001,
 		BloomDisabled:                  false,
 		MemexBloomAnnounceInterval:     5 * time.Minute,
+		MIDVersion:                    "v1",
 	}
 }
 
@@ -248,6 +259,10 @@ func (c *Config) Validate() error {
 		return errors.New("bloom_fp_rate must be in [0, 1)")
 	}
 	if c.MemexBloomAnnounceInterval < 0 {
+
+	if c.MIDVersion != "v1" && c.MIDVersion != "legacy" && c.MIDVersion != "" {
+		return errors.New("mid_version must be 'v1' or 'legacy'")
+	}
 		return errors.New("memex_bloom_announce_interval must be >= 0")
 	}
 	return nil
