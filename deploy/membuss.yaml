@@ -1,0 +1,39 @@
+# Container default configuration.
+#
+# Differences from the developer-facing membuss.yaml at the repo
+# root: this file binds every listener to 0.0.0.0 so the container
+# is reachable from outside its network namespace, points data_dir
+# at the on-volume location, and is otherwise a faithful copy of
+# the project defaults. Operators are expected to either mount a
+# custom config over /etc/membuss/config.yaml, or to pass env vars
+# that the entrypoint wraps around the same paths.
+
+# libp2p multiaddrs the host binds to. TCP + QUIC are both exposed
+# so peers can choose the cheaper transport.
+listen_addrs:
+  - /ip4/0.0.0.0/tcp/4001
+  - /ip4/0.0.0.0/udp/4001/quic-v1
+
+# libp2p peer IDs (as multiaddr /p2p/<id> entries) the DHT tries
+# to connect to on startup. Leave empty for a single-node run, or
+# set via MEMBUSS_BOOTSTRAP_PEERS in compose / k8s.
+bootstrap_peers: []
+
+# BadgerDB + bloom snapshot live here. The container image declares
+# /var/lib/membuss as a VOLUME so a named volume (membuss-data) or
+# a host bind-mount can be attached.
+data_dir: /var/lib/membuss
+
+# HTTP listeners. Bound to 0.0.0.0 so the ports exposed in the
+# Dockerfile are reachable from the host.
+gateway_addr: 0.0.0.0:8080
+api_addr:     0.0.0.0:5001
+
+# gRPC for membuss-cli.
+grpc_addr: 0.0.0.0:50051
+
+# Anchor mode is off by default; turn on via MEMBUSS_ANCHOR_MODE=true.
+anchor_mode: false
+
+# Structured log level. env-override target.
+log_level: info

@@ -1,4 +1,4 @@
-# Membuss
+﻿# Membuss
 
 > Decentralized, content-addressed distributed storage and delivery
 > network written in Go.
@@ -434,6 +434,44 @@ These are the next concrete directions, in rough priority order:
 - **Streaming / live content.** A Memex extension for block
   ranges fetched as they become available, suitable for
   audio/video.
+
+## Docker
+
+A multi-stage `Dockerfile` and a single-service `docker-compose.yml`
+ship in the repo root for one-line deploys.
+
+```
+make docker-build
+make docker-compose-up
+make docker-compose-logs
+make docker-compose-down
+```
+
+Image: distroless `nonroot`, ~25 MB, `VOLUME /var/lib/membuss`,
+`HEALTHCHECK` on gRPC. Ports: `4001/tcp+udp` (libp2p), `5001`
+(Node API), `8080` (Mem-Gate), `50051` (gRPC).
+
+All `config.yaml` fields can be overridden by environment variables
+that the entrypoint renders into a temp config before exec'ing the
+daemon:
+
+- `MEMBUSS_LISTEN_ADDRS` (default `/ip4/0.0.0.0/tcp/4001,/ip4/0.0.0.0/udp/4001/quic-v1`)
+- `MEMBUSS_GATEWAY_ADDR` (default `0.0.0.0:8080`)
+- `MEMBUSS_API_ADDR` (default `0.0.0.0:5001`)
+- `MEMBUSS_GRPC_ADDR` (default `0.0.0.0:50051`)
+- `MEMBUSS_DATA_DIR` (default `/var/lib/membuss`)
+- `MEMBUSS_BOOTSTRAP_PEERS` (default empty)
+- `MEMBUSS_LOG_LEVEL` (default `info`)
+- `MEMBUSS_ANCHOR_MODE` (default `false`)
+- `MEMBUSS_NO_ANCHOR` (default `true`)
+- `MEMBUSS_BLOOM_CAPACITY` (default `10000000`)
+- `MEMBUSS_BLOOM_FP_RATE` (default `0.001`)
+
+For anything not in the list, mount a custom config over
+`/etc/membuss/config.yaml`.
+
+`make docker-push IMAGE=membuss:0.1.0 REGISTRY=ghcr.io/me` tags and
+pushes the local image.
 
 ## Development
 

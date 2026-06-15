@@ -1,0 +1,40 @@
+# Files excluded from the `docker build` context. The context
+# is the root of the repo, so anything that is not needed to
+# produce the binaries is dropped here to keep the builder
+# stage fast and the resulting image layer small.
+
+# Local build artifacts
+bin/
+data/
+daemon.out
+daemon.err
+*.log
+
+# Editor / OS clutter
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Test caches and the previous test binary that lived at the
+# repo root before Makefile moved it under bin/.
+*.test
+*.out
+coverage.txt
+
+# Git metadata is not needed in the image.
+.git/
+.gitignore
+.github/
+
+# The repo's own .agents, .specify and docs trees are not
+# required to build the binary.
+.agents/
+.specify/
+docs/
+
+# Do not bake the developer's working membuss.yaml into the
+# image; the container ships its own /etc/membuss/config.yaml.
+membuss.yaml
+membuss.exe
+*.exe
