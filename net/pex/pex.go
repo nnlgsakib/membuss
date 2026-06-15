@@ -11,6 +11,24 @@
 // Newly discovered peers with advertised multiaddrs are
 // asynchronously dialed so that gossip actively grows the
 // node's connectivity.
+//
+// Phase 12: PEX is reachability-aware. Each entry in the
+// table carries a Reachability verdict (PUBLIC, PRIVATE,
+// RELAY_ONLY, UNKNOWN) and a relay_addrs list. Outgoing
+// gossip filters entries to keep only those useful to the
+// recipient:
+//
+//   - PUBLIC          -> include, full addrs
+//   - RELAY_ONLY      -> include, only relay_addrs
+//   - PRIVATE with
+//     last_dial_success=false -> exclude entirely
+//   - last_seen older than the freshness window -> exclude
+//   - self -> exclude always
+//
+// On the receive side, PEX attempts a connect using the
+// address shape that matches the entry's reachability:
+// direct addrs for PUBLIC, relay_addrs for RELAY_ONLY,
+// nothing for PRIVATE.
 package pex
 
 import (
@@ -29,7 +47,8 @@ import (
 	"github.com/multiformats/go-multiaddr"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/nnlgsakib/membuss/proto"
+
+	membusspb "github.com/nnlgsakib/membuss/proto"
 )
 
 // ProtocolID is the full libp2p protocol identifier for
@@ -48,6 +67,10 @@ const (
 	streamTimeout = 10 * time.Second
 	// dialTimeout bounds the dial of a newly discovered peer.
 	dialTimeout = 5 * time.Second
+	// freshnessWindow is the maximum age of an entry for it
+	// to be eligible to be sent in a PEX round (Phase 12).
+	// Anything older is treated as dead and dropped.
+	freshnessWindow = 2 * time.Hour
 )
 
 // PEX is the Membuss peer exchange engine. It is safe for
@@ -66,10 +89,18 @@ type PEX struct {
 	rngMu sync.Mutex
 }
 
-// entry is one row of the peer table.
+// entry is one row of the peer table. It tracks both the
+// libp2p AddrInfo (for dialing) and the protobuf PeerInfo
+// (for gossip), plus the last dial outcome so the filter
+// can decide whether a PRIVATE peer is still worth
+// sharing.
 type entry struct {
 	info     *membusspb.PeerInfo
 	addrInfo peer.AddrInfo
+	// relayAddrs are circuit relay multiaddrs for the peer,
+	// kept separately from direct addrs so the filter can
+	// strip them on outgoing gossip for PUBLIC entries.
+	relayAddrs []multiaddr.Multiaddr
 }
 
 // Config configures a PEX instance.
@@ -135,7 +166,42 @@ func (p *PEX) AddPeer(ai peer.AddrInfo) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.upsertLocked(ai, p.now().Unix())
+	p.upsertLocked(ai, nil, p.now().Unix(), false)
+}
+
+// AddPeerWithReachability inserts or refreshes a peer with an
+// explicit Reachability verdict and relay multiaddrs. The
+// daemon uses this to record a peer's verdict as soon as
+// AutoNAT or the relay subsystem reports it. Pass
+// membusspb.Reachability_UNKNOWN to leave the verdict as-is.
+func (p *PEX) AddPeerWithReachability(ai peer.AddrInfo, reach membusspb.Reachability, relayAddrs []multiaddr.Multiaddr) {
+	if ai.ID == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.upsertLocked(ai, relayAddrs, p.now().Unix(), false)
+	if cur, ok := p.peers[ai.ID]; ok {
+		if reach != membusspb.Reachability_UNKNOWN {
+			cur.info.Reachability = reach
+		}
+		cur.relayAddrs = append([]multiaddr.Multiaddr(nil), relayAddrs...)
+		cur.info.RelayAddrs = addrsToStrings(cur.relayAddrs)
+	}
+}
+
+// MarkDialResult records the outcome of a Connect attempt
+// against pid. A failure flips last_dial_success to false
+// so the filter stops sharing a private peer we cannot
+// reach.
+func (p *PEX) MarkDialResult(pid peer.ID, ok bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, exists := p.peers[pid]
+	if !exists {
+		return
+	}
+	e.info.LastDialSuccess = ok
 }
 
 // Peers returns a snapshot of the current peer table sorted by
@@ -158,36 +224,68 @@ func (p *PEX) PeerCount() int {
 	return len(p.peers)
 }
 
+// SetReachability updates the reachability verdict for a peer
+// that is already in the table. It is a no-op when pid is
+// unknown. Used by the daemon to push AutoNAT verdicts in
+// after the peer is already in the table.
+func (p *PEX) SetReachability(pid peer.ID, reach membusspb.Reachability) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.peers[pid]
+	if !ok {
+		return
+	}
+	e.info.Reachability = reach
+}
+
 // upsertLocked adds or refreshes ai in the table, keeping the
 // entry with the newer last_seen timestamp. The caller must
 // hold p.mu.
-func (p *PEX) upsertLocked(ai peer.AddrInfo, seen int64) {
+func (p *PEX) upsertLocked(ai peer.AddrInfo, relayAddrs []multiaddr.Multiaddr, seen int64, keepVerdict bool) {
 	if ai.ID == "" || ai.ID == p.host.ID() {
 		return
 	}
-	cur, ok := p.peers[ai.ID]
 	addrs := addrsToStrings(ai.Addrs)
+	cur, ok := p.peers[ai.ID]
 	if ok {
 		if cur.info.LastSeen >= seen {
+			// Always refresh reachability and relay
+			// addrs even when the seen-timestamp
+			// does not advance, because the
+			// caller may have just learned a new
+			// verdict.
+			if !keepVerdict {
+				cur.addrInfo = ai
+				cur.info.Addrs = addrs
+			}
 			return
 		}
+		prevReach := cur.info.Reachability
+		prevDial := cur.info.LastDialSuccess
+		prevRelay := append([]multiaddr.Multiaddr(nil), cur.relayAddrs...)
 		cur.addrInfo = ai
 		cur.info = &membusspb.PeerInfo{
-			PeerId:   ai.ID.String(),
-			Addrs:    addrs,
-			LastSeen: seen,
+			PeerId:           ai.ID.String(),
+			Addrs:            addrs,
+			LastSeen:         seen,
+			Reachability:     prevReach,
+			LastDialSuccess:  prevDial,
+			RelayAddrs:       addrsToStrings(append(prevRelay, relayAddrs...)),
 		}
+		cur.relayAddrs = append(append([]multiaddr.Multiaddr(nil), prevRelay...), relayAddrs...)
 		return
 	}
 	if len(p.peers) >= maxPeers {
 		p.evictOldestLocked()
 	}
 	p.peers[ai.ID] = &entry{
-		addrInfo: ai,
+		addrInfo:   ai,
+		relayAddrs: append([]multiaddr.Multiaddr(nil), relayAddrs...),
 		info: &membusspb.PeerInfo{
-			PeerId:   ai.ID.String(),
-			Addrs:    addrs,
-			LastSeen: seen,
+			PeerId:      ai.ID.String(),
+			Addrs:       addrs,
+			LastSeen:    seen,
+			RelayAddrs:  addrsToStrings(relayAddrs),
 		},
 	}
 }
@@ -223,6 +321,81 @@ func (p *PEX) snapshot() []*membusspb.PeerInfo {
 	return out
 }
 
+// filterForGossip applies the Phase 12 outgoing filter to
+// the snapshot. The rules:
+//
+//   - skip self
+//   - skip stale entries (last_seen older than freshnessWindow)
+//   - keep PUBLIC entries with full addrs
+//   - keep RELAY_ONLY entries with only relay_addrs (addrs
+//     field is cleared so the recipient does not waste a
+//     direct-connect attempt)
+//   - drop PRIVATE entries whose last_dial_success is false
+//   - drop PRIVATE entries whose last_dial_success is true
+//     but whose addrs look useless (empty) AND we have no
+//     relay_addrs to share; the caller's whole point is to
+//     find reachable peers, and a private peer we cannot
+//     reach is not reachable.
+//
+// The caller must hold p.mu.
+func (p *PEX) filterForGossip(selfID peer.ID) []*membusspb.PeerInfo {
+	now := p.now().Unix()
+	cutoff := now - int64(freshnessWindow.Seconds())
+	out := make([]*membusspb.PeerInfo, 0, len(p.peers))
+	for _, e := range p.peers {
+		if e.info.PeerId == selfID.String() {
+			continue
+		}
+		if e.info.LastSeen < cutoff {
+			continue
+		}
+		switch e.info.Reachability {
+		case membusspb.Reachability_PUBLIC:
+			// Include as-is.
+			out = append(out, cloneInfo(e.info))
+		case membusspb.Reachability_RELAY_ONLY:
+			// Strip direct addrs; share only the
+			// relay circuit so the recipient can
+			// connect via relay.
+			c := cloneInfo(e.info)
+			c.Addrs = nil
+			out = append(out, c)
+		case membusspb.Reachability_PRIVATE:
+			if !e.info.LastDialSuccess {
+				continue
+			}
+			// PRIVATE with a working dial: still
+			// only useful if the recipient can
+			// reach us the same way. We share the
+			// direct addrs because the recipient
+			// may be on the same LAN.
+			out = append(out, cloneInfo(e.info))
+		case membusspb.Reachability_UNKNOWN:
+			// Unknown reachability: do not share
+			// addrs (we do not know if they are
+			// useful) but still share the peer ID
+			// so the recipient can dedupe. Empty
+			// addrs list means the recipient will
+			// not attempt a connect, which is
+			// exactly the safe default.
+			c := cloneInfo(e.info)
+			c.Addrs = nil
+			c.RelayAddrs = nil
+			out = append(out, c)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].PeerId < out[j].PeerId })
+	return out
+}
+
+// FilterForGossip is a public wrapper around filterForGossip
+// for tests. Production callers go through snapshot+send.
+func (p *PEX) FilterForGossip() []*membusspb.PeerInfo {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.filterForGossip(p.host.ID())
+}
+
 // cloneInfo returns a deep copy of a PeerInfo. The protobuf
 // generated type contains an internal mutex, so naive struct
 // copies trip go vet.
@@ -255,7 +428,7 @@ func (p *PEX) handleStream(s network.Stream) {
 	p.mergeFromMessage(inMsg.Peers, p.now().Unix())
 
 	p.mu.Lock()
-	reply := &membusspb.PEXMessage{Peers: p.snapshot()}
+	reply := &membusspb.PEXMessage{Peers: p.filterForGossip(p.host.ID())}
 	p.mu.Unlock()
 	out, err := proto.Marshal(reply)
 	if err != nil {
@@ -316,7 +489,7 @@ func (p *PEX) exchange(ctx context.Context, pid peer.ID) error {
 	_ = s.SetDeadline(time.Now().Add(streamTimeout))
 
 	p.mu.Lock()
-	out := &membusspb.PEXMessage{Peers: p.snapshot()}
+	out := &membusspb.PEXMessage{Peers: p.filterForGossip(p.host.ID())}
 	p.mu.Unlock()
 	buf, err := proto.Marshal(out)
 	if err != nil {
@@ -338,8 +511,9 @@ func (p *PEX) exchange(ctx context.Context, pid peer.ID) error {
 }
 
 // mergeFromMessage applies a list of PeerInfo records into the
-// table. For each newly-discovered peer with addrs, an async
-// dial is fired in the background.
+// table. For each newly-discovered peer with usable addrs, an
+// async dial is fired in the background using the address
+// shape that matches the entry's reachability.
 func (p *PEX) mergeFromMessage(infos []*membusspb.PeerInfo, seen int64) {
 	for _, info := range infos {
 		if info == nil {
@@ -349,21 +523,70 @@ func (p *PEX) mergeFromMessage(infos []*membusspb.PeerInfo, seen int64) {
 		if !ok {
 			continue
 		}
+		// Pull relay_addrs out of the protobuf and
+		// convert them back to multiaddrs.
+		var relay []multiaddr.Multiaddr
+		for _, s := range info.RelayAddrs {
+			if a, err := multiaddr.NewMultiaddr(s); err == nil {
+				relay = append(relay, a)
+			}
+		}
 		p.mu.Lock()
 		wasKnown := p.peers[ai.ID] != nil
-		p.upsertLocked(ai, seen)
+		p.upsertLocked(ai, relay, seen, true)
+		// After upsert, restore the reachability /
+		// last_dial_success fields from the wire
+		// payload (upsertLocked already merged
+		// relay_addrs and addrs but not those).
+		if cur, exists := p.peers[ai.ID]; exists {
+			cur.info.Reachability = info.Reachability
+			cur.info.LastDialSuccess = info.LastDialSuccess
+			cur.relayAddrs = relay
+		}
 		p.mu.Unlock()
-		if !wasKnown && len(ai.Addrs) > 0 {
-			go p.dialAsync(ai)
+
+		// Connect decision tree (Phase 12).
+		if !wasKnown {
+			p.dialFor(info, ai, relay)
 		}
 	}
 }
 
-// dialAsync attempts to connect to ai in the background.
-func (p *PEX) dialAsync(ai peer.AddrInfo) {
+// dialFor picks the right address set to use for a connect
+// attempt based on the entry's reachability verdict.
+//
+//   - PUBLIC          -> direct addrs
+//   - RELAY_ONLY      -> relay addrs only
+//   - PRIVATE         -> skip
+//   - UNKNOWN         -> try direct addrs; if the connect
+//     fails the entry's last_dial_success will be flipped
+//     to false by MarkDialResult
+func (p *PEX) dialFor(info *membusspb.PeerInfo, ai peer.AddrInfo, relay []multiaddr.Multiaddr) {
+	switch info.Reachability {
+	case membusspb.Reachability_RELAY_ONLY:
+		if len(relay) == 0 {
+			return
+		}
+		go p.dialAsync(peer.AddrInfo{ID: ai.ID, Addrs: relay}, ai.ID)
+	case membusspb.Reachability_PRIVATE:
+		// Private peers are useless to us directly;
+		// the spec says "skip".
+		return
+	case membusspb.Reachability_PUBLIC, membusspb.Reachability_UNKNOWN:
+		if len(ai.Addrs) == 0 {
+			return
+		}
+		go p.dialAsync(ai, ai.ID)
+	}
+}
+
+// dialAsync attempts to connect to ai in the background and
+// records the outcome on the table entry.
+func (p *PEX) dialAsync(ai peer.AddrInfo, pid peer.ID) {
 	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
 	defer cancel()
-	_ = p.host.Connect(ctx, ai)
+	err := p.host.Connect(ctx, ai)
+	p.MarkDialResult(pid, err == nil)
 }
 
 // readMsg reads a single protobuf frame from s. The wire
@@ -435,3 +658,6 @@ func decodePeerInfo(info *membusspb.PeerInfo) (peer.AddrInfo, bool) {
 	}
 	return peer.AddrInfo{ID: pid, Addrs: addrs}, true
 }
+
+// silence unused import warning when membusspb-only code
+// paths are inlined by the linker.

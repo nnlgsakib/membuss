@@ -24,6 +24,61 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// Reachability describes how a peer is reachable from a remote
+// node. Used by PEX to decide which addresses are worth sharing
+// in a gossip round (Phase 12).
+type Reachability int32
+
+const (
+	Reachability_UNKNOWN    Reachability = 0
+	Reachability_PUBLIC     Reachability = 1
+	Reachability_PRIVATE    Reachability = 2
+	Reachability_RELAY_ONLY Reachability = 3
+)
+
+// Enum value maps for Reachability.
+var (
+	Reachability_name = map[int32]string{
+		0: "UNKNOWN",
+		1: "PUBLIC",
+		2: "PRIVATE",
+		3: "RELAY_ONLY",
+	}
+	Reachability_value = map[string]int32{
+		"UNKNOWN":    0,
+		"PUBLIC":     1,
+		"PRIVATE":    2,
+		"RELAY_ONLY": 3,
+	}
+)
+
+func (x Reachability) Enum() *Reachability {
+	p := new(Reachability)
+	*p = x
+	return p
+}
+
+func (x Reachability) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Reachability) Descriptor() protoreflect.EnumDescriptor {
+	return file_membuss_proto_enumTypes[0].Descriptor()
+}
+
+func (Reachability) Type() protoreflect.EnumType {
+	return &file_membuss_proto_enumTypes[0]
+}
+
+func (x Reachability) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Reachability.Descriptor instead.
+func (Reachability) EnumDescriptor() ([]byte, []int) {
+	return file_membuss_proto_rawDescGZIP(), []int{0}
+}
+
 type PingRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Message       string                 `protobuf:"bytes,1,opt,name=message,proto3" json:"message,omitempty"`
@@ -1487,14 +1542,22 @@ func (x *ErasureManifest) GetOriginalSize() uint64 {
 	return 0
 }
 
-// PeerInfo is one entry in a PEX gossip payload.
+// PeerInfo is one entry in a PEX gossip payload. The libp2p
+// wire format was extended in Phase 12 with relay_addrs,
+// reachability and last_dial_success; the field tags are kept
+// compatible with the old shape (1=peer_id, 2=addrs, 3=last_seen)
+// so older nodes can still parse the message (the new fields
+// are simply ignored).
 type PeerInfo struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PeerId        string                 `protobuf:"bytes,1,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`
-	Addrs         []string               `protobuf:"bytes,2,rep,name=addrs,proto3" json:"addrs,omitempty"`
-	LastSeen      int64                  `protobuf:"varint,3,opt,name=last_seen,json=lastSeen,proto3" json:"last_seen,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	PeerId          string                 `protobuf:"bytes,1,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`
+	Addrs           []string               `protobuf:"bytes,2,rep,name=addrs,proto3" json:"addrs,omitempty"`
+	RelayAddrs      []string               `protobuf:"bytes,3,rep,name=relay_addrs,json=relayAddrs,proto3" json:"relay_addrs,omitempty"` // Phase 12
+	LastSeen        int64                  `protobuf:"varint,4,opt,name=last_seen,json=lastSeen,proto3" json:"last_seen,omitempty"`
+	Reachability    Reachability           `protobuf:"varint,5,opt,name=reachability,proto3,enum=membuss.v1.Reachability" json:"reachability,omitempty"`   // Phase 12
+	LastDialSuccess bool                   `protobuf:"varint,6,opt,name=last_dial_success,json=lastDialSuccess,proto3" json:"last_dial_success,omitempty"` // Phase 12
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *PeerInfo) Reset() {
@@ -1541,11 +1604,32 @@ func (x *PeerInfo) GetAddrs() []string {
 	return nil
 }
 
+func (x *PeerInfo) GetRelayAddrs() []string {
+	if x != nil {
+		return x.RelayAddrs
+	}
+	return nil
+}
+
 func (x *PeerInfo) GetLastSeen() int64 {
 	if x != nil {
 		return x.LastSeen
 	}
 	return 0
+}
+
+func (x *PeerInfo) GetReachability() Reachability {
+	if x != nil {
+		return x.Reachability
+	}
+	return Reachability_UNKNOWN
+}
+
+func (x *PeerInfo) GetLastDialSuccess() bool {
+	if x != nil {
+		return x.LastDialSuccess
+	}
+	return false
 }
 
 // PEXMessage is the body of a /membuss/pex/1.0.0 gossip frame.
@@ -1830,11 +1914,15 @@ const file_membuss_proto_rawDesc = "" +
 	"\rparity_shards\x18\x03 \x01(\rR\fparityShards\x12\x1d\n" +
 	"\n" +
 	"shard_mids\x18\x04 \x03(\tR\tshardMids\x12#\n" +
-	"\roriginal_size\x18\x05 \x01(\x04R\foriginalSize\"V\n" +
+	"\roriginal_size\x18\x05 \x01(\x04R\foriginalSize\"\xe1\x01\n" +
 	"\bPeerInfo\x12\x17\n" +
 	"\apeer_id\x18\x01 \x01(\tR\x06peerId\x12\x14\n" +
-	"\x05addrs\x18\x02 \x03(\tR\x05addrs\x12\x1b\n" +
-	"\tlast_seen\x18\x03 \x01(\x03R\blastSeen\"8\n" +
+	"\x05addrs\x18\x02 \x03(\tR\x05addrs\x12\x1f\n" +
+	"\vrelay_addrs\x18\x03 \x03(\tR\n" +
+	"relayAddrs\x12\x1b\n" +
+	"\tlast_seen\x18\x04 \x01(\x03R\blastSeen\x12<\n" +
+	"\freachability\x18\x05 \x01(\x0e2\x18.membuss.v1.ReachabilityR\freachability\x12*\n" +
+	"\x11last_dial_success\x18\x06 \x01(\bR\x0flastDialSuccess\"8\n" +
 	"\n" +
 	"PEXMessage\x12*\n" +
 	"\x05peers\x18\x01 \x03(\v2\x14.membuss.v1.PeerInfoR\x05peers\"_\n" +
@@ -1846,7 +1934,14 @@ const file_membuss_proto_rawDesc = "" +
 	"\x05wants\x18\x01 \x03(\v2\x15.membuss.v1.WantEntryR\x05wants\x12)\n" +
 	"\x06blocks\x18\x02 \x03(\v2\x11.membuss.v1.BlockR\x06blocks\x12\x1b\n" +
 	"\thave_mids\x18\x03 \x03(\tR\bhaveMids\x12\x16\n" +
-	"\x06cancel\x18\x04 \x03(\tR\x06cancel2A\n" +
+	"\x06cancel\x18\x04 \x03(\tR\x06cancel*D\n" +
+	"\fReachability\x12\v\n" +
+	"\aUNKNOWN\x10\x00\x12\n" +
+	"\n" +
+	"\x06PUBLIC\x10\x01\x12\v\n" +
+	"\aPRIVATE\x10\x02\x12\x0e\n" +
+	"\n" +
+	"RELAY_ONLY\x10\x032A\n" +
 	"\x04Node\x129\n" +
 	"\x04Ping\x12\x17.membuss.v1.PingRequest\x1a\x18.membuss.v1.PingResponse2\xbd\x04\n" +
 	"\vMembussNode\x126\n" +
@@ -1872,71 +1967,74 @@ func file_membuss_proto_rawDescGZIP() []byte {
 	return file_membuss_proto_rawDescData
 }
 
+var file_membuss_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_membuss_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
 var file_membuss_proto_goTypes = []any{
-	(*PingRequest)(nil),          // 0: membuss.v1.PingRequest
-	(*PingResponse)(nil),         // 1: membuss.v1.PingResponse
-	(*AddRequest)(nil),           // 2: membuss.v1.AddRequest
-	(*AddResponse)(nil),          // 3: membuss.v1.AddResponse
-	(*GetRequest)(nil),           // 4: membuss.v1.GetRequest
-	(*GetChunk)(nil),             // 5: membuss.v1.GetChunk
-	(*SealRequest)(nil),          // 6: membuss.v1.SealRequest
-	(*SealResponse)(nil),         // 7: membuss.v1.SealResponse
-	(*UnsealRequest)(nil),        // 8: membuss.v1.UnsealRequest
-	(*UnsealResponse)(nil),       // 9: membuss.v1.UnsealResponse
-	(*StatRequest)(nil),          // 10: membuss.v1.StatRequest
-	(*StatResponse)(nil),         // 11: membuss.v1.StatResponse
-	(*ErasureInfo)(nil),          // 12: membuss.v1.ErasureInfo
-	(*NodePeerInfo)(nil),         // 13: membuss.v1.NodePeerInfo
-	(*PeersRequest)(nil),         // 14: membuss.v1.PeersRequest
-	(*PeersResponse)(nil),        // 15: membuss.v1.PeersResponse
-	(*DHTPeekRequest)(nil),       // 16: membuss.v1.DHTPeekRequest
-	(*DHTPeekResponse)(nil),      // 17: membuss.v1.DHTPeekResponse
-	(*GCRequest)(nil),            // 18: membuss.v1.GCRequest
-	(*GCResponse)(nil),           // 19: membuss.v1.GCResponse
-	(*AnchorStatusRequest)(nil),  // 20: membuss.v1.AnchorStatusRequest
-	(*AnchorStatusResponse)(nil), // 21: membuss.v1.AnchorStatusResponse
-	(*Block)(nil),                // 22: membuss.v1.Block
-	(*DAGNode)(nil),              // 23: membuss.v1.DAGNode
-	(*Shard)(nil),                // 24: membuss.v1.Shard
-	(*ErasureManifest)(nil),      // 25: membuss.v1.ErasureManifest
-	(*PeerInfo)(nil),             // 26: membuss.v1.PeerInfo
-	(*PEXMessage)(nil),           // 27: membuss.v1.PEXMessage
-	(*WantEntry)(nil),            // 28: membuss.v1.WantEntry
-	(*MemexMessage)(nil),         // 29: membuss.v1.MemexMessage
+	(Reachability)(0),            // 0: membuss.v1.Reachability
+	(*PingRequest)(nil),          // 1: membuss.v1.PingRequest
+	(*PingResponse)(nil),         // 2: membuss.v1.PingResponse
+	(*AddRequest)(nil),           // 3: membuss.v1.AddRequest
+	(*AddResponse)(nil),          // 4: membuss.v1.AddResponse
+	(*GetRequest)(nil),           // 5: membuss.v1.GetRequest
+	(*GetChunk)(nil),             // 6: membuss.v1.GetChunk
+	(*SealRequest)(nil),          // 7: membuss.v1.SealRequest
+	(*SealResponse)(nil),         // 8: membuss.v1.SealResponse
+	(*UnsealRequest)(nil),        // 9: membuss.v1.UnsealRequest
+	(*UnsealResponse)(nil),       // 10: membuss.v1.UnsealResponse
+	(*StatRequest)(nil),          // 11: membuss.v1.StatRequest
+	(*StatResponse)(nil),         // 12: membuss.v1.StatResponse
+	(*ErasureInfo)(nil),          // 13: membuss.v1.ErasureInfo
+	(*NodePeerInfo)(nil),         // 14: membuss.v1.NodePeerInfo
+	(*PeersRequest)(nil),         // 15: membuss.v1.PeersRequest
+	(*PeersResponse)(nil),        // 16: membuss.v1.PeersResponse
+	(*DHTPeekRequest)(nil),       // 17: membuss.v1.DHTPeekRequest
+	(*DHTPeekResponse)(nil),      // 18: membuss.v1.DHTPeekResponse
+	(*GCRequest)(nil),            // 19: membuss.v1.GCRequest
+	(*GCResponse)(nil),           // 20: membuss.v1.GCResponse
+	(*AnchorStatusRequest)(nil),  // 21: membuss.v1.AnchorStatusRequest
+	(*AnchorStatusResponse)(nil), // 22: membuss.v1.AnchorStatusResponse
+	(*Block)(nil),                // 23: membuss.v1.Block
+	(*DAGNode)(nil),              // 24: membuss.v1.DAGNode
+	(*Shard)(nil),                // 25: membuss.v1.Shard
+	(*ErasureManifest)(nil),      // 26: membuss.v1.ErasureManifest
+	(*PeerInfo)(nil),             // 27: membuss.v1.PeerInfo
+	(*PEXMessage)(nil),           // 28: membuss.v1.PEXMessage
+	(*WantEntry)(nil),            // 29: membuss.v1.WantEntry
+	(*MemexMessage)(nil),         // 30: membuss.v1.MemexMessage
 }
 var file_membuss_proto_depIdxs = []int32{
-	12, // 0: membuss.v1.StatResponse.erasure:type_name -> membuss.v1.ErasureInfo
-	13, // 1: membuss.v1.PeersResponse.peers:type_name -> membuss.v1.NodePeerInfo
-	13, // 2: membuss.v1.DHTPeekResponse.providers:type_name -> membuss.v1.NodePeerInfo
-	26, // 3: membuss.v1.PEXMessage.peers:type_name -> membuss.v1.PeerInfo
-	28, // 4: membuss.v1.MemexMessage.wants:type_name -> membuss.v1.WantEntry
-	22, // 5: membuss.v1.MemexMessage.blocks:type_name -> membuss.v1.Block
-	0,  // 6: membuss.v1.Node.Ping:input_type -> membuss.v1.PingRequest
-	2,  // 7: membuss.v1.MembussNode.Add:input_type -> membuss.v1.AddRequest
-	4,  // 8: membuss.v1.MembussNode.Get:input_type -> membuss.v1.GetRequest
-	6,  // 9: membuss.v1.MembussNode.Seal:input_type -> membuss.v1.SealRequest
-	8,  // 10: membuss.v1.MembussNode.Unseal:input_type -> membuss.v1.UnsealRequest
-	10, // 11: membuss.v1.MembussNode.Stat:input_type -> membuss.v1.StatRequest
-	14, // 12: membuss.v1.MembussNode.Peers:input_type -> membuss.v1.PeersRequest
-	16, // 13: membuss.v1.MembussNode.DHTPeek:input_type -> membuss.v1.DHTPeekRequest
-	18, // 14: membuss.v1.MembussNode.GC:input_type -> membuss.v1.GCRequest
-	20, // 15: membuss.v1.MembussNode.AnchorStatus:input_type -> membuss.v1.AnchorStatusRequest
-	1,  // 16: membuss.v1.Node.Ping:output_type -> membuss.v1.PingResponse
-	3,  // 17: membuss.v1.MembussNode.Add:output_type -> membuss.v1.AddResponse
-	5,  // 18: membuss.v1.MembussNode.Get:output_type -> membuss.v1.GetChunk
-	7,  // 19: membuss.v1.MembussNode.Seal:output_type -> membuss.v1.SealResponse
-	9,  // 20: membuss.v1.MembussNode.Unseal:output_type -> membuss.v1.UnsealResponse
-	11, // 21: membuss.v1.MembussNode.Stat:output_type -> membuss.v1.StatResponse
-	15, // 22: membuss.v1.MembussNode.Peers:output_type -> membuss.v1.PeersResponse
-	17, // 23: membuss.v1.MembussNode.DHTPeek:output_type -> membuss.v1.DHTPeekResponse
-	19, // 24: membuss.v1.MembussNode.GC:output_type -> membuss.v1.GCResponse
-	21, // 25: membuss.v1.MembussNode.AnchorStatus:output_type -> membuss.v1.AnchorStatusResponse
-	16, // [16:26] is the sub-list for method output_type
-	6,  // [6:16] is the sub-list for method input_type
-	6,  // [6:6] is the sub-list for extension type_name
-	6,  // [6:6] is the sub-list for extension extendee
-	0,  // [0:6] is the sub-list for field type_name
+	13, // 0: membuss.v1.StatResponse.erasure:type_name -> membuss.v1.ErasureInfo
+	14, // 1: membuss.v1.PeersResponse.peers:type_name -> membuss.v1.NodePeerInfo
+	14, // 2: membuss.v1.DHTPeekResponse.providers:type_name -> membuss.v1.NodePeerInfo
+	0,  // 3: membuss.v1.PeerInfo.reachability:type_name -> membuss.v1.Reachability
+	27, // 4: membuss.v1.PEXMessage.peers:type_name -> membuss.v1.PeerInfo
+	29, // 5: membuss.v1.MemexMessage.wants:type_name -> membuss.v1.WantEntry
+	23, // 6: membuss.v1.MemexMessage.blocks:type_name -> membuss.v1.Block
+	1,  // 7: membuss.v1.Node.Ping:input_type -> membuss.v1.PingRequest
+	3,  // 8: membuss.v1.MembussNode.Add:input_type -> membuss.v1.AddRequest
+	5,  // 9: membuss.v1.MembussNode.Get:input_type -> membuss.v1.GetRequest
+	7,  // 10: membuss.v1.MembussNode.Seal:input_type -> membuss.v1.SealRequest
+	9,  // 11: membuss.v1.MembussNode.Unseal:input_type -> membuss.v1.UnsealRequest
+	11, // 12: membuss.v1.MembussNode.Stat:input_type -> membuss.v1.StatRequest
+	15, // 13: membuss.v1.MembussNode.Peers:input_type -> membuss.v1.PeersRequest
+	17, // 14: membuss.v1.MembussNode.DHTPeek:input_type -> membuss.v1.DHTPeekRequest
+	19, // 15: membuss.v1.MembussNode.GC:input_type -> membuss.v1.GCRequest
+	21, // 16: membuss.v1.MembussNode.AnchorStatus:input_type -> membuss.v1.AnchorStatusRequest
+	2,  // 17: membuss.v1.Node.Ping:output_type -> membuss.v1.PingResponse
+	4,  // 18: membuss.v1.MembussNode.Add:output_type -> membuss.v1.AddResponse
+	6,  // 19: membuss.v1.MembussNode.Get:output_type -> membuss.v1.GetChunk
+	8,  // 20: membuss.v1.MembussNode.Seal:output_type -> membuss.v1.SealResponse
+	10, // 21: membuss.v1.MembussNode.Unseal:output_type -> membuss.v1.UnsealResponse
+	12, // 22: membuss.v1.MembussNode.Stat:output_type -> membuss.v1.StatResponse
+	16, // 23: membuss.v1.MembussNode.Peers:output_type -> membuss.v1.PeersResponse
+	18, // 24: membuss.v1.MembussNode.DHTPeek:output_type -> membuss.v1.DHTPeekResponse
+	20, // 25: membuss.v1.MembussNode.GC:output_type -> membuss.v1.GCResponse
+	22, // 26: membuss.v1.MembussNode.AnchorStatus:output_type -> membuss.v1.AnchorStatusResponse
+	17, // [17:27] is the sub-list for method output_type
+	7,  // [7:17] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_membuss_proto_init() }
@@ -1949,13 +2047,14 @@ func file_membuss_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_membuss_proto_rawDesc), len(file_membuss_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      1,
 			NumMessages:   30,
 			NumExtensions: 0,
 			NumServices:   2,
 		},
 		GoTypes:           file_membuss_proto_goTypes,
 		DependencyIndexes: file_membuss_proto_depIdxs,
+		EnumInfos:         file_membuss_proto_enumTypes,
 		MessageInfos:      file_membuss_proto_msgTypes,
 	}.Build()
 	File_membuss_proto = out.File

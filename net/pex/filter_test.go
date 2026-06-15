@@ -1,0 +1,233 @@
+﻿package pex
+
+import (
+	"testing"
+	"time"
+
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/multiformats/go-multiaddr"
+
+	membusspb "github.com/nnlgsakib/membuss/proto"
+)
+
+// TestPEX_FilterForGossip_BasicShape builds a table with the
+// 10+5+3 mix from the Phase 12 spec and asserts the
+// outgoing list contains exactly the 10 public + 3
+// relay-only entries, with the relay-only addrs stripped.
+func TestPEX_FilterForGossip_BasicShape(t *testing.T) {
+	h, err := NewTestInProcessHost()
+	if err != nil {
+		t.Fatalf("in-process host: %v", err)
+	}
+	defer h.Close()
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	p, err := New(Config{Host: h, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("pex: %v", err)
+	}
+
+	// 10 PUBLIC peers
+	publicIDs := make([]peer.ID, 0, 10)
+	for i := 0; i < 10; i++ {
+		pid := makeTestPeer(t)
+		publicIDs = append(publicIDs, pid)
+		ai := peer.AddrInfo{ID: pid, Addrs: []multiaddr.Multiaddr{}}
+		p.AddPeerWithReachability(ai, membusspb.Reachability_PUBLIC, nil)
+	}
+
+	// 5 PRIVATE peers with last_dial_success=false (should be
+	// excluded from the outgoing list).
+	privateUnreachIDs := make([]peer.ID, 0, 5)
+	for i := 0; i < 5; i++ {
+		pid := makeTestPeer(t)
+		privateUnreachIDs = append(privateUnreachIDs, pid)
+		ai := peer.AddrInfo{ID: pid, Addrs: []multiaddr.Multiaddr{}}
+		p.AddPeerWithReachability(ai, membusspb.Reachability_PRIVATE, nil)
+		p.MarkDialResult(pid, false)
+	}
+
+	// 3 RELAY_ONLY peers
+	relayOnlyIDs := make([]peer.ID, 0, 3)
+	for i := 0; i < 3; i++ {
+		pid := makeTestPeer(t)
+		relayOnlyIDs = append(relayOnlyIDs, pid)
+		relayMA, _ := multiaddr.NewMultiaddr("/ip4/1.2.3.4/tcp/4001/p2p/" + pid.String())
+		ai := peer.AddrInfo{ID: pid, Addrs: []multiaddr.Multiaddr{relayMA}}
+		p.AddPeerWithReachability(ai, membusspb.Reachability_RELAY_ONLY, []multiaddr.Multiaddr{relayMA})
+	}
+
+	gossip := p.FilterForGossip()
+	if len(gossip) != 13 {
+		t.Fatalf("gossip list = %d entries, want 13 (10 public + 3 relay-only)", len(gossip))
+	}
+
+	// Build a set of included peer IDs for O(1) lookup.
+	// The protobuf struct embeds a mutex so we store the
+	// info by pointer in the map.
+	included := make(map[string]*membusspb.PeerInfo, len(gossip))
+	for _, info := range gossip {
+		included[info.PeerId] = info
+	}
+
+	// All 10 PUBLIC must be present with their addrs intact.
+	for _, pid := range publicIDs {
+		info, ok := included[pid.String()]
+		if !ok {
+			t.Fatalf("public peer %s missing from gossip", pid)
+		}
+		if info.Reachability != membusspb.Reachability_PUBLIC {
+			t.Fatalf("public peer %s has reachability %v", pid, info.Reachability)
+		}
+	}
+
+	// All 3 RELAY_ONLY must be present but with addrs
+	// stripped (relay_addrs is the only useful info).
+	for _, pid := range relayOnlyIDs {
+		info, ok := included[pid.String()]
+		if !ok {
+			t.Fatalf("relay-only peer %s missing from gossip", pid)
+		}
+		if info.Reachability != membusspb.Reachability_RELAY_ONLY {
+			t.Fatalf("relay-only peer %s has reachability %v", pid, info.Reachability)
+		}
+		if len(info.Addrs) != 0 {
+			t.Fatalf("relay-only peer %s has direct addrs %v (should be stripped)", pid, info.Addrs)
+		}
+		if len(info.RelayAddrs) == 0 {
+			t.Fatalf("relay-only peer %s has no relay_addrs", pid)
+		}
+	}
+
+	// All 5 PRIVATE+unreachable must be excluded.
+	for _, pid := range privateUnreachIDs {
+		if _, ok := included[pid.String()]; ok {
+			t.Fatalf("private-unreachable peer %s leaked into gossip", pid)
+		}
+	}
+}
+
+// TestPEX_FilterForGossip_StaleEntryDropped makes sure the
+// freshness window actually drops stale entries.
+func TestPEX_FilterForGossip_StaleEntryDropped(t *testing.T) {
+	h, err := NewTestInProcessHost()
+	if err != nil {
+		t.Fatalf("in-process host: %v", err)
+	}
+	defer h.Close()
+
+	base := time.Unix(1_700_000_000, 0).UTC()
+	clock := base
+	now := func() time.Time { return clock }
+	p, err := New(Config{Host: h, Now: now})
+	if err != nil {
+		t.Fatalf("pex: %v", err)
+	}
+
+	pid := makeTestPeer(t)
+	p.AddPeerWithReachability(peer.AddrInfo{ID: pid}, membusspb.Reachability_PUBLIC, nil)
+
+	// Move the clock past the freshness window.
+	clock = base.Add(freshnessWindow + time.Hour)
+
+	gossip := p.FilterForGossip()
+	for _, info := range gossip {
+		if info.PeerId == pid.String() {
+			t.Fatalf("stale entry %s leaked into gossip", pid)
+		}
+	}
+}
+
+// TestPEX_FilterForGossip_PrivateReachableKept verifies that
+// PRIVATE entries with last_dial_success=true are still
+// shared (they may be on the recipient's LAN).
+func TestPEX_FilterForGossip_PrivateReachableKept(t *testing.T) {
+	h, err := NewTestInProcessHost()
+	if err != nil {
+		t.Fatalf("in-process host: %v", err)
+	}
+	defer h.Close()
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	p, err := New(Config{Host: h, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("pex: %v", err)
+	}
+
+	pid := makeTestPeer(t)
+	p.AddPeerWithReachability(peer.AddrInfo{ID: pid}, membusspb.Reachability_PRIVATE, nil)
+	p.MarkDialResult(pid, true)
+
+	gossip := p.FilterForGossip()
+	var found *membusspb.PeerInfo
+	for _, info := range gossip {
+		if info.PeerId == pid.String() {
+			found = info
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("private-reachable peer missing from gossip")
+	}
+	if found.Reachability != membusspb.Reachability_PRIVATE {
+		t.Fatalf("reachability = %v, want PRIVATE", found.Reachability)
+	}
+	if !found.LastDialSuccess {
+		t.Fatal("last_dial_success lost across the filter")
+	}
+}
+
+// TestPEX_FilterForGossip_SelfSkipped verifies that our own
+// peer ID never makes it into the outgoing list, even if we
+// are accidentally in the table.
+func TestPEX_FilterForGossip_SelfSkipped(t *testing.T) {
+	h, err := NewTestInProcessHost()
+	if err != nil {
+		t.Fatalf("in-process host: %v", err)
+	}
+	defer h.Close()
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	p, err := New(Config{Host: h, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("pex: %v", err)
+	}
+
+	// Add ourselves (the filter must reject).
+	p.AddPeerWithReachability(peer.AddrInfo{ID: h.ID()}, membusspb.Reachability_PUBLIC, nil)
+	// Add a real peer so the table is non-empty.
+	other := makeTestPeer(t)
+	p.AddPeerWithReachability(peer.AddrInfo{ID: other}, membusspb.Reachability_PUBLIC, nil)
+
+	gossip := p.FilterForGossip()
+	for _, info := range gossip {
+		if info.PeerId == h.ID().String() {
+			t.Fatal("self leaked into gossip")
+		}
+	}
+}
+
+// TestPEX_MarkDialResult_Persists verifies that the dial
+// outcome is preserved on the table entry.
+func TestPEX_MarkDialResult_Persists(t *testing.T) {
+	h, err := NewTestInProcessHost()
+	if err != nil {
+		t.Fatalf("in-process host: %v", err)
+	}
+	defer h.Close()
+
+	p, err := New(Config{Host: h})
+	if err != nil {
+		t.Fatalf("pex: %v", err)
+	}
+
+	pid := makeTestPeer(t)
+	p.AddPeer(peer.AddrInfo{ID: pid})
+	p.MarkDialResult(pid, false)
+
+	for _, info := range p.Peers() {
+		if info.PeerId == pid.String() && info.LastDialSuccess {
+			t.Fatal("MarkDialResult(false) did not stick")
+		}
+	}
+}

@@ -1,4 +1,4 @@
-// Wire schema for the Membuss libp2p protocols (PEX, Memex) and
+﻿// Wire schema for the Membuss libp2p protocols (PEX, Memex) and
 // the CLI <-> daemon gRPC service.
 syntax = "proto3";
 
@@ -178,11 +178,29 @@ message ErasureManifest {
   uint64 original_size = 5;
 }
 
-// PeerInfo is one entry in a PEX gossip payload.
+// Reachability describes how a peer is reachable from a remote
+// node. Used by PEX to decide which addresses are worth sharing
+// in a gossip round (Phase 12).
+enum Reachability {
+  UNKNOWN    = 0;
+  PUBLIC     = 1;
+  PRIVATE    = 2;
+  RELAY_ONLY = 3;
+}
+
+// PeerInfo is one entry in a PEX gossip payload. The libp2p
+// wire format was extended in Phase 12 with relay_addrs,
+// reachability and last_dial_success; the field tags are kept
+// compatible with the old shape (1=peer_id, 2=addrs, 3=last_seen)
+// so older nodes can still parse the message (the new fields
+// are simply ignored).
 message PeerInfo {
-  string peer_id = 1;
-  repeated string addrs = 2;
-  int64 last_seen = 3;
+  string        peer_id            = 1;
+  repeated string addrs            = 2;
+  repeated string relay_addrs      = 3;   // Phase 12
+  int64          last_seen         = 4;
+  Reachability   reachability      = 5;   // Phase 12
+  bool           last_dial_success = 6;   // Phase 12
 }
 
 // PEXMessage is the body of a /membuss/pex/1.0.0 gossip frame.
