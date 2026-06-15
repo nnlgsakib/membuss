@@ -114,6 +114,13 @@ type Config struct {
 	// Useful when several Membuss clusters share the
 	// same broadcast domain.
 	MDNSServiceName string
+	// OnPeerFound, when set, is called for every peer the
+	// mDNS service hears about (after we successfully
+	// dial them). The daemon uses it to feed the
+	// discovered peer into the DHT bootstrap list so a
+	// private mDNS-only cluster still forms a DHT and
+	// provider records propagate cross-node.
+	OnPeerFound func(peer.AddrInfo)
 }
 
 // Host wraps a libp2p host.Host with Membuss-specific helpers
@@ -134,6 +141,11 @@ type Host struct {
 	// mdns, when non-nil, is the libp2p mDNS discovery
 	// service. It is closed by Host.Close.
 	mdns mdns.Service
+
+	// onPeerFound, when non-nil, is invoked for every peer
+	// the mDNS service dials. The daemon uses this to feed
+	// the discovered peer into the DHT bootstrap list.
+	onPeerFound func(peer.AddrInfo)
 }
 
 // NewHost constructs a libp2p host according to cfg. The host
@@ -213,6 +225,9 @@ func NewHost(cfg Config) (*Host, error) {
 	}
 	wh := wrapHost(h, false)
 	if cfg.MDNS {
+		if cfg.OnPeerFound != nil {
+			wh.onPeerFound = cfg.OnPeerFound
+		}
 		// Non-fatal: the host still works, peers just
 		// have to find each other through other channels.
 		_ = wh.startMDNS(cfg.MDNSServiceName)
@@ -400,8 +415,9 @@ func (h *Host) startMDNS(serviceName string) error {
 }
 
 // mdnsNotifee is a tiny adapter that translates libp2p
-// mDNS peer-found events into background dials. The dial
-// is best-effort; failure is silent because mDNS will
+// mDNS peer-found events into background dials plus
+// caller-supplied hooks (e.g. DHT bootstrap). The dial is
+// best-effort; failure is silent because mDNS will
 // re-announce within a few seconds.
 type mdnsNotifee struct {
 	h *Host
@@ -418,6 +434,9 @@ func (n *mdnsNotifee) HandlePeerFound(pi peer.AddrInfo) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		_ = n.h.Host.Connect(ctx, pi)
+		if n.h.onPeerFound != nil {
+			n.h.onPeerFound(pi)
+		}
 	}()
 }
 

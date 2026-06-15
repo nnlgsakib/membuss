@@ -1,4 +1,4 @@
-﻿// Package dht wraps go-libp2p-kad-dht into a Membuss-shaped API.
+// Package dht wraps go-libp2p-kad-dht into a Membuss-shaped API.
 //
 // Membuss uses the DHT to announce provider records ("I have
 // this MID") and to discover providers of a given MID. Small
@@ -13,8 +13,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
+	ds "github.com/ipfs/go-datastore"
 	"github.com/ipfs/go-cid"
 	kaddht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -50,30 +52,94 @@ type Config struct {
 	// Client vs. Server based on reachability. Tests can
 	// pass kaddht.ModeServer to force a server role.
 	Mode kaddht.ModeOpt
+	// ModeName is the YAML-friendly version of Mode.
+	// Allowed values: "auto" (default), "client",
+	// "server", "auto-server". When set it overrides
+	// the typed Mode field, so config.yaml can drive
+	// the choice without forcing every caller to build
+	// a kaddht.ModeOpt.
+	ModeName string
+	// Datastore is the on-disk store used by kad-dht to
+	// persist provider records across Provide/Restart
+	// cycles. When nil, kad-dht falls back to a private
+	// in-memory store, which means FindProviders can
+	// only see providers the local node has already
+	// observed during this run. The Membuss daemon
+	// always passes a MapDatastore-backed ds.Batching
+	// here so the DHT propagates provider records
+	// across a multi-node cluster the way IPFS does.
+	Datastore ds.Batching
+	// OptimisticProvide, when true, enables
+	// kaddht.EnableOptimisticProvide. The optimisation
+	// short-circuits the last few hops of the provide
+	// walk: as soon as the local node has announced the
+	// CID to its K closest peers, the Provide call
+	// returns success. Cross-cluster propagation is
+	// dramatically faster and is what IPFS ships with
+	// by default. Default true.
+	OptimisticProvide bool
+}
+
+// modeOrDefault resolves cfg.Mode vs cfg.ModeName to a
+// concrete kaddht.ModeOpt. ModeName wins so config.yaml
+// can drive the choice. Allowed values are "auto",
+// "client", "server" and "auto-server". An empty
+// ModeName plus a zero Mode falls back to ModeAuto.
+func (c Config) modeOrDefault() kaddht.ModeOpt {
+	switch strings.ToLower(strings.TrimSpace(c.ModeName)) {
+	case "client":
+		return kaddht.ModeClient
+	case "server":
+		return kaddht.ModeServer
+	case "auto-server", "autoserver":
+		return kaddht.ModeAutoServer
+	case "auto", "":
+		// fall through to the typed Mode below
+	default:
+		// unknown string: ignore and fall back
+	}
+	if c.Mode == 0 {
+		return kaddht.ModeAuto
+	}
+	return c.Mode
 }
 
 // New constructs a MemDHT. The DHT is not yet connected to any
 // peer; call Bootstrap to connect to the configured bootstrap
 // set.
-func modeOrDefault(m kaddht.ModeOpt) kaddht.ModeOpt {
-	if m == 0 {
-		return kaddht.ModeAuto
-	}
-	return m
-}
-
+//
+// Phase 17: New honours Config.ModeName (the YAML-friendly
+// form), Config.Datastore (a ds.Batching the kad-dht
+// ProviderManager persists into) and Config.OptimisticProvide
+// (turns on the last-hop skip so cross-node provider records
+// propagate like IPFS).
 func New(ctx context.Context, cfg Config) (*MemDHT, error) {
 	if cfg.Host == nil {
 		return nil, errors.New("dht: nil host")
 	}
 	opts := []kaddht.Option{
 		kaddht.ProtocolPrefix(protocol.ID(ProtocolPrefix)),
-		kaddht.Mode(modeOrDefault(cfg.Mode)),
+		kaddht.Mode(cfg.modeOrDefault()),
 		// Register a permissive validator for the "membuss"
 		// namespace so that arbitrary app-level values can be
 		// stored and retrieved. The kad-dht default validator
 		// only allows "/pk/..." (public-key) records.
 		kaddht.NamespacedValidator("membuss", permissiveValidator{}),
+	}
+	if cfg.Datastore != nil {
+		// Provider-record persistence. Without this, the
+		// DHT forgets every Provide() the moment the
+		// Provide call returns, so FindProviders on
+		// other nodes always returns an empty list on
+		// a freshly-bootstrapped cluster.
+		opts = append(opts, kaddht.Datastore(cfg.Datastore))
+	}
+	if cfg.OptimisticProvide {
+		// IPFS default: skip the last hops of the
+		// provide walk. Cuts the time before another
+		// node can discover our content from minutes
+		// (full DHT walk) to seconds (single hop).
+		opts = append(opts, kaddht.EnableOptimisticProvide())
 	}
 	d, err := kaddht.New(ctx, cfg.Host, opts...)
 	if err != nil {

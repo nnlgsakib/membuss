@@ -103,6 +103,28 @@ type Config struct {
 
 	// --- Phase 14: MID version ---
 
+	// --- Phase 17: DHT server mode + provider persistence ---
+
+	// DHTMode controls the kad-dht operating mode.
+	// Allowed values: "auto" (default, lets kad-dht
+	// pick Client vs. Server from AutoNAT),
+	// "client", "server", "auto-server".
+	//
+	// In a private multi-node cluster (e.g. a Docker
+	// bridge) AutoNAT may classify every node as
+	// private and ModeAuto degrades to a pure-client
+	// DHT that never answers queries. Operators who
+	// want cross-node content resolution must set
+	// this to "server".
+	DHTMode string `yaml:"dht_mode"`
+	// DHTOptimisticProvide, when true, enables the
+	// kaddht.EnableOptimisticProvide shortcut: as
+	// soon as the local node has announced the CID
+	// to its K closest peers the Provide call
+	// returns. Matches the IPFS default. Default
+	// true.
+	DHTOptimisticProvide bool `yaml:"dht_optimistic_provide"`
+
 	// MIDVersion selects which MID string format the
 	// daemon uses. v1 is the canonical CIDv1 +
 	// base32lower form (default). legacy is the
@@ -174,6 +196,8 @@ func Default() *Config {
 		BloomDisabled:                  false,
 		MemexBloomAnnounceInterval:     5 * time.Minute,
 		MIDVersion:                    "v1",
+		DHTMode:                       "server",
+		DHTOptimisticProvide:          true,
 	}
 }
 
@@ -259,11 +283,15 @@ func (c *Config) Validate() error {
 		return errors.New("bloom_fp_rate must be in [0, 1)")
 	}
 	if c.MemexBloomAnnounceInterval < 0 {
-
+		return errors.New("memex_bloom_announce_interval must be >= 0")
+	}
 	if c.MIDVersion != "v1" && c.MIDVersion != "legacy" && c.MIDVersion != "" {
 		return errors.New("mid_version must be 'v1' or 'legacy'")
 	}
-		return errors.New("memex_bloom_announce_interval must be >= 0")
+	switch c.DHTMode {
+	case "", "auto", "client", "server", "auto-server":
+	default:
+		return errors.New("dht_mode must be one of: auto, client, server, auto-server")
 	}
 	return nil
 }

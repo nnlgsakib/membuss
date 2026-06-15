@@ -245,3 +245,34 @@ func TestBootstrapWithBackoff_BackoffSequence(t *testing.T) {
 		t.Errorf("backoff took too long: %v", elapsed)
 	}
 }
+
+// TestConfig_ModeOrDefault exercises the YAML-friendly
+// Config.ModeName -> kaddht.ModeOpt resolver. The typed
+// Config.Mode field is kept for callers that need the raw
+// enum; the string field is what config.yaml drives.
+func TestConfig_ModeOrDefault(t *testing.T) {
+	cases := []struct {
+		name     string
+		modeName string
+		typed    kaddht.ModeOpt
+		want     kaddht.ModeOpt
+	}{
+		{"empty defaults to auto", "", 0, kaddht.ModeAuto},
+		{"auto explicitly", "auto", 0, kaddht.ModeAuto},
+		{"client", "client", 0, kaddht.ModeClient},
+		{"server", "server", 0, kaddht.ModeServer},
+		{"auto-server", "auto-server", 0, kaddht.ModeAutoServer},
+		{"auto-server alias", "autoserver", 0, kaddht.ModeAutoServer},
+		{"uppercase client", "CLIENT", 0, kaddht.ModeClient},
+		{"unknown falls back to typed", "garbage", kaddht.ModeServer, kaddht.ModeServer},
+		{"ModeName wins over typed", "client", kaddht.ModeServer, kaddht.ModeClient},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := Config{ModeName: c.modeName, Mode: c.typed}
+			if got := cfg.modeOrDefault(); got != c.want {
+				t.Fatalf("modeOrDefault: got %v want %v", got, c.want)
+			}
+		})
+	}
+}

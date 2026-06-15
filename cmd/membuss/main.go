@@ -34,6 +34,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -41,6 +43,7 @@ import (
 	explorerPkg "github.com/nnlgsakib/membuss/gateway/explorer"
 	memgate "github.com/nnlgsakib/membuss/gateway/memgate"
 
+	ds "github.com/ipfs/go-datastore"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 
@@ -156,12 +159,54 @@ func main() {
 	}
 
 	// 2) libp2p host.
+	// Phase 17: when mDNS discovers a peer, also feed it
+	// into the DHT bootstrap list. This makes a private
+	// mDNS-only cluster (no static bootstrap peers) form a
+	// real DHT, so provider records propagate cross-node
+	// and `get` on a non-origin node can find the content.
+	// The callback fires after a successful dial; we use
+	// a small mutex-guarded dedup so the same peer is
+	// only added once even if mDNS rebroadcasts.
+	var (
+		dhtBootstrapMu sync.Mutex
+		dhtBootstrap   []peer.AddrInfo
+		dhtSeen        = make(map[peer.ID]struct{})
+	)
+	// We use a small pointer indirection so the callback
+	// can be wired into hostCfg before mdht is built.
+	var dhtPtr atomic.Value // *dht.MemDHT
+	addToBootstrap := func(pi peer.AddrInfo) {
+		if pi.ID == "" {
+			return
+		}
+		dhtBootstrapMu.Lock()
+		defer dhtBootstrapMu.Unlock()
+		if _, ok := dhtSeen[pi.ID]; ok {
+			return
+		}
+		dhtSeen[pi.ID] = struct{}{}
+		dhtBootstrap = append(dhtBootstrap, pi)
+		// dhtPtr gets set after mdht is built (see below).
+		// Calls that happen before then are silently
+		// dropped from the bootstrap, which is fine - mDNS
+		// will re-announce within seconds and the peer
+		// will be re-discovered.
+		if v := dhtPtr.Load(); v != nil {
+			if mdht, ok := v.(*dht.MemDHT); ok && mdht != nil {
+				bg, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = mdht.Bootstrap(bg, []peer.AddrInfo{pi})
+			}
+		}
+	}
+
 	hostCfg := host.Config{
 		ListenAddrs:        cfg.ListenAddrs,
 		DataDir:            cfg.DataDir,
 		UserAgent:          "membuss/" + *build,
 		StaticRelays:       bootstrapPeers,
 		MDNS:               os.Getenv("MEMBUSS_MDNS") == "true",
+		OnPeerFound:        addToBootstrap,
 		// --- Phase 11: NAT traversal ---
 		RelayService:         cfg.RelayService,
 		RelayMaxConns:        cfg.RelayMaxConns,
@@ -189,13 +234,50 @@ func main() {
 	}
 
 	// 3) DHT.
-	mdht, err := dht.New(ctx, dht.Config{Host: h})
+	// Phase 17: provider records propagate cross-node the way
+	// IPFS does only when (a) the DHT is willing to act as a
+	// server (private cluster AutoNAT verdicts would otherwise
+	// downgrade every node to client), (b) provider records are
+	// persisted into a datastore the kad-dht ProviderManager
+	// can read from, and (c) the optimistic provide shortcut is
+	// on so the Provide call returns as soon as K peers know.
+	// We use an in-memory map-backed ds.Batching; the reprovide
+	// loop in Mem-Herald keeps the records fresh as long as
+	// the daemon is running, which is what the multi-node
+	// Docker smoke test (and a normal single-host run) needs.
+	dhtDS := ds.NewMapDatastore()
+	mdht, err := dht.New(ctx, dht.Config{
+		Host:               h,
+		ModeName:           cfg.DHTMode,
+		OptimisticProvide:  cfg.DHTOptimisticProvide,
+		Datastore:          dhtDS,
+	})
+	defer func() { _ = dhtDS.Close() }()
 	if err != nil {
 		logger.Error("dht", "err", err.Error())
 		os.Exit(1)
 	}
 	if err := mdht.Bootstrap(ctx, bootstrapPeers); err != nil {
 		logger.Warn("dht bootstrap", "err", err.Error())
+	}
+	logger.Info("dht ready",
+		"mode", cfg.DHTMode,
+		"optimistic_provide", cfg.DHTOptimisticProvide,
+		"bootstrap_peers", len(bootstrapPeers),
+	)
+	// Phase 17: now that the DHT exists, register it with
+	// the mDNS peer-found callback and replay any peers
+	// that were discovered while the DHT was still being
+	// built. The replay uses the same per-peer dedup so
+	// the live callback will not re-add them.
+	dhtPtr.Store(mdht)
+	dhtBootstrapMu.Lock()
+	replay := append([]peer.AddrInfo(nil), dhtBootstrap...)
+	dhtBootstrapMu.Unlock()
+	if len(replay) > 0 {
+		if err := mdht.Bootstrap(ctx, replay); err != nil {
+			logger.Warn("dht bootstrap (replay)", "err", err.Error())
+		}
 	}
 	defer mdht.Close()
 

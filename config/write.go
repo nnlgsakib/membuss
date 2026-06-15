@@ -61,6 +61,16 @@ api_addr: <<API_ADDR>>
 # Public Mem-Gate HTTP gateway listen address.
 gateway_addr: <<GATEWAY_ADDR>>
 
+# DHT operating mode. Allowed: auto | client | server | auto-server
+# In a private cluster (Docker bridge, LAN) AutoNAT may classify
+# every node as private and auto degrades to a pure-client DHT
+# that never answers FindProviders queries. Set to "server" to
+# make provider records propagate across the cluster the way
+# IPFS does.
+dht_mode: <<DHT_MODE>>
+# Short-circuit the last hops of the provide walk (IPFS default).
+dht_optimistic_provide: <<DHT_OPTIMISTIC_PROVIDE>>
+
 # -----------------------------------------------------------------------------
 # Anchor / Relay
 # -----------------------------------------------------------------------------
@@ -221,6 +231,8 @@ func writeTemplate(cfg *Config) (string, error) {
 		"<<API_KEY>>",                      cfg.APIKey,
 		"<<METRICS_ENABLED>>",              boolString(cfg.MetricsEnabled),
 		"<<LOG_LEVEL>>",                    cfg.LogLevel,
+		"<<DHT_MODE>>",                    cfg.DHTMode,
+		"<<DHT_OPTIMISTIC_PROVIDE>>",         boolString(cfg.DHTOptimisticProvide),
 		"<<MID_VERSION>>",                  cfg.MIDVersion,
 		"<<LISTEN_ADDRS>>",                 listenBlock,
 		"<<BOOTSTRAP_PEERS>>",              bootBlock,
