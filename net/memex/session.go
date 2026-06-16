@@ -28,6 +28,7 @@ type SessionConfig struct {
 	Providers     []peer.AddrInfo
 	ParallelPeers int
 	Timeout       time.Duration
+	ProgressFn    func(blocksResolved, blocksTotal uint64)
 }
 
 // Session is a single in-flight retrieval. A Session drives
@@ -98,7 +99,11 @@ func (s *Session) Fetch(ctx context.Context) (io.Reader, error) {
 	markResolved := func(m mid.MID) {
 		mu.Lock()
 		resolved[m.String()] = struct{}{}
+		r, e := len(resolved), len(enqueued)
 		mu.Unlock()
+		if s.cfg.ProgressFn != nil {
+			s.cfg.ProgressFn(uint64(r), uint64(e))
+		}
 	}
 	allResolved := func() bool {
 		mu.Lock()

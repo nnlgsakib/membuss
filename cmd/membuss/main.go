@@ -43,7 +43,7 @@ import (
 	explorerPkg "github.com/nnlgsakib/membuss/gateway/explorer"
 	memgate "github.com/nnlgsakib/membuss/gateway/memgate"
 
-	ds "github.com/ipfs/go-datastore"
+	badgerds "github.com/ipfs/go-ds-badger4"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 
@@ -171,6 +171,7 @@ func main() {
 		dhtBootstrapMu sync.Mutex
 		dhtBootstrap   []peer.AddrInfo
 		dhtSeen        = make(map[peer.ID]struct{})
+		heraldPtr      atomic.Value // *herald.MemHerald
 	)
 	// We use a small pointer indirection so the callback
 	// can be wired into hostCfg before mdht is built.
@@ -196,6 +197,13 @@ func main() {
 				bg, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				_ = mdht.Bootstrap(bg, []peer.AddrInfo{pi})
+			}
+		}
+		// Signal Mem-Herald to re-announce immediately so
+		// newly discovered peers see our content right away.
+		if v := heraldPtr.Load(); v != nil {
+			if hd, ok := v.(*herald.MemHerald); ok && hd != nil {
+				hd.Trigger()
 			}
 		}
 	}
@@ -234,18 +242,19 @@ func main() {
 	}
 
 	// 3) DHT.
-	// Phase 17: provider records propagate cross-node the way
-	// IPFS does only when (a) the DHT is willing to act as a
-	// server (private cluster AutoNAT verdicts would otherwise
-	// downgrade every node to client), (b) provider records are
-	// persisted into a datastore the kad-dht ProviderManager
-	// can read from, and (c) the optimistic provide shortcut is
-	// on so the Provide call returns as soon as K peers know.
-	// We use an in-memory map-backed ds.Batching; the reprovide
-	// loop in Mem-Herald keeps the records fresh as long as
-	// the daemon is running, which is what the multi-node
-	// Docker smoke test (and a normal single-host run) needs.
-	dhtDS := ds.NewMapDatastore()
+	// Phase 17: provider records propagate cross-node only
+	// when (a) the DHT is willing to act as a server, (b)
+	// provider records are persisted into a datastore the
+	// kad-dht ProviderManager can read from, and (c) the
+	// optimistic provide shortcut is on. We use a badger4
+	// backed datastore so provider records survive restarts;
+	// the reprovide loop in Mem-Herald keeps them fresh.
+	dhtDir := filepath.Join(cfg.DataDir, "dht")
+	dhtDS, err := badgerds.NewDatastore(dhtDir, nil)
+	if err != nil {
+		logger.Error("dht datastore", "err", err.Error())
+		os.Exit(1)
+	}
 	mdht, err := dht.New(ctx, dht.Config{
 		Host:               h,
 		ModeName:           cfg.DHTMode,
@@ -282,7 +291,7 @@ func main() {
 	defer mdht.Close()
 
 	// 4) PEX.
-	px, err := pex.New(pex.Config{Host: h})
+	px, err := pex.New(pex.Config{Host: h, PersistPath: filepath.Join(cfg.DataDir, "pex.db")})
 	if err != nil {
 		logger.Error("pex", "err", err.Error())
 		os.Exit(1)
@@ -328,6 +337,13 @@ func main() {
 	}
 	hd.Start(ctx)
 	defer hd.Stop()
+	heraldPtr.Store(hd)
+
+	// 6c) Content publisher — runs on all nodes and serves
+	// sealed MID lists on the content-exchange stream.
+	cp := anchor.NewContentPublisher(h, bs)
+	cp.Start(ctx)
+	defer cp.Stop()
 
 	// Phase 11: relay announcer. Only wired when the
 	// node runs the relay service; other nodes just
@@ -348,6 +364,27 @@ func main() {
 		fmt.Fprintf(os.Stdout, "  relay_service:  enabled\n")
 	}
 
+	// 6b) Auto GC background loop (mutually exclusive with anchor).
+	if cfg.AutoGCInterval > 0 && !cfg.AnchorMode {
+		go func() {
+			t := time.NewTicker(cfg.AutoGCInterval)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					freed, gerr := bs.GCWithMinAge(ctx, cfg.GCMinAge)
+					if gerr != nil {
+						logger.Warn("auto gc", "err", gerr.Error())
+					} else if freed > 0 {
+						logger.Info("auto gc", "freed", freed)
+					}
+				}
+			}
+		}()
+	}
+
 	// 7) Optional Anchor engine.
 	var anchorEng *anchor.AnchorEngine
 	if cfg.AnchorMode && !*noAnchor {
@@ -359,6 +396,7 @@ func main() {
 			Herald:            hd,
 			Fetcher:           fetcher,
 			DiscoveryInterval: 30 * time.Second,
+			Logger:            &slogAnchorLogger{l: logger},
 		})
 		if err != nil {
 			logger.Error("anchor", "err", err.Error())

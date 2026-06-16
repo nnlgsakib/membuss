@@ -80,6 +80,14 @@ dht_optimistic_provide: <<DHT_OPTIMISTIC_PROVIDE>>
 # providers go offline.
 anchor_mode: <<ANCHOR_MODE>>
 
+# Periodic garbage collection interval. 0s disables.
+# Mutually exclusive with anchor_mode.
+auto_gc_interval: <<AUTO_GC_INTERVAL>>
+
+# Minimum block age before GC can delete it. Protects
+# recently-fetched content from being immediately collected.
+gc_min_age: <<GC_MIN_AGE>>
+
 # Circuit v2 relay. Anchor nodes should set this to true so
 # they can forward traffic for NATed peers.
 relay_service: <<RELAY_SERVICE>>
@@ -217,6 +225,8 @@ func writeTemplate(cfg *Config) (string, error) {
 		"<<API_ADDR>>",                     cfg.APIAddr,
 		"<<GATEWAY_ADDR>>",                 cfg.GatewayAddr,
 		"<<ANCHOR_MODE>>",                  boolString(cfg.AnchorMode),
+		"<<AUTO_GC_INTERVAL>>",             durationString(cfg.AutoGCInterval),
+		"<<GC_MIN_AGE>>",                   durationString(cfg.GCMinAge),
 		"<<RELAY_SERVICE>>",                boolString(cfg.RelayService),
 		"<<RELAY_MAX_CONNS>>",              intString(cfg.RelayMaxConns),
 		"<<RELAY_MAX_RESERVATIONS>>",       intString(cfg.RelayMaxReservations),

@@ -201,7 +201,12 @@ func newGetCmd() *cobra.Command {
 					defer f.Close()
 					out = f
 				}
-				var total uint64
+				var (
+					total      uint64
+					received   uint64
+					startTime  = time.Now()
+					blocksRecv uint64
+				)
 				for {
 					frame, err := stream.Recv()
 					if err == io.EOF {
@@ -213,10 +218,35 @@ func newGetCmd() *cobra.Command {
 					if _, err := out.Write(frame.Data); err != nil {
 						return err
 					}
-					total += uint64(len(frame.Data))
+					n := uint64(len(frame.Data))
+					received += n
+					blocksRecv++
+					if frame.Total > 0 {
+						total = frame.Total
+					}
+					if outPath == "-" || outPath == "" {
+						elapsed := time.Since(startTime).Seconds()
+						var pct int
+						var sizeStr string
+						if total > 0 {
+							pct = int(received * 100 / total)
+							sizeStr = fmt.Sprintf("%s / %s", formatBytes(received), formatBytes(total))
+						} else {
+							pct = 0
+							sizeStr = fmt.Sprintf("%s / ?", formatBytes(received))
+						}
+						var rate string
+						if elapsed > 0 {
+							rate = fmt.Sprintf("%.0f blocks/s", float64(blocksRecv)/elapsed)
+						}
+						fmt.Fprintf(cmd.ErrOrStderr(), "\rFetching %s... [%-20s] %d%% (%s) %s", args[0], strings.Repeat("=", pct/5)+strings.Repeat(" ", 20-pct/5), pct, sizeStr, rate)
+					}
+				}
+				if outPath == "-" || outPath == "" {
+					fmt.Fprintf(cmd.ErrOrStderr(), "\n")
 				}
 				if outPath != "" && outPath != "-" {
-					fmt.Fprintf(cmd.ErrOrStderr(), "wrote %d bytes to %s\n", total, outPath)
+					fmt.Fprintf(cmd.ErrOrStderr(), "wrote %d bytes to %s\n", received, outPath)
 				}
 				return nil
 			})

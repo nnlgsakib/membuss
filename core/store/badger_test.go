@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -339,3 +340,69 @@ func TestMemStoreSize(t *testing.T) {
 		t.Fatalf("Size: %v", err)
 	}
 }
+
+// TestMemStoreSealForwardLooking verifies the design contract
+// from the Store interface: a Seal is a forward-looking pin
+// that succeeds even when the local store does not yet have
+// the blocks being pinned. The walk is best-effort; a missing
+// block is a soft warning (ErrSealWalkIncomplete) so the
+// caller (typically a "pin this MID, fetch later" workflow)
+// does not have to pre-fetch every chunk before sealing.
+//
+// This is the regression test for the user-reported error
+//
+//	seal: store: seal walk: store: walk get <mid>:
+//	store: block not found
+//
+// that used to surface when an operator sealed a freshly
+// fetched MID before the closer had drained every wanted
+// block. After the fix, the seal record is written
+// unconditionally and the walk's missing-block result is
+// surfaced as a typed error the caller can choose to log and
+// ignore.
+func TestMemStoreSealForwardLooking(t *testing.T) {
+	s := newTestStore(t)
+	// Pick a MID we have never Put. The seal walk should
+	// return ErrNotFound (or its wrapped
+	// ErrSealWalkIncomplete form) but the seal record must
+	// still be on disk.
+	mid := mid.FromBytes([]byte("not-yet-fetched"))
+
+	err := s.Seal(mid, true)
+	if err == nil {
+		t.Fatal("Seal on missing block: expected an error, got nil")
+	}
+	if !errors.Is(err, ErrSealWalkIncomplete) {
+		t.Fatalf("Seal on missing block: err = %v, want wraps ErrSealWalkIncomplete", err)
+	}
+
+	// The pin must still be on disk: a follow-up IsSealed
+	// must report the MID as sealed (the contract is "pin
+	// now, fetch later").
+	sealed, err := s.IsSealed(mid)
+	if err != nil {
+		t.Fatalf("IsSealed: %v", err)
+	}
+	if !sealed {
+		t.Fatal("Seal record missing after forward-looking Seal; pin must be on disk")
+	}
+}
+
+// TestMemStoreSealRecursiveSucceedsWhenComplete verifies
+// the happy path: when every reachable block is local, the
+// recursive seal walk returns nil and the pin is recorded.
+func TestMemStoreSealRecursiveSucceedsWhenComplete(t *testing.T) {
+	s := newTestStore(t)
+	m := mid.FromBytes([]byte("single-block"))
+	if err := s.Put(m, []byte("single-block")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := s.Seal(m, true); err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	sealed, _ := s.IsSealed(m)
+	if !sealed {
+		t.Fatal("Seal record missing after successful Seal")
+	}
+}
+

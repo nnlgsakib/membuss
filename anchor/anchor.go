@@ -1,7 +1,7 @@
 // Package anchor implements the Anchor Node full-sync engine.
 //
-// Anchor nodes are Membuss's answer to the IPFS "provider
-// goes offline" problem. A node configured with
+// Anchor nodes ensure content persists even when original
+// providers go offline. A node configured with
 // AnchorMode=true runs an AnchorEngine that:
 //
 //   - Discovers content announced on the DHT and pulls it
@@ -61,6 +61,7 @@ type AnchorStore interface {
 	Has(m mid.MID) (bool, error)
 	PutMeta(key string, value []byte) error
 	GetMeta(key string) ([]byte, error)
+	Seal(m mid.MID, recursive bool) error
 	Close() error
 }
 
@@ -334,6 +335,11 @@ func (e *AnchorEngine) loop(ctx context.Context) {
 
 func (e *AnchorEngine) tick(ctx context.Context) {
 	e.persistRegistry()
+
+	// Discover content from connected peers via the
+	// direct content-exchange stream.
+	e.discoverFromPeers(ctx)
+
 	e.mu.Lock()
 	pending := e.backlog
 	e.backlog = nil
@@ -368,8 +374,44 @@ func (e *AnchorEngine) tick(ctx context.Context) {
 			e.logger.Errorf("anchor: fetch %s: %v", m.String()[:12], err)
 			continue
 		}
+		e.sealFetched(ctx, m)
 		atomic.AddInt64(&e.synced, 1)
 		e.markSeen(m)
+	}
+}
+
+// discoverFromPeers opens content-exchange streams to all
+// connected peers and enqueues any sealed MIDs we don't
+// already have.
+func (e *AnchorEngine) discoverFromPeers(ctx context.Context) {
+	known := make(map[string]struct{})
+	sealed, err := e.cfg.Store.AllSealed()
+	if err == nil {
+		for _, m := range sealed {
+			known[m.String()] = struct{}{}
+		}
+	}
+
+	announcements, err := DiscoverContent(ctx, e.cfg.Host, known)
+	if err != nil {
+		e.logger.Errorf("anchor: discover from peers: %v", err)
+		return
+	}
+
+	for _, a := range announcements {
+		e.Enqueue(a.MID)
+	}
+
+	if len(announcements) > 0 {
+		e.logger.Infof("anchor: discovered %d new MIDs from peers", len(announcements))
+	}
+}
+
+// sealFetched seals a MID that was just fetched so GC
+// never deletes it.
+func (e *AnchorEngine) sealFetched(ctx context.Context, m mid.MID) {
+	if err := e.cfg.Store.Seal(m, false); err != nil {
+		e.logger.Errorf("anchor: seal fetched %s: %v", m.String()[:12], err)
 	}
 }
 
@@ -388,6 +430,7 @@ func (e *AnchorEngine) fetchIfMissing(ctx context.Context, m mid.MID) {
 		e.logger.Errorf("anchor: fetch %s: %v", m.String()[:12], err)
 		return
 	}
+	e.sealFetched(ctx, m)
 	atomic.AddInt64(&e.synced, 1)
 	e.markSeen(m)
 }

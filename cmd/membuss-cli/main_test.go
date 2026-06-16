@@ -32,7 +32,7 @@ type fakeBackend struct {
 	anchor      serverpkg.AnchorInfo
 }
 
-func (f *fakeBackend) Add(ctx context.Context, path, chunker string, chunkSize uint32, sealRoot bool) (serverpkg.AddResult, error) {
+func (f *fakeBackend) Add(ctx context.Context, path, chunker string, chunkSize uint32, sealRoot bool, name, mimeType string) (serverpkg.AddResult, error) {
 	f.root = "memfake"
 	f.rootSize = 42
 	f.leafBlocks = 3
@@ -43,7 +43,14 @@ func (f *fakeBackend) Add(ctx context.Context, path, chunker string, chunkSize u
 }
 
 func (f *fakeBackend) Get(ctx context.Context, midStr string, offset, limit uint64) (io.ReadCloser, error) {
+	return f.GetWithProgress(ctx, midStr, offset, limit, nil)
+}
+
+func (f *fakeBackend) GetWithProgress(ctx context.Context, midStr string, offset, limit uint64, progressFn func(blocksResolved, blocksTotal uint64)) (io.ReadCloser, error) {
 	body := []byte("the quick brown fox jumps over the lazy dog\n")
+	if progressFn != nil {
+		progressFn(uint64(len(body)), uint64(len(body)))
+	}
 	return io.NopCloser(bytes.NewReader(body)), nil
 }
 

@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -81,6 +82,8 @@ type PEX struct {
 	mu    sync.Mutex
 	peers map[peer.ID]*entry
 
+	persistPath string
+
 	loopStop chan struct{}
 	loopDone chan struct{}
 
@@ -106,6 +109,9 @@ type entry struct {
 // Config configures a PEX instance.
 type Config struct {
 	Host libp2pcore.Host
+	// PersistPath is the path to the peer table file.
+	// If empty, persistence is disabled.
+	PersistPath string
 	// Now overrides the wall clock; tests use this to control
 	// time. Defaults to time.Now.
 	Now func() time.Time
@@ -128,14 +134,19 @@ func New(cfg Config) (*PEX, error) {
 	if rng == nil {
 		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	}
-	return &PEX{
-		host:     cfg.Host,
-		peers:    make(map[peer.ID]*entry, maxPeers),
-		loopStop: make(chan struct{}),
-		loopDone: make(chan struct{}),
-		now:      now,
-		rng:      rng,
-	}, nil
+	p := &PEX{
+		host:        cfg.Host,
+		peers:       make(map[peer.ID]*entry, maxPeers),
+		persistPath: cfg.PersistPath,
+		loopStop:    make(chan struct{}),
+		loopDone:    make(chan struct{}),
+		now:         now,
+		rng:         rng,
+	}
+	if cfg.PersistPath != "" {
+		p.load()
+	}
+	return p, nil
 }
 
 // Start registers the stream handler and starts the gossip
@@ -146,10 +157,11 @@ func (p *PEX) Start(ctx context.Context) {
 	go p.gossipLoop(ctx)
 }
 
-// Stop unregisters the stream handler and waits for the gossip
-// loop to exit.
+// Stop unregisters the stream handler, persists the peer table,
+// and waits for the gossip loop to exit.
 func (p *PEX) Stop() {
 	p.host.RemoveStreamHandler(ProtocolID)
+	p.save()
 	select {
 	case <-p.loopStop:
 	default:
@@ -442,12 +454,16 @@ func (p *PEX) gossipLoop(ctx context.Context) {
 	defer close(p.loopDone)
 	t := time.NewTicker(gossipInterval)
 	defer t.Stop()
+	saveTick := time.NewTicker(5 * time.Minute)
+	defer saveTick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-p.loopStop:
 			return
+		case <-saveTick.C:
+			p.save()
 		case <-t.C:
 			p.gossipRound(ctx)
 		}
@@ -661,3 +677,56 @@ func decodePeerInfo(info *membusspb.PeerInfo) (peer.AddrInfo, bool) {
 
 // silence unused import warning when membusspb-only code
 // paths are inlined by the linker.
+
+// save persists the peer table to disk. It is a no-op when
+// PersistPath is empty.
+func (p *PEX) save() {
+	if p.persistPath == "" {
+		return
+	}
+	p.mu.Lock()
+	msg := &membusspb.PEXMessage{Peers: p.snapshot()}
+	p.mu.Unlock()
+	data, err := proto.Marshal(msg)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(p.persistPath, data, 0o600)
+}
+
+// load restores the peer table from disk. It is a no-op when
+// PersistPath is empty or the file does not exist.
+func (p *PEX) load() {
+	if p.persistPath == "" {
+		return
+	}
+	data, err := os.ReadFile(p.persistPath)
+	if err != nil {
+		return
+	}
+	var msg membusspb.PEXMessage
+	if err := proto.Unmarshal(data, &msg); err != nil {
+		return
+	}
+	seen := p.now().Unix()
+	for _, info := range msg.Peers {
+		ai, ok := decodePeerInfo(info)
+		if !ok {
+			continue
+		}
+		var relay []multiaddr.Multiaddr
+		for _, s := range info.RelayAddrs {
+			if a, err := multiaddr.NewMultiaddr(s); err == nil {
+				relay = append(relay, a)
+			}
+		}
+		p.mu.Lock()
+		p.upsertLocked(ai, relay, seen, true)
+		if cur, exists := p.peers[ai.ID]; exists {
+			cur.info.Reachability = info.Reachability
+			cur.info.LastDialSuccess = info.LastDialSuccess
+			cur.relayAddrs = relay
+		}
+		p.mu.Unlock()
+	}
+}

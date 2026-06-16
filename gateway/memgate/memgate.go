@@ -152,7 +152,7 @@ func (m *MemGate) Router() http.Handler { return m.router }
 // the gateway's timeouts applied. The daemon wires this into
 // http.Server.
 func (m *MemGate) Handler() http.Handler {
-	return http.TimeoutHandler(m.router, m.cfg.WriteTimeout, `{"ok":false,"error":"timeout"}`)
+	return m.router
 }
 
 func (m *MemGate) buildRouter() chi.Router {
@@ -161,7 +161,6 @@ func (m *MemGate) buildRouter() chi.Router {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(m.cfg.ReadTimeout))
 	// Rate limit BEFORE route dispatch so a flood cannot pin
 	// a single request handler. /healthz is intentionally not
 	// exempted; operators who want it open can disable the

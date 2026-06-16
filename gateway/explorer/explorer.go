@@ -11,6 +11,7 @@ package explorer
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -20,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -145,6 +147,11 @@ type Backend interface {
 	// neither local nor reachable from any known
 	// provider.
 	Resolve(ctx context.Context, m mid.MID) (io.ReadCloser, ContentInfo, error)
+	// ResolveWithProgress fetches the content addressed
+	// by m with progress reporting. progressFn is called
+	// as blocks arrive with the running count of blocks
+	// resolved and total blocks discovered so far.
+	ResolveWithProgress(ctx context.Context, m mid.MID, progressFn func(blocksResolved, blocksTotal uint64)) (io.ReadCloser, ContentInfo, error)
 	// Add ingests content from a reader and returns the
 	// resulting MID + metadata. name is the original
 	// filename (used for Content-Disposition on download).
@@ -251,7 +258,7 @@ func (e *Explorer) Router() http.Handler { return e.buildRouter() }
 // configured write timeout. The daemon wires this into
 // http.Server via Mem-Gate.
 func (e *Explorer) Handler() http.Handler {
-	return http.TimeoutHandler(e.buildRouter(), e.cfg.WriteTimeout, `{"ok":false,"error":"timeout"}`)
+	return e.buildRouter()
 }
 
 func (e *Explorer) buildRouter() http.Handler {
@@ -259,11 +266,11 @@ func (e *Explorer) buildRouter() http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(e.cfg.ReadTimeout))
 
 	r.Get("/", e.handleIndex)
 	r.Get("/mid/{mid}", e.handleMID)
 	r.Get("/mid/{mid}/dag", e.handleDAG)
+	r.Get("/mid/{mid}/resolve-stream", e.handleResolveStream)
 	r.Post("/mid/{mid}/seal", e.handleSeal)
 	r.Post("/mid/{mid}/unseal", e.handleUnseal)
 	r.Get("/peers", e.handlePeers)
@@ -390,19 +397,13 @@ func (e *Explorer) handleMID(w http.ResponseWriter, r *http.Request) {
 		Name:     info.Name,
 		MimeType: info.MimeType,
 	}
-	// Phase 18: when the MID is not local, fall back to
-	// the DHT + Memex pipeline the public Mem-Gate
-	// gateway uses. The page then renders the same
-	// content view as a local hit, or a structured
-	// "not available / try again" message with the
-	// known provider list. This matches what the
-	// Mem-Gate CDN does for /mem/<MID>.
 	if !present {
+		provs, _ := b.Providers(ctx, root, e.cfg.ProviderLimit)
+		if len(provs) > 0 {
+			e.render(w, "mid-resolving.html", data)
+			return
+		}
 		e.resolveFromDHT(ctx, b, root, &data)
-		// Re-stat now that Resolve may have populated
-		// the local store. The metadata fields below
-		// are only filled in when the second stat
-		// reports present=true.
 		if p2, err2 := b.Stat(ctx, root); err2 == nil && p2.Present {
 			present = true
 			size, blocks, sealed, codec = p2.Size, p2.Blocks, p2.Sealed, p2.Codec
@@ -419,7 +420,6 @@ func (e *Explorer) handleMID(w http.ResponseWriter, r *http.Request) {
 		data.Sealed = sealed
 		data.Codec = codec
 		data.ContentType = data.MimeType
-		// Default RS layout per constitution (10+4).
 		data.DataShards = 10
 		data.ParityShards = 4
 		data.TotalShards = data.DataShards + data.ParityShards
@@ -495,6 +495,60 @@ func (e *Explorer) handleDAG(w http.ResponseWriter, r *http.Request) {
 		"Title": "DAG " + midStr,
 		"MID":   midStr,
 	})
+}
+
+func (e *Explorer) handleResolveStream(w http.ResponseWriter, r *http.Request) {
+	midStr := chi.URLParam(r, "mid")
+	root, err := mid.Parse(midStr)
+	if err != nil {
+		http.Error(w, "bad mid: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	ctx := r.Context()
+	b := e.cfg.Backend
+
+	type sseEvent struct {
+		Blocks uint64 `json:"blocks,omitempty"`
+		Total  uint64 `json:"total,omitempty"`
+		Done   bool   `json:"done,omitempty"`
+		MID    string `json:"mid,omitempty"`
+		Error  string `json:"error,omitempty"`
+	}
+
+	sendEvent := func(ev sseEvent) {
+		data, _ := json.Marshal(ev)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
+
+	timeout := e.cfg.ResolveTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	rctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	rc, info, err := b.ResolveWithProgress(rctx, root, func(blocksResolved, blocksTotal uint64) {
+		sendEvent(sseEvent{Blocks: blocksResolved, Total: blocksTotal})
+	})
+	if err != nil {
+		sendEvent(sseEvent{Error: err.Error()})
+		return
+	}
+	if rc != nil {
+		_, _ = io.Copy(io.Discard, rc)
+		_ = rc.Close()
+	}
+	sendEvent(sseEvent{Done: true, MID: info.MID})
 }
 
 func (e *Explorer) handleSeal(w http.ResponseWriter, r *http.Request) {
@@ -590,7 +644,7 @@ func (e *Explorer) handleSearch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	midStr := strings.TrimSpace(r.FormValue("mid"))
+	midStr := sanitizeMIDString(r.FormValue("mid"))
 	if midStr == "" {
 		http.Error(w, "empty mid", http.StatusBadRequest)
 		return
@@ -600,6 +654,24 @@ func (e *Explorer) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/explorer/mid/"+midStr, http.StatusSeeOther)
+}
+
+// sanitizeMIDString strips invisible Unicode characters
+// (zero-width joiners, soft hyphens, etc.) that users
+// sometimes inadvertently paste along with a MID.
+func sanitizeMIDString(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		if unicode.Is(unicode.Cc, r) && r != '\t' && r != '\n' && r != '\r' {
+			return -1
+		}
+		if unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(s))
 }
 
 func (e *Explorer) handleUploadPage(w http.ResponseWriter, r *http.Request) {
@@ -656,13 +728,14 @@ func (e *Explorer) handleStatic(name, contentType string) http.HandlerFunc {
 // the page's *_body template via {{template}}.
 func buildPages(master *template.Template) (map[string]*template.Template, error) {
 	pb := map[string]string{
-		"index.html":   "index_body",
-		"mid.html":     "mid_body",
-		"dag.html":     "dag_body",
-		"peers.html":   "peers_body",
-		"anchors.html": "anchors_body",
-		"node.html":    "node_body",
-		"upload.html":  "upload_body",
+		"index.html":        "index_body",
+		"mid.html":          "mid_body",
+		"mid-resolving.html": "mid-resolving_body",
+		"dag.html":          "dag_body",
+		"peers.html":        "peers_body",
+		"anchors.html":      "anchors_body",
+		"node.html":         "node_body",
+		"upload.html":       "upload_body",
 	}
 	pages := make(map[string]*template.Template, len(pb))
 	for page, bodyName := range pb {

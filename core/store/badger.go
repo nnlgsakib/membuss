@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
 
@@ -87,6 +88,12 @@ type Store interface {
 	//
 	// BadgerDB's value-log GC is invoked at most once per call.
 	GC(ctx context.Context) (uint64, error)
+
+	// GCWithMinAge is like GC but only deletes blocks whose
+	// BadgerDB commit timestamp is older than minAge. This
+	// prevents recently-fetched content from being immediately
+	// garbage-collected. Pass 0 for minAge to disable.
+	GCWithMinAge(ctx context.Context, minAge time.Duration) (uint64, error)
 
 	// Size returns the approximate on-disk size of the store in
 	// bytes. It is the sum of the LSM tree size and the value
@@ -457,21 +464,35 @@ func (s *MemStore) Close() error {
 	return snapErr
 }
 
-// Size returns the approximate on-disk size in bytes. The value
-// is a sum of the LSM and value-log sizes, as reported by
-// BadgerDB.
+// Size returns the approximate on-disk size in bytes. Instead
+// of using BadgerDB's db.Size() which reports pre-allocated
+// value log sizes, we iterate over actual block data to get a
+// true picture of how much space the content occupies.
 func (s *MemStore) Size() (uint64, error) {
 	if s.db == nil {
 		return 0, errors.New("store: closed")
 	}
-	lsm, vlog := s.db.Size()
-	if lsm < 0 {
-		lsm = 0
+	var total uint64
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			ks := string(item.Key())
+			// Only count actual block data keys, not
+			// seals, meta, or DAG nodes.
+			if len(ks) > len(prefixBlock) && ks[:len(prefixBlock)] == prefixBlock {
+				total += uint64(item.ValueSize())
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("store: size: %w", err)
 	}
-	if vlog < 0 {
-		vlog = 0
-	}
-	return uint64(lsm) + uint64(vlog), nil
+	return total, nil
 }
 
 // verifyContent checks that the data's SHA-256 digest matches the

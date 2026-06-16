@@ -33,6 +33,12 @@ type Backend interface {
 	// back to fetching via Memex. The returned ReadCloser
 	// streams the bytes.
 	Get(ctx context.Context, midStr string, offset, limit uint64) (io.ReadCloser, error)
+	// GetWithProgress resolves a MID locally if present;
+	// otherwise it falls back to fetching via Memex.
+	// progressFn is called as blocks arrive with the
+	// running total of bytes received and total bytes
+	// (total may be 0 until all blocks are known).
+	GetWithProgress(ctx context.Context, midStr string, offset, limit uint64, progressFn func(blocksResolved, blocksTotal uint64)) (io.ReadCloser, error)
 	// Seal pins the given MID, optionally recursive.
 	Seal(ctx context.Context, midStr string, recursive bool) (SealResult, error)
 	// Unseal removes the pin on a MID.
@@ -169,7 +175,7 @@ func (s *Server) Get(req *membusspb.GetRequest, stream membusspb.MembussNode_Get
 	if req.GetMid() == "" {
 		return status.Error(codes.InvalidArgument, "get: mid required")
 	}
-	rc, err := s.Backend.Get(stream.Context(), req.GetMid(), req.GetOffset(), req.GetLimit())
+	rc, err := s.Backend.GetWithProgress(stream.Context(), req.GetMid(), req.GetOffset(), req.GetLimit(), nil)
 	if err != nil {
 		return status.Errorf(codes.Internal, "get: %v", err)
 	}
@@ -185,6 +191,49 @@ func (s *Server) Get(req *membusspb.GetRequest, stream membusspb.MembussNode_Get
 	for {
 		n, err := rc.Read(buf)
 		if n > 0 {
+			if err := stream.Send(&membusspb.GetChunk{Data: append([]byte(nil), buf[:n]...), Index: index, Total: total}); err != nil {
+				return err
+			}
+			index++
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return status.Errorf(codes.Internal, "get: read: %v", err)
+		}
+	}
+}
+
+// GetWithProgress streams a MID's content back to the caller
+// in chunks, sending progress updates via the Total field
+// of each GetChunk when progressFn is non-nil.
+func (s *Server) GetWithProgress(req *membusspb.GetRequest, stream membusspb.MembussNode_GetServer) error {
+	if req.GetMid() == "" {
+		return status.Error(codes.InvalidArgument, "get: mid required")
+	}
+	var lastTotal uint64
+	progressFn := func(blocksResolved, blocksTotal uint64) {
+		lastTotal = blocksTotal
+	}
+	rc, err := s.Backend.GetWithProgress(stream.Context(), req.GetMid(), req.GetOffset(), req.GetLimit(), progressFn)
+	if err != nil {
+		return status.Errorf(codes.Internal, "get: %v", err)
+	}
+	defer rc.Close()
+
+	const frameSize = 64 * 1024
+	buf := make([]byte, frameSize)
+	var (
+		index uint64
+		total uint64
+	)
+	for {
+		n, err := rc.Read(buf)
+		if n > 0 {
+			if lastTotal > 0 {
+				total = lastTotal
+			}
 			if err := stream.Send(&membusspb.GetChunk{Data: append([]byte(nil), buf[:n]...), Index: index, Total: total}); err != nil {
 				return err
 			}

@@ -32,7 +32,7 @@ type memBackend struct {
 	sealedSet   map[string]bool
 }
 
-func (m *memBackend) Add(ctx context.Context, path, chunker string, chunkSize uint32, sealRoot bool) (AddResult, error) {
+func (m *memBackend) Add(ctx context.Context, path, chunker string, chunkSize uint32, sealRoot bool, name, mimeType string) (AddResult, error) {
 	m.root = "memtest"
 	m.rootSize = 12
 	m.leafBlocks = 1
@@ -43,7 +43,14 @@ func (m *memBackend) Add(ctx context.Context, path, chunker string, chunkSize ui
 }
 
 func (m *memBackend) Get(ctx context.Context, midStr string, offset, limit uint64) (io.ReadCloser, error) {
+	return m.GetWithProgress(ctx, midStr, offset, limit, nil)
+}
+
+func (m *memBackend) GetWithProgress(ctx context.Context, midStr string, offset, limit uint64, progressFn func(blocksResolved, blocksTotal uint64)) (io.ReadCloser, error) {
 	data := []byte("hello world!")
+	if progressFn != nil {
+		progressFn(uint64(len(data)), uint64(len(data)))
+	}
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
 

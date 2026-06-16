@@ -5,7 +5,6 @@ package explorer
 
 import (
 	"context"
-	"crypto/sha256"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -108,6 +107,10 @@ func (b *memBackend) Providers(ctx context.Context, m mid.MID, limit int) ([]str
 // that want the "found it" branch can pre-populate
 // b.store with the right bytes via put().
 func (b *memBackend) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser, ContentInfo, error) {
+	return b.ResolveWithProgress(ctx, m, nil)
+}
+
+func (b *memBackend) ResolveWithProgress(ctx context.Context, m mid.MID, progressFn func(blocksResolved, blocksTotal uint64)) (io.ReadCloser, ContentInfo, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	has := len(b.providers[m.String()]) > 0
@@ -115,6 +118,9 @@ func (b *memBackend) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser, Con
 	data, stored := b.content[m.String()]
 	if !resolveOK || !has || !stored {
 		return nil, ContentInfo{}, ErrNotFound
+	}
+	if progressFn != nil {
+		progressFn(uint64(len(data)), uint64(len(data)))
 	}
 	return io.NopCloser(strings.NewReader(string(data))), ContentInfo{
 		MID:    m.String(),
@@ -196,9 +202,6 @@ func (b *memBackend) Add(ctx context.Context, name string, r io.Reader) (Content
 	if err != nil {
 		return ContentInfo{}, err
 	}
-	h := sha256.Sum256(data)
-	// Build a fake MID from the hash. In tests we use
-	// mid.FromBytes which does exactly this internally.
 	m := mid.FromBytes(data)
 	b.put(m, data)
 	return ContentInfo{
@@ -335,30 +338,23 @@ func TestMIDNotFoundNoProviders(t *testing.T) {
 }
 
 // TestMIDNotFoundAttempted covers the branch where the
-// DHT has providers but the Memex fetch failed. The page
-// should tell the user to try again later and still list
-// the known providers.
+// DHT has providers but the content is not local. The page
+// should render the resolving/streaming page that will
+// auto-fetch from the network via SSE.
 func TestMIDNotFoundAttempted(t *testing.T) {
 	srv, b := newTestServer(t)
 	m := mid.FromBytes([]byte("missing-attempted"))
 	b.addProvider(m, "12D3KooProvider1")
-	// resolveOK is left false, so Resolve returns
-	// ErrNotFound; handleMID classifies it as
-	// ResolveAttempted because Providers() still
-	// returns >= 1 entry.
 	resp, body := get(t, srv, "/mid/"+m.String())
 	if resp.StatusCode != 200 {
 		t.Fatalf("status: %d", resp.StatusCode)
 	}
 	bodyStr := string(body)
-	if !strings.Contains(bodyStr, "not present in the local store") {
-		t.Errorf("body missing 'not present' message")
+	if !strings.Contains(bodyStr, "Resolving content from network") {
+		t.Errorf("body missing resolving page: %s", bodyStr)
 	}
-	if !strings.Contains(bodyStr, "try again later") {
-		t.Errorf("body missing 'try again later' hint: %s", bodyStr)
-	}
-	if !strings.Contains(bodyStr, "12D3KooProvider1") {
-		t.Errorf("body missing provider entry: %s", bodyStr)
+	if !strings.Contains(bodyStr, "resolve-stream") {
+		t.Errorf("body missing SSE endpoint: %s", bodyStr)
 	}
 }
 

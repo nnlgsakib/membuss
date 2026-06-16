@@ -239,6 +239,8 @@ github.com/ipfs/go-datastore v0.9.1 h1:67Po2epre/o0UxrmkzdS9ZTe2GFGODgTd2odx8Wh6
 github.com/ipfs/go-datastore v0.9.1/go.mod h1:zi07Nvrpq1bQwSkEnx3bfjz+SQZbdbWyCNvyxMh9pN0=
 github.com/ipfs/go-detect-race v0.0.1 h1:qX/xay2W3E4Q1U7d9lNs1sU9nvguX0a7319XbyQ6cOk=
 github.com/ipfs/go-detect-race v0.0.1/go.mod h1:8BNT7shDZPo99Q74BpGMK+4D8Mn4j46UU0LZ723meps=
+github.com/ipfs/go-ds-badger4 v0.1.8 h1:frNczf5CjCVm62RJ5mW5tD/oLQY/9IKAUpKviRV9QAI=
+github.com/ipfs/go-ds-badger4 v0.1.8/go.mod h1:FdqSLA5TMsyqooENB/Hf4xzYE/iH0z/ErLD6ogtfMrA=
 github.com/ipfs/go-log/v2 v2.9.2 h1:O/5BB0elpkRILvT24rCJ5976wWd7u0nJ436T3rdYdc4=
 github.com/ipfs/go-log/v2 v2.9.2/go.mod h1:RziRwwXWhndlk8L75RnEe0zeAYaq2heKtEMc3jqUov0=
 github.com/ipfs/go-test v0.3.0 h1:0Y4Uve3tp9HI+2lIJjfOliOrOgv/YpXg/l1y3P4DEYE=

@@ -67,6 +67,19 @@ type daemonBackend struct {
 	logger *slog.Logger
 }
 
+// slogAnchorLogger adapts *slog.Logger to anchor.Logger.
+type slogAnchorLogger struct {
+	l *slog.Logger
+}
+
+func (a *slogAnchorLogger) Infof(format string, args ...any) {
+	a.l.Info(fmt.Sprintf(format, args...))
+}
+
+func (a *slogAnchorLogger) Errorf(format string, args ...any) {
+	a.l.Error(fmt.Sprintf(format, args...))
+}
+
 // Compile-time check that daemonBackend satisfies server.Backend.
 var _ serverpkg.Backend = (*daemonBackend)(nil)
 
@@ -209,8 +222,67 @@ func (b *daemonBackend) Get(ctx context.Context, midStr string, offset, limit ui
 	return io.NopCloser(sectionReader(rc, offset, limit)), nil
 }
 
+// GetWithProgress returns the content of midStr with progress
+// reporting. If the MID is not local, the backend falls back
+// to a Memex fetch using the DHT's provider list. progressFn
+// is called as blocks arrive with the running total of bytes
+// received and total bytes (total may be 0 until all blocks
+// are known).
+func (b *daemonBackend) GetWithProgress(ctx context.Context, midStr string, offset, limit uint64, progressFn func(blocksResolved, blocksTotal uint64)) (io.ReadCloser, error) {
+	root, err := mid.Parse(midStr)
+	if err != nil {
+		return nil, fmt.Errorf("get: parse mid: %w", err)
+	}
+	has, err := b.store.Has(root)
+	if err != nil {
+		return nil, err
+	}
+	if !has && b.memex != nil {
+		// Try DHT to find a provider, then Memex-fetch.
+		if b.dht != nil {
+			provCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			provs, perr := b.dht.FindProviders(provCtx, root)
+			cancel()
+			if perr == nil && len(provs) > 0 {
+				sess, serr := memex.NewSession(memex.SessionConfig{
+					Engine:     b.memex,
+					Root:       root,
+					Providers:  provs,
+					Timeout:    30 * time.Second,
+					ProgressFn: progressFn,
+				})
+				if serr == nil {
+					if _, ferr := sess.Fetch(ctx); ferr == nil {
+						has = true
+					}
+				}
+			}
+		}
+		if !has {
+			return nil, fmt.Errorf("get: mid not found locally and no provider available")
+		}
+	}
+
+	resolver := dag.NewResolver(b.store)
+	rc, err := resolver.Resolve(root, nil)
+	if err != nil {
+		return nil, err
+	}
+	if offset == 0 && limit == 0 {
+		return io.NopCloser(rc), nil
+	}
+	return io.NopCloser(sectionReader(rc, offset, limit)), nil
+}
+
 // Seal pins midStr. If recursive is true, the daemon walks the
 // DAG and seals every reachable block.
+//
+// A Seal is a forward-looking pin: the seal record is written
+// even when the recursive walk does not reach every block
+// (e.g. the operator pins a MID they have not fetched yet).
+// Missing blocks are surfaced as a soft warning through the
+// daemon's logger when one is configured; the RPC still
+// succeeds so the CLI / explorer can complete the action.
 func (b *daemonBackend) Seal(ctx context.Context, midStr string, recursive bool) (serverpkg.SealResult, error) {
 	root, err := mid.Parse(midStr)
 	if err != nil {
@@ -221,9 +293,21 @@ func (b *daemonBackend) Seal(ctx context.Context, midStr string, recursive bool)
 		return serverpkg.SealResult{Pinned: 0, Already: true}, nil
 	}
 	if err := b.store.Seal(root, recursive); err != nil {
-		return serverpkg.SealResult{}, fmt.Errorf("seal: %w", err)
+		// A walk-incomplete error is informational: the
+		// pin record is already on disk and the missing
+		// blocks will be filled in by a later fetch.
+		// Log it and continue with the success path.
+		if errors.Is(err, store.ErrSealWalkIncomplete) {
+			if b.logger != nil {
+				b.logger.Warn("seal: walk incomplete; missing blocks will be filled in on first fetch",
+					"mid", midStr, "err", err.Error())
+			}
+		} else {
+			return serverpkg.SealResult{}, fmt.Errorf("seal: %w", err)
+		}
 	}
-	// Count newly pinned blocks.
+	// Count newly pinned blocks. The walk is best-effort;
+	// missing blocks simply do not contribute to the count.
 	blocks := uint64(0)
 	if recursive {
 		seen := map[string]struct{}{}
@@ -245,7 +329,6 @@ func (b *daemonBackend) Seal(ctx context.Context, midStr string, recursive bool)
 	}
 	return serverpkg.SealResult{Pinned: blocks, Already: false}, nil
 }
-
 // Unseal removes the pin on midStr.
 func (b *daemonBackend) Unseal(ctx context.Context, midStr string) (uint64, error) {
 	root, err := mid.Parse(midStr)

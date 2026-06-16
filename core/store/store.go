@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/nnlgsakib/membuss/core/mid"
 )
@@ -93,10 +94,20 @@ func (m *Memstore) Delete(mid mid.MID) error {
 	return nil
 }
 
-// AllSealed is a no-op on the in-memory store. It is part of
-// the herald SealedLister interface.
+// AllSealed returns every sealed MID from the in-memory seals
+// map. It is part of the herald SealedLister interface.
 func (m *Memstore) AllSealed() ([]mid.MID, error) {
-	return nil, nil
+	m.sealsMu.RLock()
+	defer m.sealsMu.RUnlock()
+	out := make([]mid.MID, 0, len(m.seals))
+	for k := range m.seals {
+		midID, err := mid.Parse(k)
+		if err != nil {
+			continue
+		}
+		out = append(out, midID)
+	}
+	return out, nil
 }
 
 // AllBlocks returns every MID currently held in the in-memory
@@ -200,5 +211,10 @@ func (m *Memstore) IsSealed(root mid.MID) (bool, error) {
 
 // GC is a no-op on the in-memory store.
 func (m *Memstore) GC(ctx context.Context) (uint64, error) {
+	return 0, nil
+}
+
+// GCWithMinAge is a no-op on the in-memory store.
+func (m *Memstore) GCWithMinAge(ctx context.Context, minAge time.Duration) (uint64, error) {
 	return 0, nil
 }

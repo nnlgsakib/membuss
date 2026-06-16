@@ -120,8 +120,10 @@ func renderConfigToDataDir() (string, error) {
 		"grpc_addr":    os.Getenv("MEMBUSS_GRPC_ADDR"),
 		"log_level":    os.Getenv("MEMBUSS_LOG_LEVEL"),
 		"anchor_mode":  os.Getenv("MEMBUSS_ANCHOR_MODE"),
-		"bloom_capacity": os.Getenv("MEMBUSS_BLOOM_CAPACITY"),
-		"bloom_fp_rate":  os.Getenv("MEMBUSS_BLOOM_FP_RATE"),
+		"auto_gc_interval": os.Getenv("MEMBUSS_AUTO_GC_INTERVAL"),
+		"gc_min_age":       os.Getenv("MEMBUSS_GC_MIN_AGE"),
+		"bloom_capacity":   os.Getenv("MEMBUSS_BLOOM_CAPACITY"),
+		"bloom_fp_rate":    os.Getenv("MEMBUSS_BLOOM_FP_RATE"),
 	}
 
 	out := string(data)

@@ -38,6 +38,7 @@ func TestLoadOverridesDefaults(t *testing.T) {
 data_dir: /tmp/membuss-data
 gateway_addr: 0.0.0.0:9090
 anchor_mode: true
+auto_gc_interval: 0s
 reprovide_interval: 5m
 listen_addrs:
   - /ip4/127.0.0.1/tcp/9999

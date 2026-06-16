@@ -107,6 +107,12 @@ type MemHerald struct {
 	mu        sync.Mutex
 	lastRun   time.Time
 	lastCount int
+
+	// triggerCh is a non-blocking signal channel. Sending
+	// on it causes the loop to run an immediate reprovide
+	// pass. Used by the mDNS peer-found callback so newly
+	// discovered peers get announced content quickly.
+	triggerCh chan struct{}
 }
 
 // New returns a MemHerald ready to be started. Call Start to
@@ -134,8 +140,9 @@ func New(cfg Config) (*MemHerald, error) {
 		cfg.Now = time.Now
 	}
 	return &MemHerald{
-		cfg: cfg,
-		lim: newTokenBucket(cfg.Rate, cfg.Burst, cfg.Now),
+		cfg:       cfg,
+		lim:       newTokenBucket(cfg.Rate, cfg.Burst, cfg.Now),
+		triggerCh: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -151,6 +158,17 @@ func (h *MemHerald) Start(ctx context.Context) {
 // Stop is a no-op kept for symmetry with other long-lived
 // engines; the loop terminates when ctx is cancelled.
 func (h *MemHerald) Stop() {}
+
+// Trigger sends a non-blocking signal to the background loop
+// to run an immediate reprovide pass. It is safe to call from
+// any goroutine and does not block even if a pass is already
+// in progress.
+func (h *MemHerald) Trigger() {
+	select {
+	case h.triggerCh <- struct{}{}:
+	default:
+	}
+}
 
 // RunOnce performs a single reprovide pass synchronously and
 // returns the number of MIDs announced.
@@ -201,6 +219,8 @@ func (h *MemHerald) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			_ = h.RunOnce(ctx)
+		case <-h.triggerCh:
 			_ = h.RunOnce(ctx)
 		}
 	}

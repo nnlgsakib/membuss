@@ -1,9 +1,10 @@
-﻿package store
+package store
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
 
@@ -13,6 +14,22 @@ import (
 // Seal marks root as a pinned root. If recursive is true, Seal
 // also walks the DAG rooted at root to confirm the DAG is
 // internally consistent.
+//
+// A Seal is a *forward-looking pin*: the seal record is written
+// even if root (or some of its descendants) is not yet in the
+// local store. This matches the "Sealing a MID that is not yet
+// stored is allowed" contract on the Store interface. The walk
+// is a best-effort validation that surfaces obvious errors
+// (corrupt DAG, malformed link) but does NOT block the seal on
+// missing blocks. Use Stat to confirm a sealed root is fully
+// local.
+//
+// Walk errors are wrapped in ErrSealWalkIncomplete so callers
+// that DO want to surface the warning (e.g. for logging or
+// metrics) can detect them; a plain errors.Is check will see
+// them and a simple `return err` will still return the warning
+// to RPC callers. Most callers should treat the warning as
+// informational.
 func (s *MemStore) Seal(root mid.MID, recursive bool) error {
 	if s.db == nil {
 		return errors.New("store: closed")
@@ -30,10 +47,24 @@ func (s *MemStore) Seal(root mid.MID, recursive bool) error {
 	}
 	werr := Walk(s, root, func(_ mid.MID, _ bool) error { return nil })
 	if werr != nil {
+		// A missing block is a soft warning (forward-looking
+		// pin). Other walk errors (parse failures, truncated
+		// links) are still surfaced so the operator can spot
+		// a corrupt DAG.
+		if errors.Is(werr, ErrNotFound) {
+			return fmt.Errorf("%w: %v", ErrSealWalkIncomplete, werr)
+		}
 		return fmt.Errorf("store: seal walk: %w", werr)
 	}
 	return nil
 }
+
+// ErrSealWalkIncomplete signals that a Seal succeeded (the
+// pin record is on disk) but the recursive DAG walk did not
+// reach every reachable block. This is expected when the
+// operator pins a MID they have not fetched yet; the missing
+// blocks will be filled in by a later memex fetch or add.
+var ErrSealWalkIncomplete = errors.New("store: seal walk incomplete")
 
 // Unseal removes the seal record for the given MID.
 func (s *MemStore) Unseal(root mid.MID) error {
@@ -109,8 +140,9 @@ func (s *MemStore) AllSealed() ([]mid.MID, error) {
 }
 
 // GC walks every sealed root, collects the reachable MID set,
-// and deletes every key in the store that is NOT in that set.
-// It returns the number of bytes freed.
+// and deletes every key in the store that is NOT in that set
+// AND is older than the minimum age. It returns the number of
+// bytes freed.
 //
 // Implementation note: a single BadgerDB Update transaction is
 // NOT used to iterate-and-delete, because BadgerDB iterators
@@ -124,6 +156,15 @@ func (s *MemStore) AllSealed() ([]mid.MID, error) {
 //
 // BadgerDB's value-log GC is invoked at most once per call.
 func (s *MemStore) GC(ctx context.Context) (uint64, error) {
+	return s.GCWithMinAge(ctx, 0)
+}
+
+// GCWithMinAge is like GC but only deletes blocks whose
+// BadgerDB commit timestamp is older than minAge. This
+// prevents recently-fetched content from being immediately
+// garbage-collected. Pass 0 for minAge to disable the age
+// check (original GC behavior).
+func (s *MemStore) GCWithMinAge(ctx context.Context, minAge time.Duration) (uint64, error) {
 	if s.db == nil {
 		return 0, errors.New("store: closed")
 	}
@@ -153,12 +194,16 @@ func (s *MemStore) GC(ctx context.Context) (uint64, error) {
 	}
 
 	// Phase 2: enumerate every key in the store and collect the
-	// ones that are NOT reachable.
+	// ones that are NOT reachable and older than minAge.
 	type pendingDelete struct {
 		key   []byte
 		bytes uint64
 	}
 	var toDelete []pendingDelete
+	var minAgeTs uint64
+	if minAge > 0 {
+		minAgeTs = uint64(time.Now().Add(-minAge).Unix())
+	}
 	err = s.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = false
@@ -171,12 +216,48 @@ func (s *MemStore) GC(ctx context.Context) (uint64, error) {
 			item := it.Item()
 			k := item.Key()
 			ks := string(k)
-			if _, ok := reachable[ksToMID(ks)]; ok {
+			// Skip meta records (/m/ prefix) - they are
+			// not part of the content-addressed data
+			// set and must survive GC.
+			if len(ks) > len(prefixMeta) && ks[:len(prefixMeta)] == prefixMeta {
 				continue
+			}
+			// Skip seal records (/s/ prefix) - the
+			// operator-visible pin state must survive
+			// GC even when the underlying blocks are
+			// gone (think: a forward-looking seal for
+			// content that has not been fetched yet).
+			if len(ks) > len(prefixSeal) && ks[:len(prefixSeal)] == prefixSeal {
+				continue
+			}
+			// Only consider /b/ and /d/ keys; those
+			// are the actual content-addressed data.
+			isBlock := len(ks) > len(prefixBlock) && ks[:len(prefixBlock)] == prefixBlock
+			isDAG := len(ks) > len(prefixDAG) && ks[:len(prefixDAG)] == prefixDAG
+			if !isBlock && !isDAG {
+				continue
+			}
+			raw := k
+			if isBlock {
+				raw = k[len(prefixBlock):]
+			} else {
+				raw = k[len(prefixDAG):]
+			}
+			midID, merr := mid.FromMultihash(mid.CodecRaw, raw)
+			if merr != nil {
+				continue
+			}
+			if _, ok := reachable[midID.String()]; ok {
+				continue
+			}
+			if minAgeTs > 0 {
+				if uint64(item.Version()) >= minAgeTs {
+					continue
+				}
 			}
 			toDelete = append(toDelete, pendingDelete{
 				key:   append([]byte(nil), k...),
-				bytes: uint64(len(k)) + uint64(item.ValueSize()),
+				bytes: uint64(item.KeySize()+item.ValueSize()),
 			})
 		}
 		return nil
@@ -185,29 +266,21 @@ func (s *MemStore) GC(ctx context.Context) (uint64, error) {
 		return 0, fmt.Errorf("store: gc enumerate: %w", err)
 	}
 
-	// Phase 3: delete the collected keys in a single Update.
-	if len(toDelete) == 0 {
-		return 0, nil
-	}
+	// Phase 3: delete the collected keys. Each key gets its
+	// own short transaction so a single corrupt entry does
+	// not abort the whole sweep.
 	var freed uint64
-	err = s.db.Update(func(txn *badger.Txn) error {
-		for _, d := range toDelete {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if err := txn.Delete(d.key); err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
-				return err
-			}
-			freed += d.bytes
+	for _, pd := range toDelete {
+		if err := s.deleteKey(pd.key); err != nil {
+			return freed, fmt.Errorf("store: gc delete: %w", err)
 		}
-		return nil
-	})
-	if err != nil {
-		return freed, fmt.Errorf("store: gc delete: %w", err)
+		freed += pd.bytes
 	}
 
 	// Phase 4: trigger BadgerDB's value-log GC once.
-	go func() { _ = s.db.RunValueLogGC(0.5) }()
+	if freed > 0 {
+		go func() { _ = s.db.RunValueLogGC(0.5) }()
+	}
 
 	return freed, nil
 }
@@ -237,16 +310,6 @@ func ksToMID(ks string) string {
 			return ks
 		}
 		return m.String()
-	case len(ks) > len(prefixSeal) && ks[:len(prefixSeal)] == prefixSeal:
-		raw := ks[len(prefixSeal):]
-		m, err := mid.FromMultihash(mid.CodecRaw, []byte(raw))
-		if err != nil {
-			return ks
-		}
-		return m.String()
-	case len(ks) > len(prefixMeta) && ks[:len(prefixMeta)] == prefixMeta:
-		return ks
-	default:
-		return ks
 	}
+	return ks
 }

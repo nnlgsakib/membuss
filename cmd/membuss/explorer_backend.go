@@ -131,6 +131,14 @@ func (a *explorerAdapter) Providers(ctx context.Context, m mid.MID, limit int) (
 // template can show a "try again later" message instead
 // of a hard 404.
 func (a *explorerAdapter) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser, explorer.ContentInfo, error) {
+	return a.ResolveWithProgress(ctx, m, nil)
+}
+
+// ResolveWithProgress resolves a MID with progress reporting.
+// progressFn is called as blocks arrive with the running total
+// of bytes received and total bytes (total may be 0 until all
+// blocks are known).
+func (a *explorerAdapter) ResolveWithProgress(ctx context.Context, m mid.MID, progressFn func(blocksResolved, blocksTotal uint64)) (io.ReadCloser, explorer.ContentInfo, error) {
 	b := a.b
 	if b.store == nil {
 		return nil, explorer.ContentInfo{}, errors.New("explorer: no store")
@@ -151,10 +159,11 @@ func (a *explorerAdapter) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser
 			return nil, explorer.ContentInfo{}, explorer.ErrNotFound
 		}
 		sess, serr := memex.NewSession(memex.SessionConfig{
-			Engine:    b.memex,
-			Root:      m,
-			Providers: provs,
-			Timeout:   30 * time.Second,
+			Engine:     b.memex,
+			Root:       m,
+			Providers:  provs,
+			Timeout:    30 * time.Second,
+			ProgressFn: progressFn,
 		})
 		if serr == nil {
 			if _, ferr := sess.Fetch(ctx); ferr == nil {

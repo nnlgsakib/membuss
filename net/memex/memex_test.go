@@ -171,3 +171,90 @@ func TestMemex_ServerHandlesEmptyStream(t *testing.T) {
 		t.Fatal("expected EOF, got nil")
 	}
 }
+
+
+// TestMemex_ObjectInfoTransmit is the regression test for
+// the "metadata does not travel across nodes" bug. Node A
+// stores a DAG and writes the Phase 19 ObjectInfo for the
+// root (filename + MIME). Node B fetches the root and the
+// ObjectInfo must show up in its local meta namespace, so
+// downstream readers (gateway, explorer) can see the
+// uploader-supplied name + mime without any extra round
+// trips.
+func TestMemex_ObjectInfoTransmit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	content := makeContent(t, 1*1024*1024)
+
+	hA := newTestHost(t)
+	t.Cleanup(func() { _ = hA.Close() })
+	_, bsA := newTestEngine(t, hA)
+	rootStr := buildDAG(t, content, bsA)
+
+	root, err := mid.Parse(rootStr)
+	if err != nil {
+		t.Fatalf("parse root: %v", err)
+	}
+
+	// Phase 19: the uploader on node A wrote the filename
+	// + MIME alongside the DAG.
+	if err := store.SetObjectInfo(bsA, root, store.ObjectInfo{
+		Name:     "hello.txt",
+		MimeType: "text/plain; charset=utf-8",
+		Size:     uint64(len(content)),
+	}); err != nil {
+		t.Fatalf("SetObjectInfo: %v", err)
+	}
+
+	hB := newTestHost(t)
+	t.Cleanup(func() { _ = hB.Close() })
+	engB, bsB := newTestEngine(t, hB)
+
+	if err := hA.Connect(ctx, peer.AddrInfo{ID: hB.ID(), Addrs: hB.Addrs()}); err != nil {
+		t.Fatalf("hA connect hB: %v", err)
+	}
+	if err := hB.Connect(ctx, peer.AddrInfo{ID: hA.ID(), Addrs: hA.Addrs()}); err != nil {
+		t.Fatalf("hB connect hA: %v", err)
+	}
+
+	sess, err := NewSession(SessionConfig{
+		Engine:    engB,
+		Root:      root,
+		Providers: []peer.AddrInfo{{ID: hA.ID(), Addrs: hA.Addrs()}},
+		Timeout:   30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	rc, err := sess.Fetch(ctx)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	// Drain the reader so the read loop finishes persisting
+	// ObjectInfo to the local meta store.
+	if _, err := io.Copy(io.Discard, rc); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+
+	// Give the read loop a brief moment to land any final
+	// ObjectInfo writes.
+	time.Sleep(100 * time.Millisecond)
+
+	oi, err := store.GetObjectInfo(bsB, root)
+	if err != nil {
+		t.Fatalf("GetObjectInfo on requester: %v", err)
+	}
+	if oi.Name == "" && oi.MimeType == "" {
+		t.Fatal("ObjectInfo did not travel across nodes (empty descriptor in local meta)")
+	}
+	if oi.Name != "hello.txt" {
+		t.Errorf("name: got %q want %q", oi.Name, "hello.txt")
+	}
+	if oi.MimeType != "text/plain; charset=utf-8" {
+		t.Errorf("mime: got %q want %q", oi.MimeType, "text/plain; charset=utf-8")
+	}
+	if oi.Size != uint64(len(content)) {
+		t.Errorf("size: got %d want %d", oi.Size, len(content))
+	}
+}

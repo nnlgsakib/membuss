@@ -47,6 +47,17 @@ type Config struct {
 	// it remains available when original providers go offline.
 	AnchorMode bool `yaml:"anchor_mode"`
 
+	// AutoGCInterval controls how often the background garbage
+	// collection loop runs. Zero disables auto-GC. Mutually
+	// exclusive with AnchorMode (anchor nodes never GC).
+	AutoGCInterval time.Duration `yaml:"auto_gc_interval"`
+
+	// GCMinAge is the minimum age a block must have before it
+	// can be garbage-collected. Recently-fetched content is
+	// protected from GC for this duration. Zero means no age
+	// restriction (original behavior).
+	GCMinAge time.Duration `yaml:"gc_min_age"`
+
 	// ReprovideInterval controls how often Mem-Herald re-announces
 	// this node's provider records to the DHT.
 	ReprovideInterval time.Duration `yaml:"reprovide_interval"`
@@ -166,6 +177,8 @@ func Default() *Config {
 		APIAddr:           "127.0.0.1:5001",
 		GRPCAddr:          "127.0.0.1:50051",
 		AnchorMode:        false,
+		AutoGCInterval:    24 * time.Hour,
+		GCMinAge:          24 * time.Hour,
 		ReprovideInterval: 12 * time.Hour,
 		LogLevel:               "info",
 		GatewayTLS:             TLSConfig{},
@@ -292,6 +305,9 @@ func (c *Config) Validate() error {
 	case "", "auto", "client", "server", "auto-server":
 	default:
 		return errors.New("dht_mode must be one of: auto, client, server, auto-server")
+	}
+	if c.AnchorMode {
+		c.AutoGCInterval = 0
 	}
 	return nil
 }
