@@ -14,6 +14,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 
+	"github.com/nnlgsakib/membuss/core/memfs"
 	"github.com/nnlgsakib/membuss/core/mid"
 	"github.com/nnlgsakib/membuss/core/store"
 	explorer "github.com/nnlgsakib/membuss/gateway/explorer"
@@ -412,4 +413,63 @@ func (a *explorerAdapter) Add(ctx context.Context, name string, r io.Reader) (ex
 		MimeType: res.MimeType,
 		Present:  true,
 	}, nil
+}
+
+// --- Phase 17: MemFS methods on explorerAdapter ---
+
+// MemFSInfo returns the metadata for a MemFS node.
+func (a *explorerAdapter) MemFSInfo(ctx context.Context, m mid.MID) (explorer.MemFSInfo, error) {
+	r := memfs.NewResolver(a.b.store)
+	st, err := r.Stat(ctx, m)
+	if err != nil {
+		return explorer.MemFSInfo{}, err
+	}
+	return explorer.MemFSInfo{
+		MID:   m.String(),
+		Type:  memFSTypeString(st.Type),
+		Size:  st.Size,
+		Mode:  uint32(st.Mode),
+		MTime: st.MTime.Unix(),
+		Mime:  st.MimeType,
+	}, nil
+}
+
+// MemFSList returns the entries of a MemFS directory.
+func (a *explorerAdapter) MemFSList(ctx context.Context, m mid.MID) ([]explorer.MemFSEntry, error) {
+	r := memfs.NewResolver(a.b.store)
+	st, err := r.Stat(ctx, m)
+	if err != nil {
+		return nil, err
+	}
+	if st.Type != memfs.TypeDir {
+		return nil, errors.New("not a directory")
+	}
+	out := make([]explorer.MemFSEntry, 0, len(st.Entries))
+	for _, e := range st.Entries {
+		out = append(out, explorer.MemFSEntry{
+			Name: e.Name,
+			MID:  e.Mid.String(),
+			Type: memFSTypeString(e.Type),
+			Size: e.Size,
+		})
+	}
+	return out, nil
+}
+
+// MemFSPathGet returns a streaming reader for the file at
+// m/path. Used by the explorer's preview pane.
+func (a *explorerAdapter) MemFSPathGet(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error) {
+	r := memfs.NewResolver(a.b.store)
+	node, err := r.ResolvePath(ctx, m, path)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	if !node.IsFile() {
+		return nil, 0, "", errors.New("not a file")
+	}
+	rc, err := r.Open(ctx, node.MustMID())
+	if err != nil {
+		return nil, 0, "", err
+	}
+	return rc, node.TotalSize(), node.MimeType(), nil
 }

@@ -52,6 +52,12 @@ const CodecRaw uint64 = 0x55
 // non-leaf DAGNode emitted by core/dag.
 const CodecDAGPB uint64 = 0x70
 
+// CodecMemFS identifies a MemFS typed node (FILE, DIR, SYMLINK,
+// METADATA). It is the codec used by every MemFSNode emitted
+// by core/memfs. Codec 0x72 is a custom multicodec tag
+// registered for Membuss's UnixFS-equivalent layer (Phase 17).
+const CodecMemFS uint64 = 0x72
+
 // DefaultHash is the multihash code used to hash content.
 const DefaultHash = multihash.SHA2_256
 
@@ -89,6 +95,27 @@ func FromBytes(data []byte) MID {
 		panic(fmt.Sprintf("mid: encode multihash: %v", err))
 	}
 	return FromCodecAndHash(cidVersion1, CodecRaw, mh)
+}
+
+// FromBytesWithCodec returns the MID for the given content
+// bytes tagged with the supplied codec. SHA-256 is always used
+// for the digest, and the result is a CIDv1 wrapping a
+// sha2-256 multihash, exactly like FromBytes. The difference
+// is the codec tag: callers can attach a typed wrapper (e.g.
+// core/memfs's FILE / DIR / SYMLINK / METADATA nodes) to a
+// hash that would otherwise be tagged CodecRaw.
+//
+// This is the building block for typed-but-content-addressed
+// nodes that share the same content-hash semantics as raw
+// leaves but carry a different on-wire type.
+func FromBytesWithCodec(data []byte, codec uint64) MID {
+	sum := sha256.Sum256(data)
+	mh, err := multihash.Encode(sum[:], DefaultHash)
+	if err != nil {
+		// SHA2_256 is always encodable; this branch is unreachable.
+		panic(fmt.Sprintf("mid: encode multihash: %v", err))
+	}
+	return FromCodecAndHash(cidVersion1, codec, mh)
 }
 
 // FromMultihash wraps a pre-built multihash envelope with the

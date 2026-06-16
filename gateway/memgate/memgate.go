@@ -48,6 +48,36 @@ type Backend interface {
 	Stat(ctx context.Context, m mid.MID) (ContentInfo, error)
 	// Ping returns nil if the backend is healthy.
 	Ping(ctx context.Context) error
+
+	// --- Phase 17: MemFS support ---
+
+	// MemFSInfo describes a MemFS node. Type is one of
+	// "file", "dir", "symlink", "metadata", "raw".
+	MemFSInfo(ctx context.Context, m mid.MID) (MemFSInfo, error)
+	// MemFSPathGet returns a streaming reader for the file
+	// at m/path, with its size and MIME type.
+	MemFSPathGet(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error)
+	// MemFSList returns the entries of a MemFS directory,
+	// sorted lexicographically by name.
+	MemFSList(ctx context.Context, m mid.MID) ([]MemFSEntry, error)
+}
+
+// MemFSInfo is the metadata returned by Backend.MemFSInfo.
+type MemFSInfo struct {
+	MID   string
+	Type  string
+	Size  uint64
+	Mode  uint32
+	MTime int64
+	Mime  string
+}
+
+// MemFSEntry is one row of a MemFS directory listing.
+type MemFSEntry struct {
+	Name string `json:"name"`
+	MID  string `json:"mid"`
+	Type string `json:"type"`
+	Size uint64 `json:"size"`
 }
 
 // ContentInfo is the metadata returned by Backend.Resolve and
@@ -170,6 +200,9 @@ func (m *MemGate) buildRouter() chi.Router {
 	r.Get("/healthz", m.handleHealth)
 	r.Get("/mem/{mid}", m.handleGet)
 	r.Head("/mem/{mid}", m.handleHead)
+	// Directory listing (HTML or JSON) when the path
+	// component is empty.
+	r.Get("/mem/{mid}/", m.handleDirList)
 	r.Get("/mem/{mid}/{path:*}", m.handlePathGet)
 	if m.cfg.ExplorerHandler != nil {
 		r.Mount("/explorer", m.cfg.ExplorerHandler)
@@ -281,17 +314,110 @@ func (m *MemGate) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (m *MemGate) handlePathGet(w http.ResponseWriter, r *http.Request) {
-	// /mem/{mid}/{path:*} — DAG path traversal. For now we
-	// just 404 with a helpful message; the implementation
-	// lives in a follow-up. The endpoint is registered so
-	// the route surface matches the spec.
+// handleDirList renders a directory listing as HTML or JSON,
+// depending on the ?format query parameter. The handler is
+// mounted at /mem/{mid}/ (trailing slash, no path component).
+func (m *MemGate) handleDirList(w http.ResponseWriter, r *http.Request) {
 	midStr := chi.URLParam(r, "mid")
-	if _, err := mid.Parse(midStr); err != nil {
+	root, err := mid.Parse(midStr)
+	if err != nil {
 		http.Error(w, "bad mid: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	http.Error(w, "DAG path traversal not yet implemented", http.StatusNotImplemented)
+	info, err := m.cfg.Backend.MemFSInfo(r.Context(), root)
+	if err != nil {
+		http.Error(w, "memfs: "+err.Error(), http.StatusNotFound)
+		return
+	}
+	if info.Type != "dir" {
+		// Non-directory MIDs at the bare /mem/{mid}/ URL
+		// fall back to the legacy resolved-content handler.
+		m.handleResolved(w, r, root, midStr)
+		return
+	}
+	entries, err := m.cfg.Backend.MemFSList(r.Context(), root)
+	if err != nil {
+		http.Error(w, "memfs: "+err.Error(), http.StatusNotFound)
+		return
+	}
+	if r.URL.Query().Get("format") == "json" {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mid":     root.String(),
+			"type":    info.Type,
+			"size":    info.Size,
+			"entries": entries,
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, `<!doctype html><html><head><title>%s</title>`+
+		`<style>body{font-family:system-ui;max-width:60rem;margin:2rem auto;padding:0 1rem}`+
+		`table{border-collapse:collapse;width:100%%}td,th{padding:.5rem;text-align:left;border-bottom:1px solid #eee}`+
+		`a{color:#06c;text-decoration:none}a:hover{text-decoration:underline}`+
+		`.muted{color:#888;font-size:.9em}</style></head><body>`+
+		`<h1>Directory <code>%s</code></h1>`+
+		`<table><tr><th>Name</th><th>Type</th><th>Size</th><th>MID</th></tr>`,
+		root.String(), root.String())
+	for _, e := range entries {
+		fmt.Fprintf(w, `<tr><td><a href="/mem/%s/%s">%s</a></td>`+
+			`<td>%s</td><td>%d</td>`+
+			`<td class="muted"><a href="/explorer/mid/%s">%s…</a></td></tr>`,
+			root.String(), e.Name, e.Name, e.Type, e.Size, e.MID, shortMID(e.MID))
+	}
+	fmt.Fprintf(w, `</table></body></html>`)
+}
+
+// shortMID returns the first 16 characters of a public MID,
+// suitable for display in a table. The remainder is hidden
+// so a directory listing does not become a wall of text.
+func shortMID(s string) string {
+	if len(s) <= 16 {
+		return s
+	}
+	return s[:16]
+}
+
+func (m *MemGate) handlePathGet(w http.ResponseWriter, r *http.Request) {
+	// /mem/{mid}/{path:*} — MemFS path traversal. We try
+	// MemFSPathGet first; on miss we fall back to legacy
+	// DAG resolution so legacy routes keep working.
+	midStr := chi.URLParam(r, "mid")
+	root, err := mid.Parse(midStr)
+	if err != nil {
+		http.Error(w, "bad mid: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	innerPath := chi.URLParam(r, "path")
+	if innerPath == "" {
+		// No inner path — just serve the MID itself.
+		m.handleResolved(w, r, root, midStr)
+		return
+	}
+	rc, size, mimeType, err := m.cfg.Backend.MemFSPathGet(r.Context(), root, innerPath)
+	if err != nil {
+		// Fall through to the legacy handler so callers
+		// using DAG-only content still get a 200.
+		m.handleResolved(w, r, root, midStr)
+		return
+	}
+	defer rc.Close()
+	ct := mimeType
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("X-Membuss-MID", midStr)
+	w.Header().Set("X-Membuss-Path", "/"+innerPath)
+	if size > 0 {
+		w.Header().Set("Content-Length", strconv.FormatUint(size, 10))
+	}
+	w.Header().Set("ETag", `"`+midStr+"/"+innerPath+`"`)
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Cache-Control", "public, immutable, max-age=31536000")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, rc)
 }
 
 func (m *MemGate) handleDAGJSON(w http.ResponseWriter, r *http.Request, root mid.MID) {

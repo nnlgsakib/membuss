@@ -16,7 +16,7 @@ services:
     environment:
       MEMBUSS_LISTEN_ADDRS: /ip4/0.0.0.0/tcp/4001,/ip4/0.0.0.0/udp/5001/quic-v1
       MEMBUSS_GATEWAY_ADDR: "0.0.0.0:8080"
-      MEMBUSS_API_ADDR: "0.0.0.0:18080"
+      MEMBUSS_API_ADDR: "0.0.0.0:5001"
       MEMBUSS_GRPC_ADDR: "0.0.0.0:50051"
       MEMBUSS_DATA_DIR: /data/membuss
       MEMBUSS_ANCHOR_MODE: "true"
@@ -40,7 +40,7 @@ services:
     environment:
       MEMBUSS_LISTEN_ADDRS: /ip4/0.0.0.0/tcp/4001,/ip4/0.0.0.0/udp/5001/quic-v1
       MEMBUSS_GATEWAY_ADDR: "0.0.0.0:8080"
-      MEMBUSS_API_ADDR: "0.0.0.0:18080"
+      MEMBUSS_API_ADDR: "0.0.0.0:5001"
       MEMBUSS_GRPC_ADDR: "0.0.0.0:50051"
       MEMBUSS_DATA_DIR: /data/membuss
       MEMBUSS_ANCHOR_MODE: "false"
@@ -68,7 +68,7 @@ services:
     environment:
       MEMBUSS_LISTEN_ADDRS: /ip4/0.0.0.0/tcp/4001,/ip4/0.0.0.0/udp/5001/quic-v1
       MEMBUSS_GATEWAY_ADDR: "0.0.0.0:8080"
-      MEMBUSS_API_ADDR: "0.0.0.0:18080"
+      MEMBUSS_API_ADDR: "0.0.0.0:5001"
       MEMBUSS_GRPC_ADDR: "0.0.0.0:50051"
       MEMBUSS_DATA_DIR: /data/membuss
       MEMBUSS_ANCHOR_MODE: "false"

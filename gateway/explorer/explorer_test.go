@@ -5,6 +5,7 @@ package explorer
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+
 
 	"github.com/nnlgsakib/membuss/core/mid"
 )
@@ -524,4 +526,18 @@ func TestHumanBytes(t *testing.T) {
 			t.Errorf("humanBytes(%d) = %q, want %q", c.in, got, c.want)
 		}
 	}
+}
+
+// --- Phase 17: MemFS stubs on memBackend ---
+
+func (b *memBackend) MemFSInfo(ctx context.Context, m mid.MID) (MemFSInfo, error) {
+	return MemFSInfo{}, fmt.Errorf("memfs: test backend stub")
+}
+
+func (b *memBackend) MemFSList(ctx context.Context, m mid.MID) ([]MemFSEntry, error) {
+	return nil, fmt.Errorf("memfs: test backend stub")
+}
+
+func (b *memBackend) MemFSPathGet(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error) {
+	return nil, 0, "", fmt.Errorf("memfs: test backend stub")
 }

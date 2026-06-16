@@ -119,6 +119,52 @@ func (b *memBackend) NodeInfo() NodeInfo {
 	return NodeInfo{PeerID: "12D3KooA", Addrs: []string{"/ip4/1.2.3.4/tcp/4001"}, Version: "0.1.0", Build: "test"}
 }
 
+// --- Phase 17: MemFS stubs on memBackend ---
+
+// memStore is a minimal in-memory content store that the
+// test memBackend uses to satisfy the new MemFS methods.
+// Tests that need a real MemFS tree (AddFile / AddDirectory
+// / Ls / GetPath) populate this via the dedicated helpers.
+type memStore struct {
+	mu      sync.Mutex
+	content map[string][]byte
+}
+
+func (s *memStore) put(mid string, data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.content == nil {
+		s.content = map[string][]byte{}
+	}
+	s.content[mid] = data
+}
+
+func (s *memStore) get(mid string) ([]byte, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.content == nil {
+		return nil, false
+	}
+	d, ok := s.content[mid]
+	return d, ok
+}
+
+// AddFile is implemented by the production adapter; in the
+// test backend it just falls through to Add so existing
+// tests continue to pass. wrapDir is ignored.
+func (b *memBackend) AddFile(ctx context.Context, name string, r io.Reader, wrapDir bool) (AddResult, error) {
+	return b.Add(ctx, name, r)
+}
+func (b *memBackend) AddDirectory(ctx context.Context, parts []DirectoryPart) (AddResult, error) {
+	return AddResult{}, fmt.Errorf("memfs: test backend does not implement AddDirectory")
+}
+func (b *memBackend) Ls(ctx context.Context, m mid.MID) ([]LsEntry, error) {
+	return nil, fmt.Errorf("memfs: test backend does not implement Ls")
+}
+func (b *memBackend) GetPath(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error) {
+	return nil, 0, "", fmt.Errorf("memfs: test backend does not implement GetPath")
+}
+
 func newTestAPI(t *testing.T, b Backend) *NodeAPI {
 	t.Helper()
 	a, err := New(Config{Backend: b, MaxUploadBytes: 1 << 20})

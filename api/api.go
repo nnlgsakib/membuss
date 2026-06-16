@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -52,6 +53,50 @@ type Backend interface {
 	GC(ctx context.Context) (GCInfo, error)
 	// NodeInfo returns the local node's identity.
 	NodeInfo() NodeInfo
+
+	// --- Phase 17: MemFS support ---
+
+	// AddFile ingests a file and returns the MID of the
+	// MemFS FILE node wrapping it. When wrapDir is true
+	// the FILE node is wrapped in a single-entry DIR node
+	// and the DIR MID is returned.
+	AddFile(ctx context.Context, name string, r io.Reader, wrapDir bool) (AddResult, error)
+	// AddDirectory ingests a directory as MemFS. The
+	// multipart parts are passed as (path, reader) pairs;
+	// the implementation reconstructs the tree.
+	AddDirectory(ctx context.Context, parts []DirectoryPart) (AddResult, error)
+	// Ls returns the entries of a MemFS DIR node, sorted
+	// lexicographically by name.
+	Ls(ctx context.Context, m mid.MID) ([]LsEntry, error)
+	// GetPath returns a reader for the file at m/path.
+	// Path uses "/" separators and may be empty (returns
+	// the file at m itself).
+	GetPath(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error)
+}
+
+// DirectoryPart is one file in a multipart directory upload.
+type DirectoryPart struct {
+	// Path is the slash-separated path of the file
+	// relative to the directory root (e.g. "src/main.go").
+	Path string
+	// Size is the content length in bytes, when known.
+	Size int64
+	// Name is the original filename (basename of Path).
+	Name string
+	// Data is the file content, fully buffered in memory.
+	// We read it from the multipart part in the handler
+	// because the request body is closed by the time
+	// the Backend.AddDirectory method runs, which would
+	// otherwise yield an empty stream.
+	Data []byte
+}
+
+// LsEntry is one row of /api/v1/ls.
+type LsEntry struct {
+	Name string `json:"name"`
+	MID  string `json:"mid"`
+	Type string `json:"type"`
+	Size uint64 `json:"size"`
 }
 
 // AddResult is the return value of Backend.Add.
@@ -173,7 +218,10 @@ func (a *NodeAPI) buildRouter() chi.Router {
 		// configured. /metrics and /healthz remain open.
 		r.Use(apiKeyAuth(a.cfg.APIKey))
 		r.Post("/add", a.handleAdd)
+		r.Post("/add/dir", a.handleAddDir)
 		r.Get("/get/{mid}", a.handleGet)
+		r.Get("/get/{mid}/{path:*}", a.handleGet)
+		r.Get("/ls/{mid}", a.handleLs)
 		r.Post("/seal/{mid}", a.handleSeal)
 		r.Delete("/seal/{mid}", a.handleUnseal)
 		r.Get("/stat/{mid}", a.handleStat)
@@ -250,7 +298,89 @@ func (a *NodeAPI) handleAdd(w http.ResponseWriter, r *http.Request) {
 		}
 		reader = part
 	}
-	res, err := a.cfg.Backend.Add(r.Context(), name, reader)
+	// Phase 17: ?wrap=dir wraps the file in a single-entry
+	// DIR node so the returned MID is addressable via the
+	// /mem/{mid}/ gateway path.
+	wrap := r.URL.Query().Get("wrap") == "dir"
+	res, err := a.cfg.Backend.AddFile(r.Context(), name, reader, wrap)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	created(w, map[string]any{
+		"mid":    res.MID,
+		"size":   res.Size,
+		"blocks": res.Blocks,
+		"name":   res.Name,
+		"mime":   res.MimeType,
+	})
+}
+
+// handleAddDir ingests a directory via multipart upload.
+// Each part must have a "X-Membuss-Path" header set to the
+// relative path of the file. Parts without that header are
+// silently skipped.
+func (a *NodeAPI) handleAddDir(w http.ResponseWriter, r *http.Request) {
+	if r.ContentLength > a.cfg.MaxUploadBytes {
+		fail(w, http.StatusRequestEntityTooLarge, fmt.Errorf("upload too large: %d > %d", r.ContentLength, a.cfg.MaxUploadBytes))
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, a.cfg.MaxUploadBytes)
+	defer r.Body.Close()
+
+	ct := r.Header.Get("Content-Type")
+	if len(ct) < 19 || ct[:19] != "multipart/form-data" {
+		fail(w, http.StatusBadRequest, fmt.Errorf("directory upload requires multipart/form-data"))
+		return
+	}
+	mr, err := r.MultipartReader()
+	if err != nil {
+		fail(w, http.StatusBadRequest, fmt.Errorf("multipart: %w", err))
+		return
+	}
+	var parts []DirectoryPart
+	for {
+		part, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			fail(w, http.StatusBadRequest, fmt.Errorf("multipart: %w", err))
+			return
+		}
+		path := part.FileName()
+		if p := part.Header.Get("X-Membuss-Path"); p != "" {
+			path = p
+		}
+		if path == "" {
+			part.Close()
+			continue
+		}
+		// Read the part body fully while the request is still
+		// open. The request body is closed by the defer above
+		// as soon as this handler returns, so any consumer
+		// downstream that reads p.Data lazily would see 0
+		// bytes. Buffering the bytes here keeps the Backend
+		// interface simple (no Close hooks, no time-of-check
+		// races) at the cost of a transient memory copy per
+		// file.
+		data, err := io.ReadAll(part)
+		_ = part.Close()
+		if err != nil {
+			fail(w, http.StatusBadRequest, fmt.Errorf("multipart: read %q: %w", path, err))
+			return
+		}
+		parts = append(parts, DirectoryPart{
+			Path: path,
+			Name: part.FileName(),
+			Data: data,
+		})
+	}
+	if len(parts) == 0 {
+		fail(w, http.StatusBadRequest, fmt.Errorf("no files in directory upload"))
+		return
+	}
+	res, err := a.cfg.Backend.AddDirectory(r.Context(), parts)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err)
 		return
@@ -269,6 +399,44 @@ func (a *NodeAPI) handleGet(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, fmt.Errorf("bad mid: %w", err))
 		return
 	}
+	// Phase 17: /api/v1/get/{mid}/{path...} streams a
+	// specific file inside a MemFS directory. When the
+	// route carries additional path segments, we resolve
+	// through the MemFS resolver.
+	if path := r.URL.Path; strings.Contains(path[len("/api/v1/get/"):], "/") {
+		// path is e.g. /api/v1/get/{mid}/a/b.txt. Strip
+		// the prefix to extract the inner path.
+		rel := strings.TrimPrefix(path, "/api/v1/get/")
+		// rel now begins with the MID, followed by / and
+		// the inner path. Split on the first slash after
+		// the MID.
+		idx := strings.Index(rel, "/")
+		if idx < 0 {
+			// No inner path; fall through to plain Get.
+			idx = len(rel)
+		}
+		inner := rel[idx:]
+		if inner != "" {
+			rc, size, mime, err := a.cfg.Backend.GetPath(r.Context(), m, inner)
+			if err != nil {
+				fail(w, http.StatusNotFound, err)
+				return
+			}
+			defer rc.Close()
+			ct := mime
+			if ct == "" {
+				ct = "application/octet-stream"
+			}
+			w.Header().Set("Content-Type", ct)
+			w.Header().Set("X-Membuss-MID", m.String())
+			if size > 0 {
+				w.Header().Set("Content-Length", strconv.FormatUint(size, 10))
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.Copy(w, rc)
+			return
+		}
+	}
 	rc, size, err := a.cfg.Backend.Resolve(r.Context(), m)
 	if err != nil {
 		fail(w, http.StatusNotFound, err)
@@ -280,6 +448,26 @@ func (a *NodeAPI) handleGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatUint(size, 10))
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, rc)
+}
+
+// handleLs returns the entries of a MemFS directory.
+func (a *NodeAPI) handleLs(w http.ResponseWriter, r *http.Request) {
+	midStr := chi.URLParam(r, "mid")
+	m, err := mid.Parse(midStr)
+	if err != nil {
+		fail(w, http.StatusBadRequest, fmt.Errorf("bad mid: %w", err))
+		return
+	}
+	entries, err := a.cfg.Backend.Ls(r.Context(), m)
+	if err != nil {
+		fail(w, http.StatusNotFound, err)
+		return
+	}
+	ok(w, map[string]any{
+		"mid":     m.String(),
+		"entries": entries,
+		"count":   len(entries),
+	})
 }
 
 func (a *NodeAPI) handleSeal(w http.ResponseWriter, r *http.Request) {

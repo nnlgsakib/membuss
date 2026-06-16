@@ -186,6 +186,35 @@ type Backend interface {
 	// AnchorMode reports whether the daemon was started
 	// with anchor mode enabled.
 	AnchorMode(ctx context.Context) bool
+
+	// --- Phase 17: MemFS support ---
+
+	// MemFSInfo describes a MemFS node: its type, size, mode,
+	// mtime, mime, and (for directories) the entries.
+	MemFSInfo(ctx context.Context, m mid.MID) (MemFSInfo, error)
+	// MemFSList returns the entries of a MemFS directory.
+	MemFSList(ctx context.Context, m mid.MID) ([]MemFSEntry, error)
+	// MemFSPathGet returns a streaming reader for the file
+	// at m/path.
+	MemFSPathGet(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error)
+}
+
+// MemFSInfo describes a MemFS node.
+type MemFSInfo struct {
+	MID   string
+	Type  string
+	Size  uint64
+	Mode  uint32
+	MTime int64
+	Mime  string
+}
+
+// MemFSEntry is one row of a MemFS directory listing.
+type MemFSEntry struct {
+	Name string `json:"name"`
+	MID  string `json:"mid"`
+	Type string `json:"type"`
+	Size uint64 `json:"size"`
 }
 
 // Config configures an Explorer.
@@ -344,6 +373,9 @@ type midData struct {
 	Title         string
 	MID           string
 	NotFound      bool
+	MemFSType     string
+	MemFSEntries  []MemFSEntry
+	SymlinkTarget string
 	Size          uint64
 	Blocks        uint64
 	Sealed        bool
@@ -425,6 +457,17 @@ func (e *Explorer) handleMID(w http.ResponseWriter, r *http.Request) {
 		data.TotalShards = data.DataShards + data.ParityShards
 		data.Health = fmt.Sprintf("%d/%d shards needed", data.DataShards, data.TotalShards)
 		data.HealthLabel = "OK"
+		// Phase 17: probe for MemFS metadata so the
+		// template can switch on type (file / dir /
+		// symlink / metadata / raw).
+		if minfo, err := b.MemFSInfo(ctx, root); err == nil {
+			data.MemFSType = minfo.Type
+			if minfo.Type == "dir" {
+				if entries, lerr := b.MemFSList(ctx, root); lerr == nil {
+					data.MemFSEntries = entries
+				}
+			}
+		}
 	}
 	e.render(w, "mid.html", data)
 }

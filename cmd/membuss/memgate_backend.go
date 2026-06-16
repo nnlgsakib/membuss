@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nnlgsakib/membuss/core/dag"
+	"github.com/nnlgsakib/membuss/core/memfs"
 	"github.com/nnlgsakib/membuss/core/mid"
 	"github.com/nnlgsakib/membuss/core/store"
 	"github.com/nnlgsakib/membuss/net/memex"
@@ -165,6 +166,94 @@ func (a *memgateAdapter) Ping(ctx context.Context) error {
 		return errors.New("no store")
 	}
 	return nil
+}
+
+// --- Phase 17: MemFS methods on memgateAdapter ---
+
+// memfsResolver returns a *memfs.Resolver that reads from
+// the daemon's local store.
+func (a *memgateAdapter) memfsResolver() *memfs.Resolver {
+	return memfs.NewResolver(a.b.store)
+}
+
+// MemFSInfo returns the metadata for a MemFS node. Returns
+// errMGNotFound when the node is not a MemFS node or is
+// absent from the local store.
+func (a *memgateAdapter) MemFSInfo(ctx context.Context, m mid.MID) (memgate.MemFSInfo, error) {
+	r := a.memfsResolver()
+	st, err := r.Stat(ctx, m)
+	if err != nil {
+		return memgate.MemFSInfo{}, errMGNotFound
+	}
+	return memgate.MemFSInfo{
+		MID:   m.String(),
+		Type:  memFSTypeString(st.Type),
+		Size:  st.Size,
+		Mode:  uint32(st.Mode),
+		MTime: st.MTime.Unix(),
+		Mime:  st.MimeType,
+	}, nil
+}
+
+// MemFSPathGet returns a streaming reader for a file at
+// m/path. The returned io.ReadSeekCloser streams the
+// resolved file content; the size and MIME type are
+// returned alongside.
+func (a *memgateAdapter) MemFSPathGet(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error) {
+	r := a.memfsResolver()
+	node, err := r.ResolvePath(ctx, m, path)
+	if err != nil {
+		return nil, 0, "", errMGNotFound
+	}
+	if !node.IsFile() {
+		return nil, 0, "", errMGNotFound
+	}
+	// Resolve the file's own MID so the Open call works
+	// even if the root is a deep directory.
+	fileMID := node.MustMID()
+	rc, err := r.Open(ctx, fileMID)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	return rc, node.TotalSize(), node.MimeType(), nil
+}
+
+// MemFSList returns the entries of a MemFS directory.
+func (a *memgateAdapter) MemFSList(ctx context.Context, m mid.MID) ([]memgate.MemFSEntry, error) {
+	r := a.memfsResolver()
+	st, err := r.Stat(ctx, m)
+	if err != nil {
+		return nil, errMGNotFound
+	}
+	if st.Type != memfs.TypeDir {
+		return nil, errMGNotFound
+	}
+	out := make([]memgate.MemFSEntry, 0, len(st.Entries))
+	for _, e := range st.Entries {
+		out = append(out, memgate.MemFSEntry{
+			Name: e.Name,
+			MID:  e.Mid.String(),
+			Type: memFSTypeString(e.Type),
+			Size: e.Size,
+		})
+	}
+	return out, nil
+}
+
+// memFSTypeString returns a short label for a MemFSType.
+func memFSTypeString(t memfs.MemFSType) string {
+	switch t {
+	case memfs.TypeFile:
+		return "file"
+	case memfs.TypeDir:
+		return "dir"
+	case memfs.TypeSymlink:
+		return "symlink"
+	case memfs.TypeMetadata:
+		return "metadata"
+	default:
+		return "raw"
+	}
 }
 
 var errMGNotFound = errors.New("not found")

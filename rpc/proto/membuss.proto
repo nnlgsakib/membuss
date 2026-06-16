@@ -260,3 +260,60 @@ message BloomAnnouncement {
   uint64 capacity      = 3;   // configured capacity
   double fp_rate       = 4;   // configured false-positive rate
 }
+
+// --- Phase 17: MemFS (UnixFS-equivalent) -------------------------------------
+
+// MemFSType is the on-wire discriminator for a MemFSNode. A RAW
+// node is just a raw leaf block (no MemFS wrapper) and uses the
+// existing 0x55 codec; the other variants all carry a MemFSNode
+// protobuf envelope addressed with the 0x72 codec.
+enum MemFSType {
+  RAW      = 0;
+  FILE     = 1;
+  DIR      = 2;
+  SYMLINK  = 3;
+  METADATA = 4;
+}
+
+// MemFSNode is the typed wrapper for a single node in the MemFS
+// tree. It is content-addressed (MID = sha256 of the protobuf
+// bytes) and always carries a type discriminator so resolvers
+// can decide how to interpret the payload.
+message MemFSNode {
+  MemFSType           type            = 1;
+  bytes               data            = 2;   // inline bytes (small FILE / RAW)
+  uint64              file_size       = 3;   // total file size, all blocks
+  repeated MemFSBlock blocks          = 4;   // ordered raw / intermediate FILE children
+  repeated DirEntry   entries         = 5;   // children (DIR only)
+  string              symlink_target  = 6;   // SYMLINK only
+  MemFSMeta           meta            = 7;   // optional metadata
+  uint32              mode            = 8;   // unix mode bits
+  int64               mtime           = 9;   // unix nanoseconds
+}
+
+// MemFSBlock is one reference from a FILE node to a child block.
+// The child is either a raw block (type=RAW) or an intermediate
+// FILE node (which itself groups more raw / intermediate nodes).
+message MemFSBlock {
+  bytes  mid  = 1;   // multihash envelope of the child MID
+  uint64 size = 2;   // byte size of that child
+}
+
+// DirEntry is one named entry inside a DIR node. The type and
+// size are pre-computed so directory listings can render
+// without fetching each child.
+message DirEntry {
+  string     name = 1;
+  bytes      mid  = 2;   // multihash envelope of the child MID
+  MemFSType  type = 3;
+  uint64     size = 4;
+}
+
+// MemFSMeta is an optional metadata envelope that can wrap any
+// MemFSNode (or be stored as its own METADATA node). It is the
+// forward-compatible place to stash MIME types and arbitrary
+// key-value attributes without changing the core node layout.
+message MemFSMeta {
+  string                mime_type = 1;
+  map<string, string>   attrs     = 2;
+}

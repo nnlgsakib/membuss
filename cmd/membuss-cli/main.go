@@ -5,10 +5,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -31,6 +35,12 @@ var (
 	// globalConfigPath is the YAML config used to discover
 	// the gRPC endpoint when --addr is not given.
 	globalConfigPath string
+	// globalAPIAddr is the HTTP API endpoint the CLI uses
+	// for MemFS commands (ls, get with path, add with
+	// --wrap-dir, add <directory>). Resolved from --api-addr,
+	// then $MEMBUSS_API_ADDR, then the config file's
+	// APIAddr, then 127.0.0.1:5001.
+	globalAPIAddr string
 )
 
 func main() {
@@ -55,6 +65,7 @@ Run "membuss-cli init" first to set up the data directory.`,
 		SilenceErrors: false,
 	}
 	root.PersistentFlags().StringVar(&globalAddr, "addr", "", "daemon gRPC address (default: from config)")
+	root.PersistentFlags().StringVar(&globalAPIAddr, "api-addr", "", "daemon HTTP API address for MemFS commands (default: 127.0.0.1:5001)")
 	root.PersistentFlags().StringVar(&globalConfigPath, "config", "membuss.yaml", "config file used to locate the daemon")
 	root.PersistentFlags().String("datadir", "", "data directory (default $HOME/.memdata; overrides MEMBUSS_DATADIR)")
 
@@ -64,6 +75,7 @@ Run "membuss-cli init" first to set up the data directory.`,
 		newSealCmd(),
 		newUnsealCmd(),
 		newStatCmd(),
+		newLsCmd(),
 		newPeersCmd(),
 		newDHTCmd(),
 		newGCCmd(),
@@ -133,12 +145,24 @@ func newAddCmd() *cobra.Command {
 		chunker   string
 		chunkSize uint32
 		noSeal    bool
+		wrapDir   bool
 	)
 	c := &cobra.Command{
-		Use:   "add <file>",
-		Short: "Upload a file, build its DAG, seal the root, return the MID",
+		Use:   "add <file-or-dir>",
+		Short: "Upload a file or directory, seal the root, return the MID",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			path := args[0]
+			// Phase 17: when the path is a directory, route
+			// to the MemFS /add/dir HTTP endpoint so the
+			// result is a single DIR MID that resolves to
+			// the whole tree.
+			if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+				return addDirectoryHTTP(cmd, path)
+			}
+			if wrapDir {
+				return addFileHTTP(cmd, path, true)
+			}
 			return withConn(func(mc membusspb.MembussNodeClient, _ membusspb.NodeClient) error {
 				ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Minute)
 				defer cancel()
@@ -163,6 +187,7 @@ func newAddCmd() *cobra.Command {
 	c.Flags().StringVar(&chunker, "chunker", "", "chunker: \"fixed\" (default) or \"rabin\"")
 	c.Flags().Uint32Var(&chunkSize, "chunk-size", 0, "fixed chunk size in bytes (default 256 KiB)")
 	c.Flags().BoolVar(&noSeal, "no-seal", false, "do not seal the root after ingest")
+	c.Flags().BoolVar(&wrapDir, "wrap-dir", false, "wrap the file in a single-entry DIR node (MemFS)")
 	return c
 }
 
@@ -572,4 +597,201 @@ func formatBytes(n uint64) string {
 	default:
 		return strconv.FormatUint(n, 10) + " B"
 	}
+}
+
+// --- Phase 17: MemFS commands (HTTP) ---
+
+// resolveAPIAddr returns the HTTP API endpoint for MemFS
+// commands. Priority:
+//
+//  1. --api-addr flag
+//  2. $MEMBUSS_API_ADDR
+//  3. config.yaml's APIAddr
+//  4. 127.0.0.1:5001
+func resolveAPIAddr() string {
+	if globalAPIAddr != "" {
+		return globalAPIAddr
+	}
+	if v := os.Getenv("MEMBUSS_API_ADDR"); v != "" {
+		return v
+	}
+	if datadir := config.ResolveDataDir(""); datadir != "" {
+		if cfg, err := config.LoadConfig(datadir); err == nil && cfg.APIAddr != "" {
+			return cfg.APIAddr
+		}
+	}
+	if cfg, err := config.Load(globalConfigPath); err == nil && cfg.APIAddr != "" {
+		return cfg.APIAddr
+	}
+	return "127.0.0.1:5001"
+}
+
+// httpBase returns "http://<addr>" for the API host.
+func httpBase() string {
+	return "http://" + resolveAPIAddr()
+}
+
+// newLsCmd implements `membuss-cli ls <MID>`. It calls
+// GET /api/v1/ls/{mid} and prints a tabwriter table.
+func newLsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "ls <MID>",
+		Short: "List the entries of a MemFS directory",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mid := args[0]
+			resp, err := http.Get(httpBase() + "/api/v1/ls/" + mid)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				body, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("ls: %s: %s", resp.Status, string(body))
+			}
+			var env struct {
+				OK   bool `json:"ok"`
+				Data struct {
+					Entries []struct {
+						Name string `json:"name"`
+						MID  string `json:"mid"`
+						Type string `json:"type"`
+						Size uint64 `json:"size"`
+					} `json:"entries"`
+				} `json:"data"`
+				Error string `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+				return err
+			}
+			if !env.OK {
+				return fmt.Errorf("ls: %s", env.Error)
+			}
+			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "NAME\tTYPE\tSIZE\tMID")
+			for _, e := range env.Data.Entries {
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", e.Name, e.Type, formatBytes(e.Size), e.MID)
+			}
+			return tw.Flush()
+		},
+	}
+}
+
+// addFileHTTP is the shared POST handler for single-file
+// uploads. When wrapDir is true, the daemon returns a DIR
+// MID that wraps the FILE node.
+func addFileHTTP(cmd *cobra.Command, path string, wrapDir bool) error {
+	url := httpBase() + "/api/v1/add"
+	if wrapDir {
+		url += "?wrap=dir"
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	req, err := http.NewRequest("POST", url, f)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("add: %s: %s", resp.Status, string(body))
+	}
+	var env struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+		Data  struct {
+			MID  string `json:"mid"`
+			Size uint64 `json:"size"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		return err
+	}
+	if !env.OK {
+		return fmt.Errorf("add: %s", env.Error)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "%s\n", env.Data.MID)
+	return nil
+}
+
+// addDirectoryHTTP uploads a directory as multipart/form-data
+// to /api/v1/add/dir. Each part carries a X-Membuss-Path
+// header with the file's relative path.
+func addDirectoryHTTP(cmd *cobra.Command, root string) error {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	count := 0
+	err := filepath.Walk(root, func(p string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		rel = strings.ReplaceAll(rel, string(filepath.Separator), "/")
+		fw, err := mw.CreateFormFile("file", rel)
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if _, err := io.Copy(fw, f); err != nil {
+			return err
+		}
+		count++
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return errors.New("no files in directory")
+	}
+	if err := mw.Close(); err != nil {
+		return err
+	}
+	req, err := http.NewRequest("POST", httpBase()+"/api/v1/add/dir", &buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("add-dir: %s: %s", resp.Status, string(body))
+	}
+	var env struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+		Data  struct {
+			MID string `json:"mid"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		return err
+	}
+	if !env.OK {
+		return fmt.Errorf("add-dir: %s", env.Error)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "%s\n", env.Data.MID)
+	return nil
 }

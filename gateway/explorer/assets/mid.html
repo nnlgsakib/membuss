@@ -27,6 +27,32 @@
 		<button class="btn" type="submit">Retry DHT lookup</button>
 	</form>
   {{else}}
+  {{if eq .MemFSType "dir"}}
+  <div class="grid">
+    <div class="card span-2">
+      <h2>Directory</h2>
+      <p class="muted">MemFS directory with {{len .MemFSEntries}} entries.</p>
+      <table class="dir">
+        <tr><th>Name</th><th>Type</th><th>Size</th><th>MID</th></tr>
+        {{range .MemFSEntries}}
+        <tr>
+          <td><a href="/explorer/mid/{{.MID}}">{{.Name}}</a></td>
+          <td>{{.Type}}</td>
+          <td>{{.Size | humanBytes}}</td>
+          <td class="muted mono"><a href="/explorer/mid/{{.MID}}">{{slice .MID 0 16}}…</a></td>
+        </tr>
+        {{end}}
+      </table>
+    </div>
+  </div>
+  {{else if eq .MemFSType "symlink"}}
+  <div class="grid">
+    <div class="card">
+      <h2>Symlink</h2>
+      <p>Target: <code>{{.SymlinkTarget}}</code></p>
+    </div>
+  </div>
+  {{else}}
   <div class="grid">
     <div class="card">
       <h2>Content</h2>
@@ -68,6 +94,7 @@
 {{end}}{{if not .Providers}}(no providers found in DHT){{end}}</pre>
     </div>
   </div>
+  {{end}}
   {{end}}
 </section>
 {{end}}
