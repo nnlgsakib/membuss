@@ -30,19 +30,67 @@
   {{if eq .MemFSType "dir"}}
   <div class="grid">
     <div class="card span-2">
-      <h2>Directory</h2>
-      <p class="muted">MemFS directory with {{len .MemFSEntries}} entries.</p>
-      <table class="dir">
-        <tr><th>Name</th><th>Type</th><th>Size</th><th>MID</th></tr>
-        {{range .MemFSEntries}}
-        <tr>
-          <td><a href="/explorer/mid/{{.MID}}">{{.Name}}</a></td>
-          <td>{{.Type}}</td>
-          <td>{{.Size | humanBytes}}</td>
-          <td class="muted mono"><a href="/explorer/mid/{{.MID}}">{{slice .MID 0 16}}…</a></td>
-        </tr>
+      <h2>Directory Listing</h2>
+      <p class="muted" style="margin-bottom: 16px;">MemFS directory with {{len .MemFSEntries}} entries.</p>
+      <div class="table-responsive">
+        <table class="data">
+          <thead>
+            <tr><th>Name</th><th>Type</th><th>Size</th><th>MID</th></tr>
+          </thead>
+          <tbody>
+            {{range .MemFSEntries}}
+            <tr>
+              <td><a href="/explorer/mid/{{.MID}}">{{.Name}}</a></td>
+              <td>{{.Type}}</td>
+              <td>{{.Size | humanBytes}}</td>
+              <td class="muted mono"><a href="/explorer/mid/{{.MID}}">{{slice .MID 0 16}}…</a></td>
+            </tr>
+            {{end}}
+            {{if not .MemFSEntries}}
+            <tr><td colspan="4" class="muted" style="text-align:center;">(empty directory)</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Directory Info</h2>
+      <dl>
+        <dt>Size</dt><dd>{{.Size | humanBytes}} ({{.Size}} bytes)</dd>
+        <dt>Blocks</dt><dd>{{.Blocks}}</dd>
+        <dt>Sealed</dt><dd>{{if .Sealed}}yes{{else}}no{{end}}</dd>
+        <dt>Codec</dt><dd>0x{{printf "%x" .Codec}}</dd>
+        <dt>Content-Type</dt><dd>inode/directory</dd>
+      </dl>
+      <div class="actions">
+        <a class="btn primary" href="/mem/{{.MID}}/" target="_blank">Open Gateway</a>
+        <a class="btn" href="/explorer/mid/{{.MID}}/dag">DAG</a>
+        {{if .Sealed}}
+        <form method="POST" action="/explorer/mid/{{.MID}}/unseal" style="display:inline">
+          <button class="btn warn" type="submit">Unseal</button>
+        </form>
+        {{else}}
+        <form method="POST" action="/explorer/mid/{{.MID}}/seal" style="display:inline">
+          <button class="btn primary" type="submit">Seal</button>
+        </form>
         {{end}}
-      </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Erasure Coding</h2>
+      <dl>
+        <dt>Layout</dt><dd>{{.DataShards}} data + {{.ParityShards}} parity</dd>
+        <dt>Total shards</dt><dd>{{.TotalShards}}</dd>
+        <dt>Health</dt><dd>{{.HealthLabel}} ({{.Health}})</dd>
+      </dl>
+    </div>
+
+    <div class="card span-2">
+      <h2>Providers (DHT)</h2>
+      <pre class="providers">{{range .Providers}}{{.}}
+{{end}}{{if not .Providers}}(no providers found in DHT){{end}}</pre>
     </div>
   </div>
   {{else if eq .MemFSType "symlink"}}

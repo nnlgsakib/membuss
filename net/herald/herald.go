@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/nnlgsakib/membuss/core/mid"
+	"github.com/nnlgsakib/membuss/core/store"
 )
 
 // Strategy selects which MIDs the herald re-announces.
@@ -66,6 +67,8 @@ type SealedLister interface {
 	// instead and the "all" strategy will degrade to
 	// "roots".
 	AllBlocks() ([]mid.MID, error)
+	// Get returns the block payload for the given MID.
+	Get(mid.MID) ([]byte, error)
 }
 
 // Provider announces that this node is a provider of m. The
@@ -247,11 +250,32 @@ func (h *MemHerald) collect(ctx context.Context) []mid.MID {
 		}
 		return mids
 	case StrategyRoots, "":
-		mids, err := h.cfg.Store.AllSealed()
+		roots, err := h.cfg.Store.AllSealed()
 		if err != nil {
 			return nil
 		}
-		return mids
+		seen := make(map[string]struct{})
+		var collected []mid.MID
+		for _, r := range roots {
+			if r.IsZero() {
+				continue
+			}
+			if _, ok := seen[r.String()]; !ok {
+				seen[r.String()] = struct{}{}
+				collected = append(collected, r)
+			}
+			// Walk recursively to find all sub-files/directories
+			_ = store.Walk(h.cfg.Store, r, func(m mid.MID, leaf bool) error {
+				if m.Codec() == mid.CodecMemFS {
+					if _, ok := seen[m.String()]; !ok {
+						seen[m.String()] = struct{}{}
+						collected = append(collected, m)
+					}
+				}
+				return nil
+			})
+		}
+		return collected
 	default:
 		return nil
 	}

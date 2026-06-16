@@ -146,11 +146,7 @@ func (b *bloomIndex) fromDB(db *badger.DB) error {
 				if len(raw) <= len(p) {
 					continue
 				}
-				m, err := mid.FromMultihash(mid.CodecRaw, raw[len(p):])
-				if err != nil {
-					continue
-				}
-				b.filter.Add(m.Bytes())
+				b.filter.Add(raw[len(p):])
 			}
 		}
 		return nil
@@ -211,11 +207,7 @@ func (b *bloomIndex) rebuildFromDB(db *badger.DB) error {
 				if len(raw) <= len(p) {
 					continue
 				}
-				m, err := mid.FromMultihash(mid.CodecRaw, raw[len(p):])
-				if err != nil {
-					continue
-				}
-				fresh.Add(m.Bytes())
+				fresh.Add(raw[len(p):])
 			}
 		}
 		return nil

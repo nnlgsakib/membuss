@@ -158,7 +158,7 @@ func (b *daemonBackend) Add(ctx context.Context, path, chunker string, chunkSize
 		// Announce to the DHT so other nodes can find this MID.
 		if b.dht != nil {
 			announceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			_ = b.dht.Provide(announceCtx, root)
+			provideRecursive(announceCtx, b.dht, b.store, root)
 			cancel()
 		}
 	}
@@ -324,7 +324,7 @@ func (b *daemonBackend) Seal(ctx context.Context, midStr string, recursive bool)
 	// Announce.
 	if b.dht != nil {
 		announceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		_ = b.dht.Provide(announceCtx, root)
+		provideRecursive(announceCtx, b.dht, b.store, root)
 		cancel()
 	}
 	return serverpkg.SealResult{Pinned: blocks, Already: false}, nil
@@ -610,4 +610,19 @@ func sectionReader(rc io.Reader, offset, limit uint64) io.Reader {
 		return io.NopCloser(rc)
 	}
 	return io.NopCloser(io.LimitReader(rc, int64(limit)))
+}
+
+// provideRecursive walks the DAG starting at root, announcing the root MID
+// and all discovered MemFS node MIDs to the DHT.
+func provideRecursive(ctx context.Context, dht *dht.MemDHT, s store.Store, root mid.MID) {
+	if dht == nil || s == nil || root.IsZero() {
+		return
+	}
+	_ = dht.Provide(ctx, root)
+	_ = store.Walk(s, root, func(m mid.MID, leaf bool) error {
+		if m.Codec() == mid.CodecMemFS {
+			_ = dht.Provide(ctx, m)
+		}
+		return nil
+	})
 }

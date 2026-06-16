@@ -198,6 +198,13 @@ func (b *Builder) AddFile(name string, r io.Reader, mode fs.FileMode, mtime time
 	if err := b.bs.Put(rootMID, raw); err != nil {
 		return AddResult{}, fmt.Errorf("memfs: store file node: %w", err)
 	}
+	if name != "" {
+		_ = store.SetObjectInfo(b.bs, rootMID, store.ObjectInfo{
+			Name:     name,
+			MimeType: mime,
+			Size:     totalSize,
+		})
+	}
 	return AddResult{
 		MID:   rootMID,
 		Size:  totalSize,
@@ -252,6 +259,13 @@ func (b *Builder) AddDir(name string, entries []DirEntry, mode fs.FileMode, mtim
 	rootMID := mid.FromBytesWithCodec(raw, mid.CodecMemFS)
 	if err := b.bs.Put(rootMID, raw); err != nil {
 		return AddResult{}, fmt.Errorf("memfs: store dir: %w", err)
+	}
+	if name != "" {
+		_ = store.SetObjectInfo(b.bs, rootMID, store.ObjectInfo{
+			Name:     name,
+			MimeType: "inode/directory",
+			Size:     total,
+		})
 	}
 	return AddResult{
 		MID:   rootMID,
@@ -348,7 +362,8 @@ func (b *Builder) AddDirectoryFromFS(fsys fs.FS, root string) (AddResult, error)
 			if err != nil {
 				return err
 			}
-			r, err := b.AddFile(path.Base(rel), f, info.Mode().Perm(), mt, "")
+			mime := store.SniffMime(path.Base(rel))
+			r, err := b.AddFile(path.Base(rel), f, info.Mode().Perm(), mt, mime)
 			_ = f.Close()
 			if err != nil {
 				return err

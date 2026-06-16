@@ -42,7 +42,15 @@
     <h2>Sealed MIDs</h2>
     <ul class="mids">
       {{range .SealedList}}
-      <li><a href="/explorer/mid/{{.}}">{{.}}</a></li>
+      <li>
+        <a href="/explorer/mid/{{.MID}}">
+          {{if .Name}}
+            <strong>{{.Name}}</strong> <span class="muted small" style="margin-left: 8px;">({{.MID}})</span>
+          {{else}}
+            {{.MID}}
+          {{end}}
+        </a>
+      </li>
       {{end}}
     </ul>
   </div>

@@ -1,4 +1,4 @@
-﻿// Package store defines the Blockstore interface that core/dag
+// Package store defines the Blockstore interface that core/dag
 // reads from and writes to, plus an in-memory implementation used
 // for tests and for nodes that want ephemeral storage.
 //
@@ -190,14 +190,35 @@ func (m *Memstore) Seal(root mid.MID, recursive bool) error {
 	}
 	m.seals[root.String()] = struct{}{}
 	m.sealsMu.Unlock()
+
+	if !recursive {
+		return nil
+	}
+	_ = Walk(m, root, func(id mid.MID, _ bool) error {
+		if id.Codec() == mid.CodecMemFS {
+			m.sealsMu.Lock()
+			m.seals[id.String()] = struct{}{}
+			m.sealsMu.Unlock()
+		}
+		return nil
+	})
 	return nil
 }
 
-// Unseal removes a seal record.
+// Unseal removes a seal record and recursively unseals child MemFS nodes.
 func (m *Memstore) Unseal(root mid.MID) error {
 	m.sealsMu.Lock()
 	delete(m.seals, root.String())
 	m.sealsMu.Unlock()
+
+	_ = Walk(m, root, func(id mid.MID, _ bool) error {
+		if id.Codec() == mid.CodecMemFS {
+			m.sealsMu.Lock()
+			delete(m.seals, id.String())
+			m.sealsMu.Unlock()
+		}
+		return nil
+	})
 	return nil
 }
 

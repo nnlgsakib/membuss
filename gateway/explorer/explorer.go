@@ -120,6 +120,13 @@ type AnchorInfo struct {
 	Synced     int64
 }
 
+// DirectoryFile is one file in a folder upload.
+type DirectoryFile struct {
+	Path string
+	Size int64
+	R    io.Reader
+}
+
 // Backend is the contract the explorer depends on. The
 // daemon supplies a real implementation; tests inject a
 // memBackend.
@@ -156,6 +163,8 @@ type Backend interface {
 	// resulting MID + metadata. name is the original
 	// filename (used for Content-Disposition on download).
 	Add(ctx context.Context, name string, r io.Reader) (ContentInfo, error)
+	// AddDirectory ingests a directory as MemFS from a set of files with relative paths.
+	AddDirectory(ctx context.Context, files []DirectoryFile) (ContentInfo, error)
 	// Peers returns the local PEX peer table.
 	Peers(ctx context.Context, limit int) ([]PeerInfo, error)
 	// SealedMIDs lists all sealed MIDs in the local store.
@@ -317,6 +326,11 @@ func (e *Explorer) buildRouter() http.Handler {
 
 // --- handlers ---
 
+type sealedMIDView struct {
+	MID  string
+	Name string
+}
+
 type indexData struct {
 	Title       string
 	NodeInfo    nodeInfoView
@@ -325,7 +339,7 @@ type indexData struct {
 	SealedCount int
 	BlockCount  uint64
 	Uptime      int64
-	SealedList  []string
+	SealedList  []sealedMIDView
 }
 
 type nodeInfoView struct {
@@ -341,23 +355,43 @@ func (e *Explorer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	b := e.cfg.Backend
 	version, build := b.NodeVersion(ctx)
 	sealed, _ := b.SealedMIDs(ctx)
-	sealedStrs := make([]string, 0, len(sealed))
+	
+	sealedList := make([]sealedMIDView, 0, len(sealed))
 	for _, m := range sealed {
-		sealedStrs = append(sealedStrs, m.String())
+		name := ""
+		if info, err := b.Stat(ctx, m); err == nil && info.Name != "" {
+			name = info.Name
+		}
+		sealedList = append(sealedList, sealedMIDView{
+			MID:  m.String(),
+			Name: name,
+		})
 	}
-	sort.Strings(sealedStrs)
-	if len(sealedStrs) > 50 {
-		sealedStrs = sealedStrs[:50]
+	sort.Slice(sealedList, func(i, j int) bool {
+		// If one of the elements is unnamed, sort it to the end or compare MIDs
+		if sealedList[i].Name == "" && sealedList[j].Name != "" {
+			return false
+		}
+		if sealedList[i].Name != "" && sealedList[j].Name == "" {
+			return true
+		}
+		if sealedList[i].Name != sealedList[j].Name {
+			return sealedList[i].Name < sealedList[j].Name
+		}
+		return sealedList[i].MID < sealedList[j].MID
+	})
+	if len(sealedList) > 50 {
+		sealedList = sealedList[:50]
 	}
 	peers, _ := b.Peers(ctx, e.cfg.PeerLimit)
 	data := indexData{
-		Title:    "Home",
-		PeerCount: len(peers),
+		Title:       "Home",
+		PeerCount:   len(peers),
 		StoreBytes:  mustStoreBytes(ctx, b),
 		SealedCount: len(sealed),
 		BlockCount:  mustBlockCount(ctx, b),
 		Uptime:      int64(b.Uptime(ctx).Seconds()),
-		SealedList:  sealedStrs,
+		SealedList:  sealedList,
 		NodeInfo: nodeInfoView{
 			PeerID:     b.LocalPeerID(ctx),
 			Addrs:      b.LocalAddrs(ctx),
@@ -560,11 +594,13 @@ func (e *Explorer) handleResolveStream(w http.ResponseWriter, r *http.Request) {
 	b := e.cfg.Backend
 
 	type sseEvent struct {
-		Blocks uint64 `json:"blocks,omitempty"`
-		Total  uint64 `json:"total,omitempty"`
-		Done   bool   `json:"done,omitempty"`
-		MID    string `json:"mid,omitempty"`
-		Error  string `json:"error,omitempty"`
+		State     string   `json:"state,omitempty"`
+		Blocks    uint64   `json:"blocks,omitempty"`
+		Total     uint64   `json:"total,omitempty"`
+		Done      bool     `json:"done,omitempty"`
+		MID       string   `json:"mid,omitempty"`
+		Error     string   `json:"error,omitempty"`
+		Providers []string `json:"providers,omitempty"`
 	}
 
 	sendEvent := func(ev sseEvent) {
@@ -572,6 +608,12 @@ func (e *Explorer) handleResolveStream(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 	}
+
+	// 1. Initial State: connecting to DHT
+	sendEvent(sseEvent{State: "connecting"})
+
+	provs, _ := b.Providers(ctx, root, e.cfg.ProviderLimit)
+	sendEvent(sseEvent{State: "connecting", Providers: provs})
 
 	timeout := e.cfg.ResolveTimeout
 	if timeout <= 0 {
@@ -581,7 +623,16 @@ func (e *Explorer) handleResolveStream(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	rc, info, err := b.ResolveWithProgress(rctx, root, func(blocksResolved, blocksTotal uint64) {
-		sendEvent(sseEvent{Blocks: blocksResolved, Total: blocksTotal})
+		state := "downloading"
+		if blocksTotal > 1 && blocksResolved <= 1 {
+			state = "checking"
+		}
+		sendEvent(sseEvent{
+			State:     state,
+			Blocks:    blocksResolved,
+			Total:     blocksTotal,
+			Providers: provs,
+		})
 	})
 	if err != nil {
 		sendEvent(sseEvent{Error: err.Error()})
@@ -728,6 +779,38 @@ func (e *Explorer) handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	ctx := r.Context()
+	b := e.cfg.Backend
+
+	// Check if this is a folder upload (multiple files sent under "files")
+	if files, ok := r.MultipartForm.File["files"]; ok && len(files) > 0 {
+		var dirFiles []DirectoryFile
+		for _, fh := range files {
+			f, err := fh.Open()
+			if err != nil {
+				http.Error(w, "open file: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer f.Close()
+
+			dirFiles = append(dirFiles, DirectoryFile{
+				Path: fh.Filename,
+				Size: fh.Size,
+				R:    f,
+			})
+		}
+
+		res, err := b.AddDirectory(ctx, dirFiles)
+		if err != nil {
+			http.Error(w, "add directory: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, "/explorer/mid/"+res.MID, http.StatusSeeOther)
+		return
+	}
+
+	// Otherwise, fall back to single file upload
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		http.Error(w, "no file: "+err.Error(), http.StatusBadRequest)
@@ -735,8 +818,6 @@ func (e *Explorer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	ctx := r.Context()
-	b := e.cfg.Backend
 	res, err := b.Add(ctx, header.Filename, file)
 	if err != nil {
 		http.Error(w, "add: "+err.Error(), http.StatusInternalServerError)

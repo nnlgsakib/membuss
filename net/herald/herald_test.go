@@ -2,6 +2,7 @@ package herald
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -30,6 +31,10 @@ func (f *fakeStore) AllBlocks() ([]mid.MID, error) {
 	out := make([]mid.MID, len(f.blocks))
 	copy(out, f.blocks)
 	return out, nil
+}
+
+func (f *fakeStore) Get(m mid.MID) ([]byte, error) {
+	return nil, errors.New("not found")
 }
 
 func (f *fakeStore) Seal(m mid.MID) {

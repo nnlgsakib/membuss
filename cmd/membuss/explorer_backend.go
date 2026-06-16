@@ -10,6 +10,9 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -415,11 +418,88 @@ func (a *explorerAdapter) Add(ctx context.Context, name string, r io.Reader) (ex
 	}, nil
 }
 
+// AddDirectory ingests a directory as MemFS from a set of files with relative paths.
+func (a *explorerAdapter) AddDirectory(ctx context.Context, files []explorer.DirectoryFile) (explorer.ContentInfo, error) {
+	b := a.b
+	if b == nil || b.store == nil {
+		return explorer.ContentInfo{}, errors.New("explorer: no backend")
+	}
+	if len(files) == 0 {
+		return explorer.ContentInfo{}, errors.New("explorer: no files")
+	}
+
+	tmp, err := os.MkdirTemp("", "membuss-explorer-add-dir-*")
+	if err != nil {
+		return explorer.ContentInfo{}, err
+	}
+	defer os.RemoveAll(tmp)
+
+	for _, f := range files {
+		rel := strings.ReplaceAll(f.Path, "\\", "/")
+		rel = path.Clean("/" + rel)
+		rel = strings.TrimPrefix(rel, "/")
+		if rel == "" || rel == "." {
+			continue
+		}
+		full := filepath.Join(tmp, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return explorer.ContentInfo{}, err
+		}
+		outFile, err := os.Create(full)
+		if err != nil {
+			return explorer.ContentInfo{}, err
+		}
+		if _, err := io.Copy(outFile, f.R); err != nil {
+			outFile.Close()
+			return explorer.ContentInfo{}, err
+		}
+		if err := outFile.Close(); err != nil {
+			return explorer.ContentInfo{}, err
+		}
+	}
+
+	memBuilder := memfs.NewBuilder(b.store)
+	res, err := memBuilder.AddDirectoryFromFS(os.DirFS(tmp), ".")
+	if err != nil {
+		return explorer.ContentInfo{}, err
+	}
+
+	_ = b.store.Seal(res.MID, true)
+	if b.dht != nil {
+		announceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		provideRecursive(announceCtx, b.dht, b.store, res.MID)
+		cancel()
+	}
+
+	// Use first file's first directory segment as the directory name.
+	dirName := "upload"
+	if len(files) > 0 && files[0].Path != "" {
+		parts := strings.Split(strings.ReplaceAll(files[0].Path, "\\", "/"), "/")
+		if len(parts) > 0 && parts[0] != "" {
+			dirName = parts[0]
+		}
+	}
+
+	return explorer.ContentInfo{
+		MID:      res.MID.String(),
+		Size:     res.Size,
+		Blocks:   res.Block,
+		Sealed:   true,
+		Present:  true,
+		Name:     dirName,
+		MimeType: "inode/directory",
+	}, nil
+}
+
 // --- Phase 17: MemFS methods on explorerAdapter ---
 
 // MemFSInfo returns the metadata for a MemFS node.
 func (a *explorerAdapter) MemFSInfo(ctx context.Context, m mid.MID) (explorer.MemFSInfo, error) {
-	r := memfs.NewResolver(a.b.store)
+	r := memfs.NewResolver(&fetchingBlockstore{
+		Blockstore: a.b.store,
+		b:          a.b,
+		ctx:        ctx,
+	})
 	st, err := r.Stat(ctx, m)
 	if err != nil {
 		return explorer.MemFSInfo{}, err
@@ -436,7 +516,11 @@ func (a *explorerAdapter) MemFSInfo(ctx context.Context, m mid.MID) (explorer.Me
 
 // MemFSList returns the entries of a MemFS directory.
 func (a *explorerAdapter) MemFSList(ctx context.Context, m mid.MID) ([]explorer.MemFSEntry, error) {
-	r := memfs.NewResolver(a.b.store)
+	r := memfs.NewResolver(&fetchingBlockstore{
+		Blockstore: a.b.store,
+		b:          a.b,
+		ctx:        ctx,
+	})
 	st, err := r.Stat(ctx, m)
 	if err != nil {
 		return nil, err
@@ -459,7 +543,11 @@ func (a *explorerAdapter) MemFSList(ctx context.Context, m mid.MID) ([]explorer.
 // MemFSPathGet returns a streaming reader for the file at
 // m/path. Used by the explorer's preview pane.
 func (a *explorerAdapter) MemFSPathGet(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error) {
-	r := memfs.NewResolver(a.b.store)
+	r := memfs.NewResolver(&fetchingBlockstore{
+		Blockstore: a.b.store,
+		b:          a.b,
+		ctx:        ctx,
+	})
 	node, err := r.ResolvePath(ctx, m, path)
 	if err != nil {
 		return nil, 0, "", err

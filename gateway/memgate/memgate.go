@@ -275,6 +275,10 @@ func (m *MemGate) handleGet(w http.ResponseWriter, r *http.Request) {
 	// text, video, etc. directly.
 	preInfo, preErr := m.cfg.Backend.Stat(r.Context(), root)
 	if preErr == nil {
+		if (preInfo.MimeType == "inode/directory" || preInfo.ContentType == "inode/directory") && q.Get("format") == "" {
+			http.Redirect(w, r, r.URL.Path+"/", http.StatusMovedPermanently)
+			return
+		}
 		if preInfo.MimeType != "" && w.Header().Get("Content-Type") == "" {
 			w.Header().Set("Content-Type", preInfo.MimeType)
 		}
@@ -407,9 +411,15 @@ func (m *MemGate) handlePathGet(w http.ResponseWriter, r *http.Request) {
 	if ct == "" {
 		ct = "application/octet-stream"
 	}
+	filename := filepath.Base(innerPath)
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("X-Membuss-MID", midStr)
 	w.Header().Set("X-Membuss-Path", "/"+innerPath)
+	w.Header().Set("X-Membuss-Name", filename)
+	w.Header().Set("X-Membuss-MimeType", ct)
+	if w.Header().Get("Content-Disposition") == "" {
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename=%q`, filename))
+	}
 	if size > 0 {
 		w.Header().Set("Content-Length", strconv.FormatUint(size, 10))
 	}

@@ -1,4 +1,4 @@
-﻿package store
+package store
 
 import (
 	"bytes"
@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"os"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
@@ -403,6 +404,54 @@ func TestMemStoreSealRecursiveSucceedsWhenComplete(t *testing.T) {
 	sealed, _ := s.IsSealed(m)
 	if !sealed {
 		t.Fatal("Seal record missing after successful Seal")
+	}
+}
+
+func TestMemStoreCodecPersistence(t *testing.T) {
+	dir, err := os.MkdirTemp("", "membuss-test-codec-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	// Open store
+	s1, err := NewMemStore(Options{Path: dir})
+	if err != nil {
+		t.Fatalf("NewMemStore s1: %v", err)
+	}
+
+	// Seal a MID with CodecMemFS
+	data := []byte("memfs-root-payload")
+	m1 := mid.FromBytesWithCodec(data, mid.CodecMemFS)
+	if err := s1.PutDAG(m1, data); err != nil {
+		t.Fatalf("PutDAG: %v", err)
+	}
+	if err := s1.Seal(m1, false); err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+
+	// Close store
+	if err := s1.Close(); err != nil {
+		t.Fatalf("Close s1: %v", err)
+	}
+
+	// Reopen store (simulate restart)
+	s2, err := NewMemStore(Options{Path: dir})
+	if err != nil {
+		t.Fatalf("NewMemStore s2: %v", err)
+	}
+	defer s2.Close()
+
+	// Verify AllSealed returns the MID with CodecMemFS
+	sealed, err := s2.AllSealed()
+	if err != nil {
+		t.Fatalf("AllSealed: %v", err)
+	}
+	if len(sealed) != 1 {
+		t.Fatalf("expected 1 sealed root, got %d", len(sealed))
+	}
+	if sealed[0].Codec() != mid.CodecMemFS {
+		t.Fatalf("expected codec %x (CodecMemFS), got %x", mid.CodecMemFS, sealed[0].Codec())
 	}
 }
 

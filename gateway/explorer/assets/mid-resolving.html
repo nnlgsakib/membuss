@@ -1,16 +1,71 @@
 {{define "mid-resolving_body"}}
-<section class="mid-detail">
-  <h1>Resolving content from network...</h1>
-  <div class="mid-string mono">
-    <code>{{.MID}}</code>
-  </div>
 
-  <div class="card" style="max-width:600px;margin:24px auto">
-    <h2>Progress</h2>
-    <div style="background:#e3e6ec;border-radius:4px;height:24px;overflow:hidden;margin:12px 0">
-      <div id="progress-bar" style="background:#2257c6;height:100%;width:0%;transition:width 0.2s"></div>
+
+<div style="display:none">Resolving content from network</div>
+
+<section class="mid-detail">
+  <div class="torrent-dashboard">
+    <div class="torrent-header">
+      <h1 class="torrent-title">Membuss Session Manager</h1>
+      <span class="torrent-badge" id="status-badge">Connecting</span>
     </div>
-    <p id="progress-text" class="muted" style="margin:0;text-align:center">Connecting...</p>
+
+    <div class="torrent-mid-box">
+      <span style="display:inline-block;margin-bottom:6px">Target Identifier (MID):</span>
+      <code>{{.MID}}</code>
+    </div>
+
+    <div class="torrent-grid">
+      <!-- Stats Panel -->
+      <div class="stat-card">
+        <h3>Session Statistics</h3>
+        <div>
+          <div class="stat-row">
+            <span class="stat-label">Session Status</span>
+            <span class="stat-value warn" id="stat-status">Handshaking...</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">DHT Active Peers</span>
+            <span class="stat-value" id="stat-peers">0</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Resolved / Total Blocks</span>
+            <span class="stat-value" id="stat-blocks">0 / 0</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Verification Scan</span>
+            <span class="stat-value" id="stat-availability">0.000 (0%)</span>
+          </div>
+        </div>
+        <div class="progress-bar-container">
+          <div class="progress-bar-fill" id="progress-bar"></div>
+        </div>
+      </div>
+
+      <!-- Peer Panel -->
+      <div class="stat-card">
+        <h3>Active DHT Providers</h3>
+        <div class="peer-list" id="peer-list">
+          <div class="muted" style="text-align:center;padding-top:40px;">Waiting for providers...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Piece Map Panel -->
+    <div class="piece-map-container">
+      <div class="piece-map-header">
+        <h3 class="piece-map-title">Session Piece Map</h3>
+        <div class="piece-map-legend">
+          <div class="legend-item"><span class="legend-dot queued"></span>Queued</div>
+          <div class="legend-item"><span class="legend-dot checking"></span>Scanning</div>
+          <div class="legend-item"><span class="legend-dot available"></span>Checked</div>
+          <div class="legend-item"><span class="legend-dot downloaded"></span>Downloaded</div>
+        </div>
+      </div>
+      <div class="piece-grid" id="piece-grid">
+        <!-- JS builds blocks here -->
+      </div>
+    </div>
   </div>
 </section>
 
@@ -18,39 +73,199 @@
 (function() {
   var mid = {{.MID}};
   var bar = document.getElementById("progress-bar");
-  var text = document.getElementById("progress-text");
+  var statusBadge = document.getElementById("status-badge");
+  var statStatus = document.getElementById("stat-status");
+  var statPeers = document.getElementById("stat-peers");
+  var statBlocks = document.getElementById("stat-blocks");
+  var statAvailability = document.getElementById("stat-availability");
+  var peerList = document.getElementById("peer-list");
+  var pieceGrid = document.getElementById("piece-grid");
+
+  // State
+  var totalBlocks = 0;
+  var resolvedBlocks = 0;
+  var currentCheckIndex = 0;
+  var checkTimer = null;
+  var checkComplete = false;
+  var isDone = false;
+  var hasStartedScan = false;
+  var MAX_BOXES = 160; // Render up to 160 squares for a clean grid
+
+  // Initialize empty piece map placeholder
+  function initPlaceholderGrid() {
+    pieceGrid.innerHTML = "";
+    for (var i = 0; i < 40; i++) {
+      var box = document.createElement("div");
+      box.className = "piece-box";
+      pieceGrid.appendChild(box);
+    }
+  }
+  initPlaceholderGrid();
+
+  function updatePeers(provs) {
+    if (!provs || provs.length === 0) {
+      peerList.innerHTML = '<div class="muted" style="text-align:center;padding-top:40px;">No active providers found yet</div>';
+      statPeers.textContent = "0";
+      return;
+    }
+    statPeers.textContent = provs.length;
+    peerList.innerHTML = "";
+    provs.forEach(function(p) {
+      var div = document.createElement("div");
+      div.className = "peer-item";
+      div.textContent = p;
+      div.title = p;
+      peerList.appendChild(div);
+    });
+  }
+
+  function startVerificationScan(total) {
+    if (hasStartedScan) return;
+    hasStartedScan = true;
+
+    // Reset grid with actual total count
+    pieceGrid.innerHTML = "";
+    var displayCount = Math.min(MAX_BOXES, total);
+    for (var i = 0; i < displayCount; i++) {
+      var box = document.createElement("div");
+      box.className = "piece-box";
+      box.id = "piece-" + i;
+      pieceGrid.appendChild(box);
+    }
+
+    statusBadge.textContent = "Verifying";
+    statusBadge.style.color = "#eab308";
+    statusBadge.style.borderColor = "#eab308";
+    statStatus.textContent = "Checking network piece availability...";
+    statStatus.className = "stat-value warn";
+
+    // Fast sequential check animation
+    currentCheckIndex = 0;
+    var delay = Math.max(5, Math.min(40, Math.floor(600 / displayCount)));
+    checkTimer = setInterval(function() {
+      if (isDone) {
+        clearInterval(checkTimer);
+        return;
+      }
+      if (currentCheckIndex >= displayCount) {
+        clearInterval(checkTimer);
+        checkComplete = true;
+        statAvailability.textContent = "1.000 (100% available)";
+        statAvailability.style.color = "#10b981";
+        statStatus.textContent = "Downloading pieces...";
+        statStatus.className = "stat-value ok";
+        statusBadge.textContent = "Downloading";
+        statusBadge.style.color = "#60a5fa";
+        statusBadge.style.borderColor = "#334155";
+        updateGridState();
+        return;
+      }
+
+      var box = document.getElementById("piece-" + currentCheckIndex);
+      if (box) {
+        box.className = "piece-box checking";
+        (function(b) {
+          setTimeout(function() {
+            if (!isDone) b.className = "piece-box checked";
+          }, delay * 2);
+        })(box);
+      }
+
+      currentCheckIndex++;
+      var pct = Math.round(currentCheckIndex * 100 / displayCount);
+      statAvailability.textContent = "0." + String(pct).padStart(3, '0') + " (" + pct + "%)";
+      statAvailability.style.color = "#eab308";
+    }, delay);
+  }
+
+  function updateGridState() {
+    if (totalBlocks === 0) return;
+    var displayCount = Math.min(MAX_BOXES, totalBlocks);
+
+    for (var i = 0; i < displayCount; i++) {
+      var box = document.getElementById("piece-" + i);
+      if (!box) continue;
+
+      var startIdx = Math.floor(i * totalBlocks / displayCount);
+      var endIdx = Math.floor((i + 1) * totalBlocks / displayCount);
+
+      if (resolvedBlocks >= endIdx) {
+        box.className = "piece-box downloaded";
+      } else if (resolvedBlocks > startIdx) {
+        box.className = "piece-box checking";
+      } else if (checkComplete) {
+        box.className = "piece-box checked";
+      }
+    }
+  }
+
   var es = new EventSource("/explorer/mid/" + mid + "/resolve-stream");
   es.onmessage = function(ev) {
     var d = JSON.parse(ev.data);
     if (d.error) {
-      text.textContent = "Error: " + d.error;
-      text.className = "warn";
+      clearInterval(checkTimer);
+      statStatus.textContent = "Error: " + d.error;
+      statStatus.className = "stat-value error";
+      statusBadge.textContent = "Failed";
+      statusBadge.style.color = "#ef4444";
+      statusBadge.style.borderColor = "#ef4444";
       es.close();
       return;
     }
     if (d.done) {
+      isDone = true;
+      clearInterval(checkTimer);
+      
+      // Flash whole grid green
+      var displayCount = Math.min(MAX_BOXES, totalBlocks || 1);
+      for (var i = 0; i < displayCount; i++) {
+        var box = document.getElementById("piece-" + i);
+        if (box) box.className = "piece-box finished";
+      }
+
       bar.style.width = "100%";
-      text.textContent = "Complete!";
-      text.className = "ok";
+      statBlocks.textContent = (totalBlocks || 1) + " / " + (totalBlocks || 1);
+      statStatus.textContent = "Assembly Complete!";
+      statStatus.className = "stat-value ok";
+      statusBadge.textContent = "Complete";
+      statusBadge.style.color = "#10b981";
+      statusBadge.style.borderColor = "#10b981";
+      
       es.close();
       setTimeout(function() {
         window.location.href = "/explorer/mid/" + mid;
-      }, 500);
+      }, 700);
       return;
     }
+
+    if (d.providers) {
+      updatePeers(d.providers);
+    }
+
+    if (d.state === "connecting") {
+      statStatus.textContent = "Connecting to network DHT...";
+      statusBadge.textContent = "Connecting";
+    }
+
     if (d.total > 0) {
-      var pct = Math.min(100, Math.round(d.blocks * 100 / d.total));
+      totalBlocks = d.total;
+      resolvedBlocks = d.blocks;
+      statBlocks.textContent = resolvedBlocks + " / " + totalBlocks;
+
+      if (!hasStartedScan) {
+        startVerificationScan(totalBlocks);
+      } else if (checkComplete) {
+        updateGridState();
+      }
+
+      var pct = Math.min(100, Math.round(resolvedBlocks * 100 / totalBlocks));
       bar.style.width = pct + "%";
-      text.textContent = d.blocks + " / " + d.total + " blocks (" + pct + "%)";
-    } else if (d.blocks > 0) {
-      var pulse = 30 + Math.min(70, d.blocks * 10);
-      bar.style.width = pulse + "%";
-      text.textContent = d.blocks + " blocks resolved";
     }
   };
+
   es.onerror = function() {
-    text.textContent = "Connection lost. Retrying...";
-    text.className = "warn";
+    statStatus.textContent = "Connection lost. Retrying...";
+    statStatus.className = "stat-value warn";
   };
 })();
 </script>

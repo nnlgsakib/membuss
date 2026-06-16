@@ -15,25 +15,26 @@
     </dl>
   </div>
 
-  <h2>Registered Anchor Peers</h2>
-  <table class="data">
-    <thead>
-      <tr><th>Peer ID</th><th>Addresses</th></tr>
-    </thead>
-    <tbody>
-      {{range .Anchors}}
-      <tr>
-        <td class="mono small">{{.PeerID}}</td>
-        <td>
-          <ul class="addrs">
-            {{range .Addrs}}<li class="mono small">{{.}}</li>{{end}}
-          </ul>
-        </td>
-      </tr>
-      {{else}}
-      <tr><td colspan="2" class="muted">No anchors registered (anchor mode may be disabled).</td></tr>
-      {{end}}
-    </tbody>
-  </table>
+  <div class="table-responsive">
+    <table class="data">
+      <thead>
+        <tr><th>Peer ID</th><th>Addresses</th></tr>
+      </thead>
+      <tbody>
+        {{range .Anchors}}
+        <tr>
+          <td class="mono small">{{.PeerID}}</td>
+          <td>
+            <ul class="addrs">
+              {{range .Addrs}}<li class="mono small">{{.}}</li>{{end}}
+            </ul>
+          </td>
+        </tr>
+        {{else}}
+        <tr><td colspan="2" class="muted">No anchors registered (anchor mode may be disabled).</td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
 </section>
 {{end}}

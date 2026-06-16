@@ -225,15 +225,56 @@ func (s *Session) enqueueChildren(ctx context.Context, midStr string, addEnqueue
 		// once the block arrives.
 		return nil
 	}
-	var node membusspb.DAGNode
-	if uerr := proto.Unmarshal(data, &node); uerr != nil || len(node.Links) == 0 {
-		return nil
-	}
-	for _, ls := range node.Links {
-		child, err := mid.Parse(ls)
-		if err != nil {
-			continue
+
+	var childMIDs []mid.MID
+
+	if id.Codec() == mid.CodecMemFS {
+		var node membusspb.MemFSNode
+		if uerr := proto.Unmarshal(data, &node); uerr == nil {
+			switch node.Type {
+			case membusspb.MemFSType_FILE:
+				for _, b := range node.Blocks {
+					if b == nil || len(b.Mid) == 0 {
+						continue
+					}
+					var codec uint64 = mid.CodecMemFS
+					if b.Size > 0 {
+						codec = mid.CodecRaw
+					}
+					child, err := mid.FromMultihash(codec, b.Mid)
+					if err == nil {
+						childMIDs = append(childMIDs, child)
+					}
+				}
+			case membusspb.MemFSType_DIR:
+				for _, e := range node.Entries {
+					if e == nil || len(e.Mid) == 0 {
+						continue
+					}
+					var codec uint64 = mid.CodecMemFS
+					if e.Type == membusspb.MemFSType_RAW {
+						codec = mid.CodecRaw
+					}
+					child, err := mid.FromMultihash(codec, e.Mid)
+					if err == nil {
+						childMIDs = append(childMIDs, child)
+					}
+				}
+			}
 		}
+	} else {
+		var node membusspb.DAGNode
+		if uerr := proto.Unmarshal(data, &node); uerr == nil && len(node.Links) > 0 {
+			for _, ls := range node.Links {
+				child, err := mid.Parse(ls)
+				if err == nil {
+					childMIDs = append(childMIDs, child)
+				}
+			}
+		}
+	}
+
+	for _, child := range childMIDs {
 		if !addEnqueued(child) {
 			continue
 		}

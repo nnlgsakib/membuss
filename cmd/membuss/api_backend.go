@@ -182,9 +182,13 @@ func (a *apiAdapter) memFSBuilder() *memfs.Builder {
 }
 
 // memFSResolver returns a *memfs.Resolver that reads from
-// the daemon's local store.
-func (a *apiAdapter) memFSResolver() *memfs.Resolver {
-	return memfs.NewResolver(a.b.store)
+// the daemon's local store, wrapping it with fetchingBlockstore to resolve missing blocks from the network.
+func (a *apiAdapter) memFSResolver(ctx context.Context) *memfs.Resolver {
+	return memfs.NewResolver(&fetchingBlockstore{
+		Blockstore: a.b.store,
+		b:          a.b,
+		ctx:        ctx,
+	})
 }
 
 // AddFile ingests a file as a MemFS FILE node. When wrapDir
@@ -222,7 +226,7 @@ func (a *apiAdapter) AddFile(ctx context.Context, name string, r io.Reader, wrap
 	_ = a.b.store.Seal(res.MID, true)
 	if a.b.dht != nil {
 		announceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		_ = a.b.dht.Provide(announceCtx, res.MID)
+		provideRecursive(announceCtx, a.b.dht, a.b.store, res.MID)
 		cancel()
 	}
 	return api.AddResult{
@@ -282,7 +286,7 @@ func (a *apiAdapter) AddDirectory(ctx context.Context, parts []api.DirectoryPart
 	_ = a.b.store.Seal(res.MID, true)
 	if a.b.dht != nil {
 		announceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		_ = a.b.dht.Provide(announceCtx, res.MID)
+		provideRecursive(announceCtx, a.b.dht, a.b.store, res.MID)
 		cancel()
 	}
 	return api.AddResult{
@@ -297,7 +301,7 @@ func (a *apiAdapter) Ls(ctx context.Context, m mid.MID) ([]api.LsEntry, error) {
 	if a == nil || a.b == nil || a.b.store == nil {
 		return nil, errors.New("api: no backend")
 	}
-	r := a.memFSResolver()
+	r := a.memFSResolver(ctx)
 	st, err := r.Stat(ctx, m)
 	if err != nil {
 		return nil, err
@@ -322,7 +326,7 @@ func (a *apiAdapter) GetPath(ctx context.Context, m mid.MID, p string) (io.ReadS
 	if a == nil || a.b == nil || a.b.store == nil {
 		return nil, 0, "", errors.New("api: no backend")
 	}
-	r := a.memFSResolver()
+	r := a.memFSResolver(ctx)
 	node, err := r.ResolvePath(ctx, m, p)
 	if err != nil {
 		return nil, 0, "", err
