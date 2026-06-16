@@ -47,3 +47,6 @@ secrets.yaml
 # Local dev artifacts
 /dev/
 
+
+# graphify
+graphify-out/
