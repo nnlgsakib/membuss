@@ -480,6 +480,12 @@ func (a *explorerAdapter) AddDirectory(ctx context.Context, files []explorer.Dir
 		}
 	}
 
+	_ = store.SetObjectInfo(b.store, res.MID, store.ObjectInfo{
+		Name:     dirName,
+		MimeType: "inode/directory",
+		Size:     res.Size,
+	})
+
 	return explorer.ContentInfo{
 		MID:      res.MID.String(),
 		Size:     res.Size,
