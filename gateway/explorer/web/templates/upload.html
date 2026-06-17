@@ -40,6 +40,10 @@
             <div id="file-name-folder" class="file-name-display"></div>
           </div>
         </div>
+        <div class="form-group" style="margin-top: 16px;">
+          <label for="folder-name">Folder Name (Optional)</label>
+          <input type="text" id="folder-name" name="folder_name" placeholder="Leave empty to use uploaded folder name" style="width:100%; padding:10px; background:var(--bg-primary); border:1px solid var(--border-color); color:var(--text-primary); border-radius:6px; font-size:13px; font-family:var(--font-sans); transition:border-color 0.2s;">
+        </div>
         <button class="btn primary" type="submit" style="width:100%; padding: 10px;">Upload Folder</button>
       </form>
     </div>
@@ -78,18 +82,20 @@
   position: fixed;
   bottom: 24px;
   right: 24px;
-  width: 380px;
+  width: 400px;
   max-width: calc(100vw - 48px);
-  background: rgba(18, 21, 28, 0.95);
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+  background: rgba(18, 21, 28, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 16px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.02), 0 20px 50px rgba(0, 0, 0, 0.6);
   z-index: 1000;
   display: none; /* Hidden by default */
   flex-direction: column;
   overflow: hidden;
   font-family: var(--font-sans);
-  transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s;
+  transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.4s;
   opacity: 0;
   transform: translateY(20px);
 }
@@ -101,9 +107,9 @@
 }
 
 .progress-widget-header {
-  background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border-color);
-  padding: 14px 16px;
+  background: rgba(25, 30, 40, 0.4);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 16px 20px;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -112,7 +118,7 @@
 .progress-widget-status {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   font-weight: 600;
   color: var(--text-primary);
   font-size: 14px;
@@ -128,29 +134,30 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: color 0.2s;
+  transition: color 0.2s, transform 0.2s;
 }
 
 .progress-widget-close:hover {
   color: var(--text-error);
+  transform: scale(1.1);
 }
 
 .progress-widget-body {
-  padding: 16px;
+  padding: 20px;
 }
 
 .progress-widget-info {
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
-  margin-bottom: 8px;
+  align-items: center;
+  margin-bottom: 12px;
 }
 
 #upload-progress-percent {
-  font-size: 24px;
+  font-size: 28px;
   font-weight: 700;
   color: var(--accent-cyan);
-  text-shadow: 0 0 10px var(--accent-glow);
+  text-shadow: 0 0 12px var(--accent-glow);
 }
 
 #upload-progress-bytes {
@@ -160,22 +167,24 @@
 }
 
 .progress-files-list-title {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
-  color: var(--text-dimmed);
-  margin-top: 16px;
+  color: var(--text-muted);
+  margin-top: 20px;
   margin-bottom: 8px;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.1em;
+  border-left: 2px solid var(--accent-blue);
+  padding-left: 6px;
 }
 
 .progress-files-list {
-  max-height: 140px;
+  max-height: 156px;
   overflow-y: auto;
   border: 1px solid var(--border-color);
-  background: var(--bg-primary);
-  border-radius: 6px;
-  padding: 4px;
+  background: rgba(10, 12, 16, 0.6);
+  border-radius: 8px;
+  padding: 6px;
 }
 
 /* Custom scrollbar for file list */
@@ -197,9 +206,15 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 6px 8px;
+  padding: 8px 10px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.02);
   font-size: 12px;
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+
+.progress-file-item:hover {
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .progress-file-item:last-child {
@@ -238,6 +253,25 @@
   font-size: 12px;
   flex-shrink: 0;
   margin-left: 8px;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Parent state mapping to symbols */
+.progress-files-list .progress-file-status::before {
+  content: "⏳";
+}
+.progress-files-list.uploading .progress-file-status::before {
+  content: "📤";
+}
+.progress-files-list.sealing .progress-file-status::before {
+  content: "🔗";
+}
+.progress-files-list.done .progress-file-status::before {
+  content: "✅";
+}
+.progress-files-list.error .progress-file-status::before {
+  content: "❌";
 }
 
 /* Spinner animation */
@@ -277,6 +311,21 @@
     transform: scale(1.2);
     opacity: 1;
     box-shadow: 0 0 16px var(--accent-cyan);
+  }
+}
+
+/* Mobile responsive fixes for the widget */
+@media (max-width: 768px) {
+  .progress-widget {
+    bottom: 0;
+    right: 0;
+    width: 100%;
+    max-width: 100%;
+    border-radius: 16px 16px 0 0;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+    box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.5);
   }
 }
 </style>
@@ -320,6 +369,20 @@
       display.textContent = "Selected: " + input.files[0].name;
     } else {
       display.textContent = "Selected: " + input.files.length + " files in folder";
+      
+      // Auto-populate folder name input when folder is selected
+      if (input.id === 'files') {
+        const folderNameInput = document.getElementById('folder-name');
+        if (folderNameInput) {
+          const firstPath = input.files[0].webkitRelativePath || '';
+          const parts = firstPath.split('/');
+          if (parts.length > 1 && parts[0]) {
+            folderNameInput.value = parts[0];
+          } else {
+            folderNameInput.value = "New Folder";
+          }
+        }
+      }
     }
   }
 
@@ -379,11 +442,18 @@
     
     countText.textContent = filesList.length;
     listContainer.innerHTML = '';
+    listContainer.className = 'progress-files-list uploading';
     
     let totalBytes = 0;
     for (let i = 0; i < filesList.length; i++) {
       totalBytes += filesList[i].size;
-      
+    }
+
+    // Cap visible files to prevent DOM performance issues
+    const maxVisible = 25;
+    const totalRender = Math.min(filesList.length, maxVisible);
+    
+    for (let i = 0; i < totalRender; i++) {
       const item = document.createElement('div');
       item.className = 'progress-file-item';
       
@@ -398,9 +468,19 @@
           <span class="progress-file-name" title="${filesList[i].webkitRelativePath || name}">${name}</span>
         </div>
         <span class="progress-file-size">${sizeStr}</span>
-        <span class="progress-file-status" id="file-status-${i}">⏳</span>
+        <span class="progress-file-status"></span>
       `;
       listContainer.appendChild(item);
+    }
+
+    if (filesList.length > maxVisible) {
+      const moreItem = document.createElement('div');
+      moreItem.className = 'progress-file-item';
+      moreItem.style.justifyContent = 'center';
+      moreItem.style.color = 'var(--text-dimmed)';
+      moreItem.style.fontStyle = 'italic';
+      moreItem.textContent = `+ ${filesList.length - maxVisible} more files`;
+      listContainer.appendChild(moreItem);
     }
     
     percentText.textContent = "0%";
@@ -420,14 +500,6 @@
         percentText.textContent = pct + "%";
         bytesText.textContent = `${formatBytes(e.loaded)} / ${formatBytes(e.total)}`;
         fill.style.width = pct + "%";
-        
-        // Mark files as currently uploading
-        for (let i = 0; i < filesList.length; i++) {
-          const fileStatus = document.getElementById(`file-status-${i}`);
-          if (fileStatus && fileStatus.textContent === '⏳') {
-            fileStatus.textContent = '📤';
-          }
-        }
       }
     });
     
@@ -435,13 +507,7 @@
       if (xhr.status >= 200 && xhr.status < 300) {
         percentText.textContent = "100%";
         fill.style.width = "100%";
-        
-        for (let i = 0; i < filesList.length; i++) {
-          const fileStatus = document.getElementById(`file-status-${i}`);
-          if (fileStatus) {
-            fileStatus.textContent = '✅';
-          }
-        }
+        listContainer.className = 'progress-files-list done';
         
         // Redirect to response URL or reload
         if (xhr.responseURL) {
@@ -468,13 +534,7 @@
       
       const statusIconContainer = document.querySelector('.progress-widget-status');
       statusIconContainer.innerHTML = '<span class="pulse-icon"></span><span id="upload-status-text">Sealing & Sharding...</span>';
-      
-      for (let i = 0; i < filesList.length; i++) {
-        const fileStatus = document.getElementById(`file-status-${i}`);
-        if (fileStatus) {
-          fileStatus.textContent = '🔗';
-        }
-      }
+      listContainer.className = 'progress-files-list sealing';
     });
     
     function showError(msg) {
@@ -483,6 +543,7 @@
       percentText.style.color = "var(--text-error)";
       fill.style.background = "var(--text-error)";
       fill.style.boxShadow = "0 0 8px var(--text-error)";
+      listContainer.className = 'progress-files-list error';
       
       alert(msg);
       hideProgressWidget();
@@ -513,6 +574,12 @@
       const file = filesInput.files[i];
       // Keep webkitRelativePath so the backend can build folder trees correctly
       formData.append('files', file, file.webkitRelativePath || file.name);
+    }
+    
+    // Append custom folder name if provided
+    const folderNameInput = document.getElementById('folder-name');
+    if (folderNameInput && folderNameInput.value.trim() !== '') {
+      formData.append('folder_name', folderNameInput.value.trim());
     }
     
     startUpload(formData, filesInput.files);

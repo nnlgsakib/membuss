@@ -3,8 +3,8 @@ import { resolve } from 'path'
 
 export default defineConfig({
   build: {
-    outDir: resolve(__dirname, '../assets'),
-    emptyOutDir: false, // Keep the Go templates (.html) in assets/
+    outDir: resolve(__dirname, 'static'),
+    emptyOutDir: true, // Clean the static output folder before build
     minify: true,
     cssCodeSplit: false,
     rollupOptions: {

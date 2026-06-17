@@ -1,6 +1,14 @@
 {{define "mid_body"}}
 <section class="mid-detail">
-  <h1>MID</h1>
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; flex-wrap:wrap; gap:16px;">
+    <h1 style="margin:0;">MID {{if .Name}}&mdash; {{.Name}}{{end}}</h1>
+    {{if not .NotFound}}
+    <form method="POST" action="/explorer/mid/{{.MID}}/rename" style="display:inline-flex; gap:8px; align-items:center;">
+      <input type="text" name="name" value="{{.Name}}" placeholder="Rename content" required style="padding:6px 12px; background:var(--bg-secondary); border:1px solid var(--border-color); color:var(--text-primary); border-radius:6px; font-size:12px; font-family:var(--font-sans); transition:border-color 0.2s;">
+      <button class="btn" type="submit" style="padding:6px 12px; font-size:12px;">Rename</button>
+    </form>
+    {{end}}
+  </div>
   <div class="mid-string mono">
     <code id="midstr">{{.MID}}</code>
     <button class="copy" data-copy="{{.MID}}">Copy</button>

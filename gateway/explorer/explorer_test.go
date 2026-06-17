@@ -218,7 +218,7 @@ func (b *memBackend) Add(ctx context.Context, name string, r io.Reader) (Content
 	}, nil
 }
 
-func (b *memBackend) AddDirectory(ctx context.Context, files []DirectoryFile) (ContentInfo, error) {
+func (b *memBackend) AddDirectory(ctx context.Context, name string, files []DirectoryFile) (ContentInfo, error) {
 	if len(files) == 0 {
 		return ContentInfo{}, fmt.Errorf("empty directory")
 	}
@@ -228,15 +228,23 @@ func (b *memBackend) AddDirectory(ctx context.Context, files []DirectoryFile) (C
 	}
 	m := mid.FromBytes(data)
 	b.put(m, data)
+	dirName := name
+	if dirName == "" {
+		dirName = "upload"
+	}
 	return ContentInfo{
 		MID:      m.String(),
 		Size:     uint64(len(data)),
 		Blocks:   1,
 		Sealed:   true,
 		Present:  true,
-		Name:     "upload",
+		Name:     dirName,
 		MimeType: "inode/directory",
 	}, nil
+}
+
+func (b *memBackend) Rename(ctx context.Context, m mid.MID, name string) error {
+	return nil
 }
 
 // --- helpers ---

@@ -1,69 +1,89 @@
 {{define "mid-resolving_body"}}
 
-
 <div style="display:none">Resolving content from network</div>
 
 <section class="mid-detail">
-  <div class="torrent-dashboard">
-    <div class="torrent-header">
-      <h1 class="torrent-title">Membuss Session Manager</h1>
-      <span class="torrent-badge" id="status-badge">Connecting</span>
-    </div>
-
-    <div class="torrent-mid-box">
-      <span style="display:inline-block;margin-bottom:6px">Target Identifier (MID):</span>
-      <code>{{.MID}}</code>
-    </div>
-
-    <div class="torrent-grid">
-      <!-- Stats Panel -->
-      <div class="stat-card">
-        <h3>Session Statistics</h3>
-        <div>
-          <div class="stat-row">
-            <span class="stat-label">Session Status</span>
-            <span class="stat-value warn" id="stat-status">Handshaking...</span>
-          </div>
-          <div class="stat-row">
-            <span class="stat-label">DHT Active Peers</span>
-            <span class="stat-value" id="stat-peers">0</span>
-          </div>
-          <div class="stat-row">
-            <span class="stat-label">Resolved / Total Blocks</span>
-            <span class="stat-value" id="stat-blocks">0 / 0</span>
-          </div>
-          <div class="stat-row">
-            <span class="stat-label">Verification Scan</span>
-            <span class="stat-value" id="stat-availability">0.000 (0%)</span>
-          </div>
+  <div class="torrent-dashboard-outer">
+    <div class="torrent-dashboard">
+      <div class="torrent-header">
+        <div class="torrent-title-group">
+          <div class="eyebrow">Active Resolver</div>
+          <h1 class="torrent-title">Membuss Session Manager</h1>
         </div>
-        <div class="progress-bar-container">
-          <div class="progress-bar-fill" id="progress-bar"></div>
+        <span class="torrent-badge" id="status-badge">Connecting</span>
+      </div>
+
+      <div class="torrent-mid-box">
+        <span class="mid-box-label">Target Identifier (MID)</span>
+        <div class="mid-code-wrapper">
+          <code>{{.MID}}</code>
+          <button class="btn-copy-mid copy" data-copy="{{.MID}}" title="Copy MID">
+            <svg style="width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+          </button>
         </div>
       </div>
 
-      <!-- Peer Panel -->
-      <div class="stat-card">
-        <h3>Active DHT Providers</h3>
-        <div class="peer-list" id="peer-list">
-          <div class="muted" style="text-align:center;padding-top:40px;">Waiting for providers...</div>
+      <div class="torrent-grid">
+        <!-- Stats Panel -->
+        <div class="stat-card-outer">
+          <div class="stat-card">
+            <h3>Session Statistics</h3>
+            <div class="stat-rows-container">
+              <div class="stat-row">
+                <span class="stat-label">Session Status</span>
+                <span class="stat-value warn" id="stat-status">Handshaking...</span>
+              </div>
+              <div class="stat-row">
+                <span class="stat-label">DHT Active Peers</span>
+                <span class="stat-value" id="stat-peers">0</span>
+              </div>
+              <div class="stat-row">
+                <span class="stat-label">Resolved / Total Blocks</span>
+                <span class="stat-value" id="stat-blocks">0 / 0</span>
+              </div>
+              <div class="stat-row">
+                <span class="stat-label">Verification Scan</span>
+                <span class="stat-value" id="stat-availability">0.000 (0%)</span>
+              </div>
+            </div>
+            <div class="progress-bar-wrapper">
+              <div class="progress-bar-container">
+                <div class="progress-bar-fill" id="progress-bar"></div>
+              </div>
+            </div>
+          </div>
         </div>
-      </div>
-    </div>
 
-    <!-- Piece Map Panel -->
-    <div class="piece-map-container">
-      <div class="piece-map-header">
-        <h3 class="piece-map-title">Session Piece Map</h3>
-        <div class="piece-map-legend">
-          <div class="legend-item"><span class="legend-dot queued"></span>Queued</div>
-          <div class="legend-item"><span class="legend-dot checking"></span>Scanning</div>
-          <div class="legend-item"><span class="legend-dot available"></span>Checked</div>
-          <div class="legend-item"><span class="legend-dot downloaded"></span>Downloaded</div>
+        <!-- Peer Panel -->
+        <div class="stat-card-outer">
+          <div class="stat-card">
+            <h3>Active DHT Providers</h3>
+            <div class="peer-list" id="peer-list">
+              <div class="muted-loading">
+                <span class="spinner-icon"></span>
+                <span>Waiting for providers...</span>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
-      <div class="piece-grid" id="piece-grid">
-        <!-- JS builds blocks here -->
+
+      <!-- Piece Map Panel -->
+      <div class="piece-map-outer">
+        <div class="piece-map-container">
+          <div class="piece-map-header">
+            <h3 class="piece-map-title">Session Piece Map</h3>
+            <div class="piece-map-legend">
+              <div class="legend-item"><span class="legend-dot queued"></span>Queued</div>
+              <div class="legend-item"><span class="legend-dot checking"></span>Scanning</div>
+              <div class="legend-item"><span class="legend-dot available"></span>Checked</div>
+              <div class="legend-item"><span class="legend-dot downloaded"></span>Downloaded</div>
+            </div>
+          </div>
+          <div class="piece-grid" id="piece-grid">
+            <!-- JS builds blocks here -->
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -102,9 +122,34 @@
   }
   initPlaceholderGrid();
 
+  // Copy target MID handler
+  var copyBtn = document.querySelector(".btn-copy-mid");
+  if (copyBtn) {
+    copyBtn.addEventListener("click", function() {
+      var text = copyBtn.getAttribute("data-copy");
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function() {
+          var originalContent = copyBtn.innerHTML;
+          copyBtn.textContent = "Copied";
+          copyBtn.style.color = "var(--accent-cyan)";
+          copyBtn.style.width = "auto";
+          copyBtn.style.padding = "0 8px";
+          copyBtn.style.fontSize = "11px";
+          setTimeout(function() {
+            copyBtn.innerHTML = originalContent;
+            copyBtn.style.color = "";
+            copyBtn.style.width = "32px";
+            copyBtn.style.padding = "";
+            copyBtn.style.fontSize = "";
+          }, 1200);
+        });
+      }
+    });
+  }
+
   function updatePeers(provs) {
     if (!provs || provs.length === 0) {
-      peerList.innerHTML = '<div class="muted" style="text-align:center;padding-top:40px;">No active providers found yet</div>';
+      peerList.innerHTML = '<div class="muted-loading"><span>No active providers found yet</span></div>';
       statPeers.textContent = "0";
       return;
     }
@@ -113,8 +158,35 @@
     provs.forEach(function(p) {
       var div = document.createElement("div");
       div.className = "peer-item";
-      div.textContent = p;
-      div.title = p;
+      div.title = "Click to copy Peer ID: " + p;
+      
+      var displayId = p;
+      if (p.length > 20) {
+        displayId = p.slice(0, 8) + "..." + p.slice(-8);
+      }
+      
+      var spanId = document.createElement("span");
+      spanId.textContent = displayId;
+      div.appendChild(spanId);
+      
+      var spanCopy = document.createElement("span");
+      spanCopy.className = "peer-copy-indicator";
+      spanCopy.textContent = "Copy";
+      div.appendChild(spanCopy);
+      
+      div.addEventListener("click", function() {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(p).then(function() {
+            spanCopy.textContent = "Copied";
+            spanCopy.style.color = "var(--accent-cyan)";
+            setTimeout(function() {
+              spanCopy.textContent = "Copy";
+              spanCopy.style.color = "";
+            }, 1000);
+          });
+        }
+      });
+      
       peerList.appendChild(div);
     });
   }
@@ -134,8 +206,8 @@
     }
 
     statusBadge.textContent = "Verifying";
-    statusBadge.style.color = "#eab308";
-    statusBadge.style.borderColor = "#eab308";
+    statusBadge.style.color = "#fbbf24";
+    statusBadge.style.borderColor = "#fbbf24";
     statStatus.textContent = "Checking network piece availability...";
     statStatus.className = "stat-value warn";
 
@@ -155,8 +227,8 @@
         statStatus.textContent = "Downloading pieces...";
         statStatus.className = "stat-value ok";
         statusBadge.textContent = "Downloading";
-        statusBadge.style.color = "#60a5fa";
-        statusBadge.style.borderColor = "#334155";
+        statusBadge.style.color = "#3b82f6";
+        statusBadge.style.borderColor = "#3b82f6";
         updateGridState();
         return;
       }
@@ -174,7 +246,7 @@
       currentCheckIndex++;
       var pct = Math.round(currentCheckIndex * 100 / displayCount);
       statAvailability.textContent = "0." + String(pct).padStart(3, '0') + " (" + pct + "%)";
-      statAvailability.style.color = "#eab308";
+      statAvailability.style.color = "#fbbf24";
     }, delay);
   }
 
@@ -207,8 +279,8 @@
       statStatus.textContent = "Error: " + d.error;
       statStatus.className = "stat-value error";
       statusBadge.textContent = "Failed";
-      statusBadge.style.color = "#ef4444";
-      statusBadge.style.borderColor = "#ef4444";
+      statusBadge.style.color = "#f87171";
+      statusBadge.style.borderColor = "#f87171";
       es.close();
       return;
     }

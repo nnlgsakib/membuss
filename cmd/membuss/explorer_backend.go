@@ -419,7 +419,7 @@ func (a *explorerAdapter) Add(ctx context.Context, name string, r io.Reader) (ex
 }
 
 // AddDirectory ingests a directory as MemFS from a set of files with relative paths.
-func (a *explorerAdapter) AddDirectory(ctx context.Context, files []explorer.DirectoryFile) (explorer.ContentInfo, error) {
+func (a *explorerAdapter) AddDirectory(ctx context.Context, name string, files []explorer.DirectoryFile) (explorer.ContentInfo, error) {
 	b := a.b
 	if b == nil || b.store == nil {
 		return explorer.ContentInfo{}, errors.New("explorer: no backend")
@@ -471,12 +471,15 @@ func (a *explorerAdapter) AddDirectory(ctx context.Context, files []explorer.Dir
 		cancel()
 	}
 
-	// Use first file's first directory segment as the directory name.
-	dirName := "upload"
-	if len(files) > 0 && files[0].Path != "" {
-		parts := strings.Split(strings.ReplaceAll(files[0].Path, "\\", "/"), "/")
-		if len(parts) > 0 && parts[0] != "" {
-			dirName = parts[0]
+	// Use uploader-supplied folder name, or fallback.
+	dirName := name
+	if dirName == "" {
+		dirName = "upload"
+		if len(files) > 0 && files[0].Path != "" {
+			parts := strings.Split(strings.ReplaceAll(files[0].Path, "\\", "/"), "/")
+			if len(parts) > 0 && parts[0] != "" {
+				dirName = parts[0]
+			}
 		}
 	}
 
@@ -495,6 +498,19 @@ func (a *explorerAdapter) AddDirectory(ctx context.Context, files []explorer.Dir
 		Name:     dirName,
 		MimeType: "inode/directory",
 	}, nil
+}
+
+func (a *explorerAdapter) Rename(ctx context.Context, m mid.MID, name string) error {
+	b := a.b
+	if b == nil || b.store == nil {
+		return errors.New("explorer: no backend")
+	}
+	info, err := store.GetObjectInfo(b.store, m)
+	if err != nil {
+		return err
+	}
+	info.Name = name
+	return store.SetObjectInfo(b.store, m, info)
 }
 
 // --- Phase 17: MemFS methods on explorerAdapter ---

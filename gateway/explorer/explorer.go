@@ -29,7 +29,7 @@ import (
 	"github.com/nnlgsakib/membuss/core/mid"
 )
 
-//go:embed assets/*.html assets/*.css assets/*.js
+//go:embed web/templates/*.html web/static/*.css web/static/*.js
 var assetFS embed.FS
 
 // ResolveStatus is the outcome of the explorer's "fetch
@@ -164,7 +164,9 @@ type Backend interface {
 	// filename (used for Content-Disposition on download).
 	Add(ctx context.Context, name string, r io.Reader) (ContentInfo, error)
 	// AddDirectory ingests a directory as MemFS from a set of files with relative paths.
-	AddDirectory(ctx context.Context, files []DirectoryFile) (ContentInfo, error)
+	AddDirectory(ctx context.Context, name string, files []DirectoryFile) (ContentInfo, error)
+	// Rename updates the name metadata of a MID.
+	Rename(ctx context.Context, m mid.MID, name string) error
 	// Peers returns the local PEX peer table.
 	Peers(ctx context.Context, limit int) ([]PeerInfo, error)
 	// SealedMIDs lists all sealed MIDs in the local store.
@@ -277,7 +279,7 @@ func New(cfg Config) (*Explorer, error) {
 	funcs := template.FuncMap{
 		"humanBytes": humanBytes,
 	}
-	tpl, err := template.New("explorer").Funcs(funcs).ParseFS(assetFS, "assets/*.html")
+	tpl, err := template.New("explorer").Funcs(funcs).ParseFS(assetFS, "web/templates/*.html")
 	if err != nil {
 		return nil, fmt.Errorf("explorer: parse templates: %w", err)
 	}
@@ -311,6 +313,7 @@ func (e *Explorer) buildRouter() http.Handler {
 	r.Get("/mid/{mid}/resolve-stream", e.handleResolveStream)
 	r.Post("/mid/{mid}/seal", e.handleSeal)
 	r.Post("/mid/{mid}/unseal", e.handleUnseal)
+	r.Post("/mid/{mid}/rename", e.handleRename)
 	r.Get("/peers", e.handlePeers)
 	r.Get("/anchors", e.handleAnchors)
 	r.Get("/node", e.handleNode)
@@ -803,7 +806,8 @@ func (e *Explorer) handleUpload(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
-		res, err := b.AddDirectory(ctx, dirFiles)
+		folderName := r.FormValue("folder_name")
+		res, err := b.AddDirectory(ctx, folderName, dirFiles)
 		if err != nil {
 			http.Error(w, "add directory: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -828,12 +832,35 @@ func (e *Explorer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/explorer/mid/"+res.MID, http.StatusSeeOther)
 }
 
+func (e *Explorer) handleRename(w http.ResponseWriter, r *http.Request) {
+	midStr := chi.URLParam(r, "mid")
+	root, err := mid.Parse(midStr)
+	if err != nil {
+		http.Error(w, "bad mid: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	newName := strings.TrimSpace(r.FormValue("name"))
+	if newName == "" {
+		http.Error(w, "empty name", http.StatusBadRequest)
+		return
+	}
+	if err := e.cfg.Backend.Rename(r.Context(), root, newName); err != nil {
+		http.Error(w, "rename: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/explorer/mid/"+midStr, http.StatusSeeOther)
+}
+
 // handleStatic serves an embedded asset file.
 func (e *Explorer) handleStatic(name, contentType string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Cache-Control", "public, max-age=300")
-		data, err := assetFS.ReadFile(path.Join("assets", name))
+		data, err := assetFS.ReadFile(path.Join("web", "static", name))
 		if err != nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
