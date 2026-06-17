@@ -693,6 +693,7 @@ type anchorsData struct {
 	Title      string
 	AnchorInfo AnchorInfo
 	Anchors    []AnchorRow
+	AnchorMode bool
 }
 
 func (e *Explorer) handleAnchors(w http.ResponseWriter, r *http.Request) {
@@ -707,6 +708,7 @@ func (e *Explorer) handleAnchors(w http.ResponseWriter, r *http.Request) {
 		Title:      "Anchors",
 		AnchorInfo: b.AnchorStatus(ctx),
 		Anchors:    rows,
+		AnchorMode: b.AnchorMode(ctx),
 	})
 }
 

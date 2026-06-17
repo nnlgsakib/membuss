@@ -31,7 +31,15 @@
           </td>
         </tr>
         {{else}}
-        <tr><td colspan="2" class="muted">No anchors registered (anchor mode may be disabled).</td></tr>
+        <tr>
+          <td colspan="2" class="muted">
+            {{if .AnchorMode}}
+            No other anchors registered.
+            {{else}}
+            No anchors registered (anchor mode is disabled).
+            {{end}}
+          </td>
+        </tr>
         {{end}}
       </tbody>
     </table>
