@@ -80,6 +80,7 @@ api_addr: 127.0.0.1:0
 grpc_addr: %s
 anchor_mode: false
 reprovide_interval: 12h
+nat_wait_seconds: 0
 `, filepath.ToSlash(tmp), addr))
 	cfgPath := filepath.Join(tmp, "config.yaml")
 	if err := os.WriteFile(cfgPath, cfg, 0644); err != nil {

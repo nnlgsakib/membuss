@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,11 +14,15 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/nnlgsakib/membuss/core/dag"
+	"github.com/nnlgsakib/membuss/core/memfs"
 	"github.com/nnlgsakib/membuss/core/mid"
 	"github.com/nnlgsakib/membuss/core/store"
 	"github.com/nnlgsakib/membuss/net/memex"
 	memgate "github.com/nnlgsakib/membuss/gateway/memgate"
+	membusspb "github.com/nnlgsakib/membuss/proto"
 )
 
 var _ memgate.Backend = (*memgateAdapter)(nil)
@@ -62,31 +67,70 @@ func (a *memgateAdapter) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser,
 	if !has {
 		return nil, memgate.ContentInfo{}, errMGNotFound
 	}
-	blocks, size, err := countDAG(b.store, m)
-	if err != nil {
-		return nil, memgate.ContentInfo{}, err
+	var (
+		rc     io.ReadCloser
+		size   uint64
+		blocks uint64
+		nodeMime string
+	)
+	if m.Codec() == mid.CodecMemFS {
+		mr := memfs.NewResolver(b.store)
+		node, err := mr.Resolve(ctx, m)
+		if err != nil {
+			return nil, memgate.ContentInfo{}, err
+		}
+		if node.IsDir() {
+			raw, err := b.store.Get(m)
+			if err != nil {
+				return nil, memgate.ContentInfo{}, err
+			}
+			size = uint64(len(raw))
+			blocks = 1
+			rc = io.NopCloser(bytes.NewReader(raw))
+			nodeMime = "inode/directory"
+		} else {
+			size = node.TotalSize()
+			blocks = uint64(1 + node.BlockCount())
+			openRc, err := mr.Open(ctx, m)
+			if err != nil {
+				return nil, memgate.ContentInfo{}, err
+			}
+			rc = openRc
+			nodeMime = node.MimeType()
+		}
+	} else {
+		var err error
+		blocks, size, err = countDAG(b.store, m)
+		if err != nil {
+			return nil, memgate.ContentInfo{}, err
+		}
+		resolver := dag.NewResolver(b.store)
+		rawRc, err := resolver.Resolve(m, nil)
+		if err != nil {
+			return nil, memgate.ContentInfo{}, err
+		}
+		rc = io.NopCloser(rawRc)
 	}
 	sealed, _ := b.store.IsSealed(m)
-	resolver := dag.NewResolver(b.store)
-	rc, err := resolver.Resolve(m, nil)
-	if err != nil {
-		return nil, memgate.ContentInfo{}, err
-	}
 	// Phase 19: surface the uploader-supplied name and
 	// MIME type so the gateway can serve with the right
 	// Content-Type and Content-Disposition.
 	oi, _ := store.GetObjectInfo(b.store, m)
-	return io.NopCloser(rc), memgate.ContentInfo{
+	mimeType := oi.MimeType
+	if mimeType == "" && m.Codec() == mid.CodecMemFS {
+		mimeType = nodeMime
+	}
+	return rc, memgate.ContentInfo{
 		MID:        m.String(),
 		Size:       size,
 		Blocks:     blocks,
 		Sealed:     sealed,
 		Name:       oi.Name,
-		MimeType:   oi.MimeType,
+		MimeType:   mimeType,
 		// ContentType is the legacy / extension-based
 		// fallback. The handleGet handler prefers
 		// MimeType when both are set.
-		ContentType: detectContentType(m.String(), nil, oi.MimeType),
+		ContentType: detectContentType(m.String(), nil, mimeType),
 	}, nil
 }
 
@@ -118,9 +162,43 @@ func (a *memgateAdapter) DAGNodeJSON(ctx context.Context, m mid.MID) ([]byte, er
 	if err != nil {
 		return nil, err
 	}
-	// Try to decode as a DAGNode. Leaf nodes are raw bytes
-	// and have no link list; the JSON view reflects that.
-	links, _ := parseDAGLinks(raw)
+	var links []string
+	if m.Codec() == mid.CodecMemFS {
+		var node membusspb.MemFSNode
+		if uerr := proto.Unmarshal(raw, &node); uerr == nil {
+			switch node.Type {
+			case membusspb.MemFSType_FILE:
+				for _, blk := range node.Blocks {
+					if blk != nil && len(blk.Mid) > 0 {
+						codec := mid.CodecMemFS
+						if blk.Size > 0 {
+							codec = mid.CodecRaw
+						}
+						if child, err := mid.FromMultihash(uint64(codec), blk.Mid); err == nil {
+							links = append(links, child.String())
+						}
+					}
+				}
+			case membusspb.MemFSType_DIR:
+				for _, entry := range node.Entries {
+					if entry != nil && len(entry.Mid) > 0 {
+						codec := mid.CodecMemFS
+						if entry.Type == membusspb.MemFSType_RAW {
+							codec = mid.CodecRaw
+						}
+						if child, err := mid.FromMultihash(uint64(codec), entry.Mid); err == nil {
+							links = append(links, child.String())
+						}
+					}
+				}
+			}
+		}
+	} else {
+		var node membusspb.DAGNode
+		if uerr := proto.Unmarshal(raw, &node); uerr == nil {
+			links = node.Links
+		}
+	}
 	size := uint64(len(raw))
 	view := map[string]any{
 		"mid":   m.String(),
@@ -140,22 +218,47 @@ func (a *memgateAdapter) Stat(ctx context.Context, m mid.MID) (memgate.ContentIn
 	if !has {
 		return memgate.ContentInfo{}, errMGNotFound
 	}
-	blocks, size, err := countDAG(b.store, m)
-	if err != nil {
-		return memgate.ContentInfo{}, err
+	var (
+		blocks uint64
+		size   uint64
+		nodeMime string
+	)
+	if m.Codec() == mid.CodecMemFS {
+		mr := memfs.NewResolver(b.store)
+		node, err := mr.Resolve(ctx, m)
+		if err != nil {
+			return memgate.ContentInfo{}, err
+		}
+		size = node.TotalSize()
+		blocks = uint64(1 + node.BlockCount())
+		if node.IsDir() {
+			nodeMime = "inode/directory"
+		} else {
+			nodeMime = node.MimeType()
+		}
+	} else {
+		var err error
+		blocks, size, err = countDAG(b.store, m)
+		if err != nil {
+			return memgate.ContentInfo{}, err
+		}
 	}
 	sealed, _ := b.store.IsSealed(m)
 	// Phase 19: surface Name + MimeType from the
 	// per-MID ObjectInfo (see core/store.ObjectInfo).
 	oi, _ := store.GetObjectInfo(b.store, m)
+	mimeType := oi.MimeType
+	if mimeType == "" && m.Codec() == mid.CodecMemFS {
+		mimeType = nodeMime
+	}
 	return memgate.ContentInfo{
 		MID:         m.String(),
 		Size:        size,
 		Blocks:      blocks,
 		Sealed:      sealed,
 		Name:        oi.Name,
-		MimeType:    oi.MimeType,
-		ContentType: detectContentType(m.String(), nil, oi.MimeType),
+		MimeType:    mimeType,
+		ContentType: detectContentType(m.String(), nil, mimeType),
 	}, nil
 }
 
@@ -165,6 +268,98 @@ func (a *memgateAdapter) Ping(ctx context.Context) error {
 		return errors.New("no store")
 	}
 	return nil
+}
+
+// --- Phase 17: MemFS methods on memgateAdapter ---
+
+// memfsResolver returns a *memfs.Resolver that reads from
+// the daemon's local store, wrapping it with fetchingBlockstore to resolve missing blocks from the network.
+func (a *memgateAdapter) memfsResolver(ctx context.Context) *memfs.Resolver {
+	return memfs.NewResolver(&fetchingBlockstore{
+		Blockstore: a.b.store,
+		b:          a.b,
+		ctx:        ctx,
+	})
+}
+
+// MemFSInfo returns the metadata for a MemFS node. Returns
+// errMGNotFound when the node is not a MemFS node or is
+// absent from the local store.
+func (a *memgateAdapter) MemFSInfo(ctx context.Context, m mid.MID) (memgate.MemFSInfo, error) {
+	r := a.memfsResolver(ctx)
+	st, err := r.Stat(ctx, m)
+	if err != nil {
+		return memgate.MemFSInfo{}, errMGNotFound
+	}
+	return memgate.MemFSInfo{
+		MID:   m.String(),
+		Type:  memFSTypeString(st.Type),
+		Size:  st.Size,
+		Mode:  uint32(st.Mode),
+		MTime: st.MTime.Unix(),
+		Mime:  st.MimeType,
+	}, nil
+}
+
+// MemFSPathGet returns a streaming reader for a file at
+// m/path. The returned io.ReadSeekCloser streams the
+// resolved file content; the size and MIME type are
+// returned alongside.
+func (a *memgateAdapter) MemFSPathGet(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error) {
+	r := a.memfsResolver(ctx)
+	node, err := r.ResolvePath(ctx, m, path)
+	if err != nil {
+		return nil, 0, "", errMGNotFound
+	}
+	if !node.IsFile() {
+		return nil, 0, "", errMGNotFound
+	}
+	// Resolve the file's own MID so the Open call works
+	// even if the root is a deep directory.
+	fileMID := node.MustMID()
+	rc, err := r.Open(ctx, fileMID)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	return rc, node.TotalSize(), node.MimeType(), nil
+}
+
+// MemFSList returns the entries of a MemFS directory.
+func (a *memgateAdapter) MemFSList(ctx context.Context, m mid.MID) ([]memgate.MemFSEntry, error) {
+	r := a.memfsResolver(ctx)
+	st, err := r.Stat(ctx, m)
+	if err != nil {
+		return nil, errMGNotFound
+	}
+	if st.Type != memfs.TypeDir {
+		return nil, errMGNotFound
+	}
+	out := make([]memgate.MemFSEntry, 0, len(st.Entries))
+	for _, e := range st.Entries {
+		out = append(out, memgate.MemFSEntry{
+			Name: e.Name,
+			MID:  e.Mid.String(),
+			Type: memFSTypeString(e.Type),
+			Size: e.Size,
+		})
+	}
+	return out, nil
+}
+
+// memFSTypeString returns a short label for a MemFSType.
+func memFSTypeString(t memfs.MemFSType) string {
+	switch t {
+	case memfs.TypeFile:
+		return "file"
+	case memfs.TypeDir:
+		return "dir"
+	case memfs.TypeSymlink:
+		return "symlink"
+	case memfs.TypeMetadata:
+		return "metadata"
+	default:
+		return "raw"
+	}
 }
 
 var errMGNotFound = errors.New("not found")

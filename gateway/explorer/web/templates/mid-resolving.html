@@ -1,0 +1,344 @@
+{{define "mid-resolving_body"}}
+
+<div style="display:none">Resolving content from network</div>
+
+<section class="mid-detail">
+  <div class="torrent-dashboard-outer">
+    <div class="torrent-dashboard">
+      <div class="torrent-header">
+        <div class="torrent-title-group">
+          <div class="eyebrow">Active Resolver</div>
+          <h1 class="torrent-title">Membuss Session Manager</h1>
+        </div>
+        <span class="torrent-badge" id="status-badge">Connecting</span>
+      </div>
+
+      <div class="torrent-mid-box">
+        <span class="mid-box-label">Target Identifier (MID)</span>
+        <div class="mid-code-wrapper">
+          <code>{{.MID}}</code>
+          <button class="btn-copy-mid copy" data-copy="{{.MID}}" title="Copy MID">
+            <svg style="width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="torrent-grid">
+        <!-- Stats Panel -->
+        <div class="stat-card-outer">
+          <div class="stat-card">
+            <h3>Session Statistics</h3>
+            <div class="stat-rows-container">
+              <div class="stat-row">
+                <span class="stat-label">Session Status</span>
+                <span class="stat-value warn" id="stat-status">Handshaking...</span>
+              </div>
+              <div class="stat-row">
+                <span class="stat-label">DHT Active Peers</span>
+                <span class="stat-value" id="stat-peers">0</span>
+              </div>
+              <div class="stat-row">
+                <span class="stat-label">Resolved / Total Blocks</span>
+                <span class="stat-value" id="stat-blocks">0 / 0</span>
+              </div>
+              <div class="stat-row">
+                <span class="stat-label">Verification Scan</span>
+                <span class="stat-value" id="stat-availability">0.000 (0%)</span>
+              </div>
+            </div>
+            <div class="progress-bar-wrapper">
+              <div class="progress-bar-container">
+                <div class="progress-bar-fill" id="progress-bar"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Peer Panel -->
+        <div class="stat-card-outer">
+          <div class="stat-card">
+            <h3>Active DHT Providers</h3>
+            <div class="peer-list" id="peer-list">
+              <div class="muted-loading">
+                <span class="spinner-icon"></span>
+                <span>Waiting for providers...</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Piece Map Panel -->
+      <div class="piece-map-outer">
+        <div class="piece-map-container">
+          <div class="piece-map-header">
+            <h3 class="piece-map-title">Session Piece Map</h3>
+            <div class="piece-map-legend">
+              <div class="legend-item"><span class="legend-dot queued"></span>Queued</div>
+              <div class="legend-item"><span class="legend-dot checking"></span>Scanning</div>
+              <div class="legend-item"><span class="legend-dot available"></span>Checked</div>
+              <div class="legend-item"><span class="legend-dot downloaded"></span>Downloaded</div>
+            </div>
+          </div>
+          <div class="piece-grid" id="piece-grid">
+            <!-- JS builds blocks here -->
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+(function() {
+  var mid = {{.MID}};
+  var bar = document.getElementById("progress-bar");
+  var statusBadge = document.getElementById("status-badge");
+  var statStatus = document.getElementById("stat-status");
+  var statPeers = document.getElementById("stat-peers");
+  var statBlocks = document.getElementById("stat-blocks");
+  var statAvailability = document.getElementById("stat-availability");
+  var peerList = document.getElementById("peer-list");
+  var pieceGrid = document.getElementById("piece-grid");
+
+  // State
+  var totalBlocks = 0;
+  var resolvedBlocks = 0;
+  var currentCheckIndex = 0;
+  var checkTimer = null;
+  var checkComplete = false;
+  var isDone = false;
+  var hasStartedScan = false;
+  var MAX_BOXES = 160; // Render up to 160 squares for a clean grid
+
+  // Initialize empty piece map placeholder
+  function initPlaceholderGrid() {
+    pieceGrid.innerHTML = "";
+    for (var i = 0; i < 40; i++) {
+      var box = document.createElement("div");
+      box.className = "piece-box";
+      pieceGrid.appendChild(box);
+    }
+  }
+  initPlaceholderGrid();
+
+  // Copy target MID handler
+  var copyBtn = document.querySelector(".btn-copy-mid");
+  if (copyBtn) {
+    copyBtn.addEventListener("click", function() {
+      var text = copyBtn.getAttribute("data-copy");
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function() {
+          var originalContent = copyBtn.innerHTML;
+          copyBtn.textContent = "Copied";
+          copyBtn.style.color = "var(--accent-cyan)";
+          copyBtn.style.width = "auto";
+          copyBtn.style.padding = "0 8px";
+          copyBtn.style.fontSize = "11px";
+          setTimeout(function() {
+            copyBtn.innerHTML = originalContent;
+            copyBtn.style.color = "";
+            copyBtn.style.width = "32px";
+            copyBtn.style.padding = "";
+            copyBtn.style.fontSize = "";
+          }, 1200);
+        });
+      }
+    });
+  }
+
+  function updatePeers(provs) {
+    if (!provs || provs.length === 0) {
+      peerList.innerHTML = '<div class="muted-loading"><span>No active providers found yet</span></div>';
+      statPeers.textContent = "0";
+      return;
+    }
+    statPeers.textContent = provs.length;
+    peerList.innerHTML = "";
+    provs.forEach(function(p) {
+      var div = document.createElement("div");
+      div.className = "peer-item";
+      div.title = "Click to copy Peer ID: " + p;
+      
+      var displayId = p;
+      if (p.length > 20) {
+        displayId = p.slice(0, 8) + "..." + p.slice(-8);
+      }
+      
+      var spanId = document.createElement("span");
+      spanId.textContent = displayId;
+      div.appendChild(spanId);
+      
+      var spanCopy = document.createElement("span");
+      spanCopy.className = "peer-copy-indicator";
+      spanCopy.textContent = "Copy";
+      div.appendChild(spanCopy);
+      
+      div.addEventListener("click", function() {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(p).then(function() {
+            spanCopy.textContent = "Copied";
+            spanCopy.style.color = "var(--accent-cyan)";
+            setTimeout(function() {
+              spanCopy.textContent = "Copy";
+              spanCopy.style.color = "";
+            }, 1000);
+          });
+        }
+      });
+      
+      peerList.appendChild(div);
+    });
+  }
+
+  function startVerificationScan(total) {
+    if (hasStartedScan) return;
+    hasStartedScan = true;
+
+    // Reset grid with actual total count
+    pieceGrid.innerHTML = "";
+    var displayCount = Math.min(MAX_BOXES, total);
+    for (var i = 0; i < displayCount; i++) {
+      var box = document.createElement("div");
+      box.className = "piece-box";
+      box.id = "piece-" + i;
+      pieceGrid.appendChild(box);
+    }
+
+    statusBadge.textContent = "Verifying";
+    statusBadge.style.color = "#fbbf24";
+    statusBadge.style.borderColor = "#fbbf24";
+    statStatus.textContent = "Checking network piece availability...";
+    statStatus.className = "stat-value warn";
+
+    // Fast sequential check animation
+    currentCheckIndex = 0;
+    var delay = Math.max(5, Math.min(40, Math.floor(600 / displayCount)));
+    checkTimer = setInterval(function() {
+      if (isDone) {
+        clearInterval(checkTimer);
+        return;
+      }
+      if (currentCheckIndex >= displayCount) {
+        clearInterval(checkTimer);
+        checkComplete = true;
+        statAvailability.textContent = "1.000 (100% available)";
+        statAvailability.style.color = "#10b981";
+        statStatus.textContent = "Downloading pieces...";
+        statStatus.className = "stat-value ok";
+        statusBadge.textContent = "Downloading";
+        statusBadge.style.color = "#3b82f6";
+        statusBadge.style.borderColor = "#3b82f6";
+        updateGridState();
+        return;
+      }
+
+      var box = document.getElementById("piece-" + currentCheckIndex);
+      if (box) {
+        box.className = "piece-box checking";
+        (function(b) {
+          setTimeout(function() {
+            if (!isDone) b.className = "piece-box checked";
+          }, delay * 2);
+        })(box);
+      }
+
+      currentCheckIndex++;
+      var pct = Math.round(currentCheckIndex * 100 / displayCount);
+      statAvailability.textContent = "0." + String(pct).padStart(3, '0') + " (" + pct + "%)";
+      statAvailability.style.color = "#fbbf24";
+    }, delay);
+  }
+
+  function updateGridState() {
+    if (totalBlocks === 0) return;
+    var displayCount = Math.min(MAX_BOXES, totalBlocks);
+
+    for (var i = 0; i < displayCount; i++) {
+      var box = document.getElementById("piece-" + i);
+      if (!box) continue;
+
+      var startIdx = Math.floor(i * totalBlocks / displayCount);
+      var endIdx = Math.floor((i + 1) * totalBlocks / displayCount);
+
+      if (resolvedBlocks >= endIdx) {
+        box.className = "piece-box downloaded";
+      } else if (resolvedBlocks > startIdx) {
+        box.className = "piece-box checking";
+      } else if (checkComplete) {
+        box.className = "piece-box checked";
+      }
+    }
+  }
+
+  var es = new EventSource("/explorer/mid/" + mid + "/resolve-stream");
+  es.onmessage = function(ev) {
+    var d = JSON.parse(ev.data);
+    if (d.error) {
+      clearInterval(checkTimer);
+      statStatus.textContent = "Error: " + d.error;
+      statStatus.className = "stat-value error";
+      statusBadge.textContent = "Failed";
+      statusBadge.style.color = "#f87171";
+      statusBadge.style.borderColor = "#f87171";
+      es.close();
+      return;
+    }
+    if (d.done) {
+      isDone = true;
+      clearInterval(checkTimer);
+      
+      // Flash whole grid green
+      var displayCount = Math.min(MAX_BOXES, totalBlocks || 1);
+      for (var i = 0; i < displayCount; i++) {
+        var box = document.getElementById("piece-" + i);
+        if (box) box.className = "piece-box finished";
+      }
+
+      bar.style.width = "100%";
+      statBlocks.textContent = (totalBlocks || 1) + " / " + (totalBlocks || 1);
+      statStatus.textContent = "Assembly Complete!";
+      statStatus.className = "stat-value ok";
+      statusBadge.textContent = "Complete";
+      statusBadge.style.color = "#10b981";
+      statusBadge.style.borderColor = "#10b981";
+      
+      es.close();
+      setTimeout(function() {
+        window.location.href = "/explorer/mid/" + mid;
+      }, 700);
+      return;
+    }
+
+    if (d.providers) {
+      updatePeers(d.providers);
+    }
+
+    if (d.state === "connecting") {
+      statStatus.textContent = "Connecting to network DHT...";
+      statusBadge.textContent = "Connecting";
+    }
+
+    if (d.total > 0) {
+      totalBlocks = d.total;
+      resolvedBlocks = d.blocks;
+      statBlocks.textContent = resolvedBlocks + " / " + totalBlocks;
+
+      if (!hasStartedScan) {
+        startVerificationScan(totalBlocks);
+      } else if (checkComplete) {
+        updateGridState();
+      }
+
+      var pct = Math.min(100, Math.round(resolvedBlocks * 100 / totalBlocks));
+      bar.style.width = pct + "%";
+    }
+  };
+
+  es.onerror = function() {
+    statStatus.textContent = "Connection lost. Retrying...";
+    statStatus.className = "stat-value warn";
+  };
+})();
+</script>
+{{end}}

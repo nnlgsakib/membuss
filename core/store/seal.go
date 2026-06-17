@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"time"
@@ -38,14 +39,22 @@ func (s *MemStore) Seal(root mid.MID, recursive bool) error {
 		return errors.New("store: zero MID")
 	}
 
-	if err := s.writeSeal(root); err != nil {
+	if err := s.writeSeal(root, false); err != nil {
 		return err
 	}
 
 	if !recursive {
 		return nil
 	}
-	werr := Walk(s, root, func(_ mid.MID, _ bool) error { return nil })
+	werr := Walk(s, root, func(m mid.MID, _ bool) error {
+		if m.Equal(root) {
+			return nil
+		}
+		if m.Codec() == mid.CodecMemFS {
+			_ = s.writeSeal(m, true)
+		}
+		return nil
+	})
 	if werr != nil {
 		// A missing block is a soft warning (forward-looking
 		// pin). Other walk errors (parse failures, truncated
@@ -66,7 +75,8 @@ func (s *MemStore) Seal(root mid.MID, recursive bool) error {
 // blocks will be filled in by a later memex fetch or add.
 var ErrSealWalkIncomplete = errors.New("store: seal walk incomplete")
 
-// Unseal removes the seal record for the given MID.
+// Unseal removes the seal record for the given MID and recursively
+// unseals any child MemFS nodes.
 func (s *MemStore) Unseal(root mid.MID) error {
 	if s.db == nil {
 		return errors.New("store: closed")
@@ -74,13 +84,27 @@ func (s *MemStore) Unseal(root mid.MID) error {
 	if root.IsZero() {
 		return errors.New("store: zero MID")
 	}
-	return s.db.Update(func(txn *badger.Txn) error {
+	err := s.db.Update(func(txn *badger.Txn) error {
 		err := txn.Delete(sealKey(root))
 		if err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
 			return err
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	_ = Walk(s, root, func(m mid.MID, _ bool) error {
+		if m.Codec() == mid.CodecMemFS {
+			_ = s.db.Update(func(txn *badger.Txn) error {
+				_ = txn.Delete(sealKey(m))
+				return nil
+			})
+		}
+		return nil
+	})
+	return nil
 }
 
 // IsSealed reports whether a direct seal record exists for m.
@@ -118,14 +142,34 @@ func (s *MemStore) AllSealed() ([]mid.MID, error) {
 	var out []mid.MID
 	err := s.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false
 		it := txn.NewIterator(opts)
 		defer it.Close()
 		prefix := []byte(prefixSeal)
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
 			raw := append([]byte(nil), it.Item().Key()...)
 			raw = raw[len(prefix):]
-			m, err := mid.FromMultihash(mid.CodecRaw, raw)
+			
+			codec := mid.CodecRaw
+			isChild := false
+			item := it.Item()
+			if item.ValueSize() == 8 {
+				var val [8]byte
+				err := item.Value(func(v []byte) error {
+					copy(val[:], v)
+					return nil
+				})
+				if err == nil {
+					v := binary.BigEndian.Uint64(val[:])
+					isChild = (v & (1 << 63)) != 0
+					codec = v &^ (1 << 63)
+				}
+			}
+			
+			if isChild {
+				continue
+			}
+			
+			m, err := mid.FromMultihash(codec, raw)
 			if err != nil {
 				continue
 			}
@@ -172,7 +216,7 @@ func (s *MemStore) GCWithMinAge(ctx context.Context, minAge time.Duration) (uint
 		ctx = context.Background()
 	}
 
-	// Phase 1: build the reachable set.
+	// Phase 1: build the reachable set (indexed by raw multihash bytes for codec-agnostic checks).
 	reachable := make(map[string]struct{})
 	roots, err := s.AllSealed()
 	if err != nil {
@@ -185,9 +229,9 @@ func (s *MemStore) GCWithMinAge(ctx context.Context, minAge time.Duration) (uint
 		if root.IsZero() {
 			continue
 		}
-		reachable[root.String()] = struct{}{}
+		reachable[string(root.Bytes())] = struct{}{}
 		werr := Walk(s, root, func(m mid.MID, _ bool) error {
-			reachable[m.String()] = struct{}{}
+			reachable[string(m.Bytes())] = struct{}{}
 			return nil
 		})
 		_ = werr
@@ -243,11 +287,7 @@ func (s *MemStore) GCWithMinAge(ctx context.Context, minAge time.Duration) (uint
 			} else {
 				raw = k[len(prefixDAG):]
 			}
-			midID, merr := mid.FromMultihash(mid.CodecRaw, raw)
-			if merr != nil {
-				continue
-			}
-			if _, ok := reachable[midID.String()]; ok {
+			if _, ok := reachable[string(raw)]; ok {
 				continue
 			}
 			if minAgeTs > 0 {
@@ -286,9 +326,15 @@ func (s *MemStore) GCWithMinAge(ctx context.Context, minAge time.Duration) (uint
 }
 
 // writeSeal writes a single seal record.
-func (s *MemStore) writeSeal(m mid.MID) error {
+func (s *MemStore) writeSeal(m mid.MID, child bool) error {
 	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(sealKey(m), nil)
+		val := make([]byte, 8)
+		codecVal := m.Codec()
+		if child {
+			codecVal |= 1 << 63
+		}
+		binary.BigEndian.PutUint64(val, codecVal)
+		return txn.Set(sealKey(m), val)
 	})
 }
 

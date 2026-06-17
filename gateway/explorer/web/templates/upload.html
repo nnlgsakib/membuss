@@ -1,0 +1,588 @@
+{{define "upload_body"}}
+
+<div class="upload-container">
+  <div class="upload-header">
+    <h1>Upload Content</h1>
+    <p class="muted" style="margin:0; font-size: 13px;">Seeding content onto the Membuss content-addressed network.</p>
+  </div>
+
+  <div class="upload-tabs">
+    <div class="upload-tab active" onclick="switchTab('file')">Upload File</div>
+    <div class="upload-tab" onclick="switchTab('folder')">Upload Folder</div>
+  </div>
+
+  <div class="upload-content">
+    <!-- File Pane -->
+    <div id="pane-file" class="upload-pane active">
+      <form id="form-file" method="POST" action="/explorer/upload" enctype="multipart/form-data">
+        <div class="form-group">
+          <label>Choose a file to upload</label>
+          <div class="file-input-wrapper">
+            <span class="upload-icon">📄</span>
+            <span class="upload-text"><strong>Choose a file</strong> or drag it here</span>
+            <input type="file" id="file" name="file" onchange="showFilename(this, 'file-name-file')" required>
+            <div id="file-name-file" class="file-name-display"></div>
+          </div>
+        </div>
+        <button class="btn primary" type="submit" style="width:100%; padding: 10px;">Upload File</button>
+      </form>
+    </div>
+
+    <!-- Folder Pane -->
+    <div id="pane-folder" class="upload-pane">
+      <form id="form-folder" method="POST" action="/explorer/upload" enctype="multipart/form-data">
+        <div class="form-group">
+          <label>Choose a folder to upload</label>
+          <div class="file-input-wrapper">
+            <span class="upload-icon">📁</span>
+            <span class="upload-text"><strong>Select a folder</strong> to upload all files</span>
+            <input type="file" id="files" name="files" webkitdirectory directory multiple onchange="showFilename(this, 'file-name-folder')" required>
+            <div id="file-name-folder" class="file-name-display"></div>
+          </div>
+        </div>
+        <div class="form-group" style="margin-top: 16px;">
+          <label for="folder-name">Folder Name (Optional)</label>
+          <input type="text" id="folder-name" name="folder_name" placeholder="Leave empty to use uploaded folder name" style="width:100%; padding:10px; background:var(--bg-primary); border:1px solid var(--border-color); color:var(--text-primary); border-radius:6px; font-size:13px; font-family:var(--font-sans); transition:border-color 0.2s;">
+        </div>
+        <button class="btn primary" type="submit" style="width:100%; padding: 10px;">Upload Folder</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Upload Progress Widget -->
+<div id="upload-progress-widget" class="progress-widget">
+  <div class="progress-widget-header">
+    <span class="progress-widget-status">
+      <span class="spinner-icon"></span>
+      <span id="upload-status-text">Uploading...</span>
+    </span>
+    <button id="btn-cancel-upload" class="progress-widget-close" onclick="cancelUpload()">✕</button>
+  </div>
+  
+  <div class="progress-widget-body">
+    <div class="progress-widget-info">
+      <span id="upload-progress-percent">0%</span>
+      <span id="upload-progress-bytes">0 B / 0 B</span>
+    </div>
+    
+    <div class="progress-bar-container" style="margin-top: 8px; margin-bottom: 16px;">
+      <div class="progress-bar-fill" id="upload-progress-fill" style="width: 0%;"></div>
+    </div>
+    
+    <div class="progress-files-list-title">Files (<span id="upload-files-count">0</span>)</div>
+    <div class="progress-files-list" id="upload-files-list">
+      <!-- File items will be rendered dynamically here -->
+    </div>
+  </div>
+</div>
+
+<style>
+.progress-widget {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 400px;
+  max-width: calc(100vw - 48px);
+  background: rgba(18, 21, 28, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 16px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.02), 0 20px 50px rgba(0, 0, 0, 0.6);
+  z-index: 1000;
+  display: none; /* Hidden by default */
+  flex-direction: column;
+  overflow: hidden;
+  font-family: var(--font-sans);
+  transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.4s;
+  opacity: 0;
+  transform: translateY(20px);
+}
+
+.progress-widget.active {
+  display: flex;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.progress-widget-header {
+  background: rgba(25, 30, 40, 0.4);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 16px 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.progress-widget-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.progress-widget-close {
+  background: none;
+  border: none;
+  color: var(--text-dimmed);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s, transform 0.2s;
+}
+
+.progress-widget-close:hover {
+  color: var(--text-error);
+  transform: scale(1.1);
+}
+
+.progress-widget-body {
+  padding: 20px;
+}
+
+.progress-widget-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+#upload-progress-percent {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--accent-cyan);
+  text-shadow: 0 0 12px var(--accent-glow);
+}
+
+#upload-progress-bytes {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.progress-files-list-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-top: 20px;
+  margin-bottom: 8px;
+  letter-spacing: 0.1em;
+  border-left: 2px solid var(--accent-blue);
+  padding-left: 6px;
+}
+
+.progress-files-list {
+  max-height: 156px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  background: rgba(10, 12, 16, 0.6);
+  border-radius: 8px;
+  padding: 6px;
+}
+
+/* Custom scrollbar for file list */
+.progress-files-list::-webkit-scrollbar {
+  width: 6px;
+}
+.progress-files-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.progress-files-list::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 3px;
+}
+.progress-files-list::-webkit-scrollbar-thumb:hover {
+  background: var(--border-hover);
+}
+
+.progress-file-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.02);
+  font-size: 12px;
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+
+.progress-file-item:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.progress-file-item:last-child {
+  border-bottom: none;
+}
+
+.progress-file-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0; /* allows text truncation */
+  flex: 1;
+}
+
+.progress-file-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.progress-file-name {
+  color: var(--text-muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+.progress-file-size {
+  font-family: var(--font-mono);
+  color: var(--text-dimmed);
+  font-size: 11px;
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+
+.progress-file-status {
+  font-size: 12px;
+  flex-shrink: 0;
+  margin-left: 8px;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Parent state mapping to symbols */
+.progress-files-list .progress-file-status::before {
+  content: "⏳";
+}
+.progress-files-list.uploading .progress-file-status::before {
+  content: "📤";
+}
+.progress-files-list.sealing .progress-file-status::before {
+  content: "🔗";
+}
+.progress-files-list.done .progress-file-status::before {
+  content: "✅";
+}
+.progress-files-list.error .progress-file-status::before {
+  content: "❌";
+}
+
+/* Spinner animation */
+.spinner-icon {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(0, 255, 209, 0.2);
+  border-top-color: var(--accent-cyan);
+  border-radius: 50%;
+  display: inline-block;
+  animation: spin 0.8s linear infinite;
+  box-shadow: 0 0 8px var(--accent-glow);
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Pulse animation for sealing phase */
+.pulse-icon {
+  width: 10px;
+  height: 10px;
+  background-color: var(--accent-cyan);
+  border-radius: 50%;
+  display: inline-block;
+  animation: pulse-glow 1.5s ease-in-out infinite;
+  box-shadow: 0 0 10px var(--accent-cyan);
+}
+
+@keyframes pulse-glow {
+  0%, 100% {
+    transform: scale(0.8);
+    opacity: 0.5;
+    box-shadow: 0 0 4px var(--accent-cyan);
+  }
+  50% {
+    transform: scale(1.2);
+    opacity: 1;
+    box-shadow: 0 0 16px var(--accent-cyan);
+  }
+}
+
+/* Mobile responsive fixes for the widget */
+@media (max-width: 768px) {
+  .progress-widget {
+    bottom: 0;
+    right: 0;
+    width: 100%;
+    max-width: 100%;
+    border-radius: 16px 16px 0 0;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+    box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.5);
+  }
+}
+</style>
+
+<script>
+  let currentXhr = null;
+
+  function switchTab(type) {
+    // Switch tabs
+    document.querySelectorAll('.upload-tab').forEach(function(t) {
+      t.classList.remove('active');
+    });
+    document.querySelectorAll('.upload-pane').forEach(function(p) {
+      p.classList.remove('active');
+    });
+
+    if (type === 'file') {
+      document.querySelectorAll('.upload-tab')[0].classList.add('active');
+      document.getElementById('pane-file').classList.add('active');
+      
+      // Make inputs required/not-required based on active tab
+      document.getElementById('file').required = true;
+      document.getElementById('files').required = false;
+    } else {
+      document.querySelectorAll('.upload-tab')[1].classList.add('active');
+      document.getElementById('pane-folder').classList.add('active');
+      
+      // Make inputs required/not-required based on active tab
+      document.getElementById('file').required = false;
+      document.getElementById('files').required = true;
+    }
+  }
+
+  function showFilename(input, displayId) {
+    var display = document.getElementById(displayId);
+    if (!input.files || input.files.length === 0) {
+      display.textContent = "";
+      return;
+    }
+    if (input.files.length === 1) {
+      display.textContent = "Selected: " + input.files[0].name;
+    } else {
+      display.textContent = "Selected: " + input.files.length + " files in folder";
+      
+      // Auto-populate folder name input when folder is selected
+      if (input.id === 'files') {
+        const folderNameInput = document.getElementById('folder-name');
+        if (folderNameInput) {
+          const firstPath = input.files[0].webkitRelativePath || '';
+          const parts = firstPath.split('/');
+          if (parts.length > 1 && parts[0]) {
+            folderNameInput.value = parts[0];
+          } else {
+            folderNameInput.value = "New Folder";
+          }
+        }
+      }
+    }
+  }
+
+  function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KiB', 'MiB', 'GiB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  }
+
+  function cancelUpload() {
+    if (currentXhr) {
+      currentXhr.abort();
+    }
+    hideProgressWidget();
+  }
+
+  function hideProgressWidget() {
+    const widget = document.getElementById('upload-progress-widget');
+    widget.classList.remove('active');
+    setTimeout(() => {
+      if (!widget.classList.contains('active')) {
+        widget.style.display = 'none';
+      }
+    }, 300);
+    
+    // Re-enable form submit buttons
+    document.querySelectorAll('form button[type="submit"]').forEach(btn => {
+      btn.disabled = false;
+      btn.style.opacity = '1';
+    });
+  }
+
+  function startUpload(formData, filesList) {
+    // Disable form buttons
+    document.querySelectorAll('form button[type="submit"]').forEach(btn => {
+      btn.disabled = true;
+      btn.style.opacity = '0.5';
+    });
+
+    const widget = document.getElementById('upload-progress-widget');
+    widget.style.display = 'flex';
+    // Force reflow for transitions
+    widget.offsetHeight;
+    widget.classList.add('active');
+    
+    const percentText = document.getElementById('upload-progress-percent');
+    const bytesText = document.getElementById('upload-progress-bytes');
+    const fill = document.getElementById('upload-progress-fill');
+    const countText = document.getElementById('upload-files-count');
+    const listContainer = document.getElementById('upload-files-list');
+    const cancelBtn = document.getElementById('btn-cancel-upload');
+    
+    // Enable cancel button at start
+    cancelBtn.style.display = 'flex';
+    
+    countText.textContent = filesList.length;
+    listContainer.innerHTML = '';
+    listContainer.className = 'progress-files-list uploading';
+    
+    let totalBytes = 0;
+    for (let i = 0; i < filesList.length; i++) {
+      totalBytes += filesList[i].size;
+    }
+
+    // Cap visible files to prevent DOM performance issues
+    const maxVisible = 25;
+    const totalRender = Math.min(filesList.length, maxVisible);
+    
+    for (let i = 0; i < totalRender; i++) {
+      const item = document.createElement('div');
+      item.className = 'progress-file-item';
+      
+      const isFolder = filesList[i].webkitRelativePath && filesList[i].webkitRelativePath.includes('/');
+      const icon = isFolder ? '📁' : '📄';
+      const name = filesList[i].name;
+      const sizeStr = formatBytes(filesList[i].size);
+      
+      item.innerHTML = `
+        <div class="progress-file-info">
+          <span class="progress-file-icon">${icon}</span>
+          <span class="progress-file-name" title="${filesList[i].webkitRelativePath || name}">${name}</span>
+        </div>
+        <span class="progress-file-size">${sizeStr}</span>
+        <span class="progress-file-status"></span>
+      `;
+      listContainer.appendChild(item);
+    }
+
+    if (filesList.length > maxVisible) {
+      const moreItem = document.createElement('div');
+      moreItem.className = 'progress-file-item';
+      moreItem.style.justifyContent = 'center';
+      moreItem.style.color = 'var(--text-dimmed)';
+      moreItem.style.fontStyle = 'italic';
+      moreItem.textContent = `+ ${filesList.length - maxVisible} more files`;
+      listContainer.appendChild(moreItem);
+    }
+    
+    percentText.textContent = "0%";
+    bytesText.textContent = `0 B / ${formatBytes(totalBytes)}`;
+    fill.style.width = "0%";
+    
+    // Set spinner icon in status
+    const statusIconContainer = document.querySelector('.progress-widget-status');
+    statusIconContainer.innerHTML = '<span class="spinner-icon"></span><span id="upload-status-text">Uploading...</span>';
+    
+    const xhr = new XMLHttpRequest();
+    currentXhr = xhr;
+    
+    xhr.upload.addEventListener('progress', function(e) {
+      if (e.lengthComputable) {
+        const pct = Math.round((e.loaded / e.total) * 100);
+        percentText.textContent = pct + "%";
+        bytesText.textContent = `${formatBytes(e.loaded)} / ${formatBytes(e.total)}`;
+        fill.style.width = pct + "%";
+      }
+    });
+    
+    xhr.addEventListener('load', function() {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        percentText.textContent = "100%";
+        fill.style.width = "100%";
+        listContainer.className = 'progress-files-list done';
+        
+        // Redirect to response URL or reload
+        if (xhr.responseURL) {
+          window.location.href = xhr.responseURL;
+        } else {
+          window.location.reload();
+        }
+      } else {
+        showError("Upload failed: " + xhr.responseText);
+      }
+    });
+    
+    xhr.addEventListener('error', function() {
+      showError("Network error occurred during upload.");
+    });
+    
+    xhr.addEventListener('abort', function() {
+      // Handled by cancelUpload()
+    });
+    
+    // When upload completes but server is still processing (chunking, sharding, sealing)
+    xhr.upload.addEventListener('load', function() {
+      cancelBtn.style.display = 'none';
+      
+      const statusIconContainer = document.querySelector('.progress-widget-status');
+      statusIconContainer.innerHTML = '<span class="pulse-icon"></span><span id="upload-status-text">Sealing & Sharding...</span>';
+      listContainer.className = 'progress-files-list sealing';
+    });
+    
+    function showError(msg) {
+      const statusIconContainer = document.querySelector('.progress-widget-status');
+      statusIconContainer.innerHTML = '<span style="color:var(--text-error)">❌</span><span id="upload-status-text" style="color:var(--text-error)">Failed</span>';
+      percentText.style.color = "var(--text-error)";
+      fill.style.background = "var(--text-error)";
+      fill.style.boxShadow = "0 0 8px var(--text-error)";
+      listContainer.className = 'progress-files-list error';
+      
+      alert(msg);
+      hideProgressWidget();
+    }
+    
+    xhr.open('POST', '/explorer/upload');
+    xhr.send(formData);
+  }
+
+  document.getElementById('form-file').addEventListener('submit', function(e) {
+    e.preventDefault();
+    const fileInput = document.getElementById('file');
+    if (!fileInput.files || fileInput.files.length === 0) return;
+    
+    const formData = new FormData();
+    formData.append('file', fileInput.files[0]);
+    
+    startUpload(formData, fileInput.files);
+  });
+
+  document.getElementById('form-folder').addEventListener('submit', function(e) {
+    e.preventDefault();
+    const filesInput = document.getElementById('files');
+    if (!filesInput.files || filesInput.files.length === 0) return;
+    
+    const formData = new FormData();
+    for (let i = 0; i < filesInput.files.length; i++) {
+      const file = filesInput.files[i];
+      // Keep webkitRelativePath so the backend can build folder trees correctly
+      formData.append('files', file, file.webkitRelativePath || file.name);
+    }
+    
+    // Append custom folder name if provided
+    const folderNameInput = document.getElementById('folder-name');
+    if (folderNameInput && folderNameInput.value.trim() !== '') {
+      formData.append('folder_name', folderNameInput.value.trim());
+    }
+    
+    startUpload(formData, filesInput.files);
+  });
+</script>
+{{end}}

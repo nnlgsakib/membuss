@@ -1,0 +1,48 @@
+{{define "anchors_body"}}
+<section>
+  <h1>Anchors</h1>
+  <p class="muted">Anchor nodes (full-sync engines) known to this peer.</p>
+
+  <div class="card">
+    <h2>Local Anchor Engine</h2>
+    <dl>
+      <dt>Peer ID</dt><dd class="mono small">{{.AnchorInfo.PeerID}}</dd>
+      <dt>Uptime</dt><dd>{{.AnchorInfo.UptimeSecs}}s</dd>
+      <dt>Blocks held</dt><dd>{{.AnchorInfo.BlocksHeld}}</dd>
+      <dt>Anchors known</dt><dd>{{.AnchorInfo.Anchors}}</dd>
+      <dt>Backlog</dt><dd>{{.AnchorInfo.Backlog}}</dd>
+      <dt>Synced</dt><dd>{{.AnchorInfo.Synced}}</dd>
+    </dl>
+  </div>
+
+  <div class="table-responsive">
+    <table class="data">
+      <thead>
+        <tr><th>Peer ID</th><th>Addresses</th></tr>
+      </thead>
+      <tbody>
+        {{range .Anchors}}
+        <tr>
+          <td class="mono small">{{.PeerID}}</td>
+          <td>
+            <ul class="addrs">
+              {{range .Addrs}}<li class="mono small">{{.}}</li>{{end}}
+            </ul>
+          </td>
+        </tr>
+        {{else}}
+        <tr>
+          <td colspan="2" class="muted">
+            {{if .AnchorMode}}
+            No other anchors registered.
+            {{else}}
+            No anchors registered (anchor mode is disabled).
+            {{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+{{end}}

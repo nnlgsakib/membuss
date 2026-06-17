@@ -79,6 +79,65 @@ func (Reachability) EnumDescriptor() ([]byte, []int) {
 	return file_membuss_proto_rawDescGZIP(), []int{0}
 }
 
+// MemFSType is the on-wire discriminator for a MemFSNode. A RAW
+// node is just a raw leaf block (no MemFS wrapper) and uses the
+// existing 0x55 codec; the other variants all carry a MemFSNode
+// protobuf envelope addressed with the 0x72 codec.
+type MemFSType int32
+
+const (
+	MemFSType_RAW      MemFSType = 0
+	MemFSType_FILE     MemFSType = 1
+	MemFSType_DIR      MemFSType = 2
+	MemFSType_SYMLINK  MemFSType = 3
+	MemFSType_METADATA MemFSType = 4
+)
+
+// Enum value maps for MemFSType.
+var (
+	MemFSType_name = map[int32]string{
+		0: "RAW",
+		1: "FILE",
+		2: "DIR",
+		3: "SYMLINK",
+		4: "METADATA",
+	}
+	MemFSType_value = map[string]int32{
+		"RAW":      0,
+		"FILE":     1,
+		"DIR":      2,
+		"SYMLINK":  3,
+		"METADATA": 4,
+	}
+)
+
+func (x MemFSType) Enum() *MemFSType {
+	p := new(MemFSType)
+	*p = x
+	return p
+}
+
+func (x MemFSType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (MemFSType) Descriptor() protoreflect.EnumDescriptor {
+	return file_membuss_proto_enumTypes[1].Descriptor()
+}
+
+func (MemFSType) Type() protoreflect.EnumType {
+	return &file_membuss_proto_enumTypes[1]
+}
+
+func (x MemFSType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use MemFSType.Descriptor instead.
+func (MemFSType) EnumDescriptor() ([]byte, []int) {
+	return file_membuss_proto_rawDescGZIP(), []int{1}
+}
+
 type PingRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Message       string                 `protobuf:"bytes,1,opt,name=message,proto3" json:"message,omitempty"`
@@ -1995,6 +2054,300 @@ func (x *BloomAnnouncement) GetFpRate() float64 {
 	return 0
 }
 
+// MemFSNode is the typed wrapper for a single node in the MemFS
+// tree. It is content-addressed (MID = sha256 of the protobuf
+// bytes) and always carries a type discriminator so resolvers
+// can decide how to interpret the payload.
+type MemFSNode struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Type          MemFSType              `protobuf:"varint,1,opt,name=type,proto3,enum=membuss.v1.MemFSType" json:"type,omitempty"`
+	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`                                        // inline bytes (small FILE / RAW)
+	FileSize      uint64                 `protobuf:"varint,3,opt,name=file_size,json=fileSize,proto3" json:"file_size,omitempty"`               // total file size, all blocks
+	Blocks        []*MemFSBlock          `protobuf:"bytes,4,rep,name=blocks,proto3" json:"blocks,omitempty"`                                    // ordered raw / intermediate FILE children
+	Entries       []*DirEntry            `protobuf:"bytes,5,rep,name=entries,proto3" json:"entries,omitempty"`                                  // children (DIR only)
+	SymlinkTarget string                 `protobuf:"bytes,6,opt,name=symlink_target,json=symlinkTarget,proto3" json:"symlink_target,omitempty"` // SYMLINK only
+	Meta          *MemFSMeta             `protobuf:"bytes,7,opt,name=meta,proto3" json:"meta,omitempty"`                                        // optional metadata
+	Mode          uint32                 `protobuf:"varint,8,opt,name=mode,proto3" json:"mode,omitempty"`                                       // unix mode bits
+	Mtime         int64                  `protobuf:"varint,9,opt,name=mtime,proto3" json:"mtime,omitempty"`                                     // unix nanoseconds
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MemFSNode) Reset() {
+	*x = MemFSNode{}
+	mi := &file_membuss_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MemFSNode) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MemFSNode) ProtoMessage() {}
+
+func (x *MemFSNode) ProtoReflect() protoreflect.Message {
+	mi := &file_membuss_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MemFSNode.ProtoReflect.Descriptor instead.
+func (*MemFSNode) Descriptor() ([]byte, []int) {
+	return file_membuss_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *MemFSNode) GetType() MemFSType {
+	if x != nil {
+		return x.Type
+	}
+	return MemFSType_RAW
+}
+
+func (x *MemFSNode) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+func (x *MemFSNode) GetFileSize() uint64 {
+	if x != nil {
+		return x.FileSize
+	}
+	return 0
+}
+
+func (x *MemFSNode) GetBlocks() []*MemFSBlock {
+	if x != nil {
+		return x.Blocks
+	}
+	return nil
+}
+
+func (x *MemFSNode) GetEntries() []*DirEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+func (x *MemFSNode) GetSymlinkTarget() string {
+	if x != nil {
+		return x.SymlinkTarget
+	}
+	return ""
+}
+
+func (x *MemFSNode) GetMeta() *MemFSMeta {
+	if x != nil {
+		return x.Meta
+	}
+	return nil
+}
+
+func (x *MemFSNode) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
+	}
+	return 0
+}
+
+func (x *MemFSNode) GetMtime() int64 {
+	if x != nil {
+		return x.Mtime
+	}
+	return 0
+}
+
+// MemFSBlock is one reference from a FILE node to a child block.
+// The child is either a raw block (type=RAW) or an intermediate
+// FILE node (which itself groups more raw / intermediate nodes).
+type MemFSBlock struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Mid           []byte                 `protobuf:"bytes,1,opt,name=mid,proto3" json:"mid,omitempty"`    // multihash envelope of the child MID
+	Size          uint64                 `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"` // byte size of that child
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MemFSBlock) Reset() {
+	*x = MemFSBlock{}
+	mi := &file_membuss_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MemFSBlock) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MemFSBlock) ProtoMessage() {}
+
+func (x *MemFSBlock) ProtoReflect() protoreflect.Message {
+	mi := &file_membuss_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MemFSBlock.ProtoReflect.Descriptor instead.
+func (*MemFSBlock) Descriptor() ([]byte, []int) {
+	return file_membuss_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *MemFSBlock) GetMid() []byte {
+	if x != nil {
+		return x.Mid
+	}
+	return nil
+}
+
+func (x *MemFSBlock) GetSize() uint64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+// DirEntry is one named entry inside a DIR node. The type and
+// size are pre-computed so directory listings can render
+// without fetching each child.
+type DirEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Mid           []byte                 `protobuf:"bytes,2,opt,name=mid,proto3" json:"mid,omitempty"` // multihash envelope of the child MID
+	Type          MemFSType              `protobuf:"varint,3,opt,name=type,proto3,enum=membuss.v1.MemFSType" json:"type,omitempty"`
+	Size          uint64                 `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DirEntry) Reset() {
+	*x = DirEntry{}
+	mi := &file_membuss_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DirEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DirEntry) ProtoMessage() {}
+
+func (x *DirEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_membuss_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DirEntry.ProtoReflect.Descriptor instead.
+func (*DirEntry) Descriptor() ([]byte, []int) {
+	return file_membuss_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *DirEntry) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *DirEntry) GetMid() []byte {
+	if x != nil {
+		return x.Mid
+	}
+	return nil
+}
+
+func (x *DirEntry) GetType() MemFSType {
+	if x != nil {
+		return x.Type
+	}
+	return MemFSType_RAW
+}
+
+func (x *DirEntry) GetSize() uint64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+// MemFSMeta is an optional metadata envelope that can wrap any
+// MemFSNode (or be stored as its own METADATA node). It is the
+// forward-compatible place to stash MIME types and arbitrary
+// key-value attributes without changing the core node layout.
+type MemFSMeta struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MimeType      string                 `protobuf:"bytes,1,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
+	Attrs         map[string]string      `protobuf:"bytes,2,rep,name=attrs,proto3" json:"attrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MemFSMeta) Reset() {
+	*x = MemFSMeta{}
+	mi := &file_membuss_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MemFSMeta) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MemFSMeta) ProtoMessage() {}
+
+func (x *MemFSMeta) ProtoReflect() protoreflect.Message {
+	mi := &file_membuss_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MemFSMeta.ProtoReflect.Descriptor instead.
+func (*MemFSMeta) Descriptor() ([]byte, []int) {
+	return file_membuss_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *MemFSMeta) GetMimeType() string {
+	if x != nil {
+		return x.MimeType
+	}
+	return ""
+}
+
+func (x *MemFSMeta) GetAttrs() map[string]string {
+	if x != nil {
+		return x.Attrs
+	}
+	return nil
+}
+
 var File_membuss_proto protoreflect.FileDescriptor
 
 const file_membuss_proto_rawDesc = "" +
@@ -2141,14 +2494,46 @@ const file_membuss_proto_rawDesc = "" +
 	"\n" +
 	"item_count\x18\x02 \x01(\x04R\titemCount\x12\x1a\n" +
 	"\bcapacity\x18\x03 \x01(\x04R\bcapacity\x12\x17\n" +
-	"\afp_rate\x18\x04 \x01(\x01R\x06fpRate*D\n" +
+	"\afp_rate\x18\x04 \x01(\x01R\x06fpRate\"\xc3\x02\n" +
+	"\tMemFSNode\x12)\n" +
+	"\x04type\x18\x01 \x01(\x0e2\x15.membuss.v1.MemFSTypeR\x04type\x12\x12\n" +
+	"\x04data\x18\x02 \x01(\fR\x04data\x12\x1b\n" +
+	"\tfile_size\x18\x03 \x01(\x04R\bfileSize\x12.\n" +
+	"\x06blocks\x18\x04 \x03(\v2\x16.membuss.v1.MemFSBlockR\x06blocks\x12.\n" +
+	"\aentries\x18\x05 \x03(\v2\x14.membuss.v1.DirEntryR\aentries\x12%\n" +
+	"\x0esymlink_target\x18\x06 \x01(\tR\rsymlinkTarget\x12)\n" +
+	"\x04meta\x18\a \x01(\v2\x15.membuss.v1.MemFSMetaR\x04meta\x12\x12\n" +
+	"\x04mode\x18\b \x01(\rR\x04mode\x12\x14\n" +
+	"\x05mtime\x18\t \x01(\x03R\x05mtime\"2\n" +
+	"\n" +
+	"MemFSBlock\x12\x10\n" +
+	"\x03mid\x18\x01 \x01(\fR\x03mid\x12\x12\n" +
+	"\x04size\x18\x02 \x01(\x04R\x04size\"o\n" +
+	"\bDirEntry\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
+	"\x03mid\x18\x02 \x01(\fR\x03mid\x12)\n" +
+	"\x04type\x18\x03 \x01(\x0e2\x15.membuss.v1.MemFSTypeR\x04type\x12\x12\n" +
+	"\x04size\x18\x04 \x01(\x04R\x04size\"\x9a\x01\n" +
+	"\tMemFSMeta\x12\x1b\n" +
+	"\tmime_type\x18\x01 \x01(\tR\bmimeType\x126\n" +
+	"\x05attrs\x18\x02 \x03(\v2 .membuss.v1.MemFSMeta.AttrsEntryR\x05attrs\x1a8\n" +
+	"\n" +
+	"AttrsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*D\n" +
 	"\fReachability\x12\v\n" +
 	"\aUNKNOWN\x10\x00\x12\n" +
 	"\n" +
 	"\x06PUBLIC\x10\x01\x12\v\n" +
 	"\aPRIVATE\x10\x02\x12\x0e\n" +
 	"\n" +
-	"RELAY_ONLY\x10\x032A\n" +
+	"RELAY_ONLY\x10\x03*B\n" +
+	"\tMemFSType\x12\a\n" +
+	"\x03RAW\x10\x00\x12\b\n" +
+	"\x04FILE\x10\x01\x12\a\n" +
+	"\x03DIR\x10\x02\x12\v\n" +
+	"\aSYMLINK\x10\x03\x12\f\n" +
+	"\bMETADATA\x10\x042A\n" +
 	"\x04Node\x129\n" +
 	"\x04Ping\x12\x17.membuss.v1.PingRequest\x1a\x18.membuss.v1.PingResponse2\xbd\x04\n" +
 	"\vMembussNode\x126\n" +
@@ -2174,79 +2559,91 @@ func file_membuss_proto_rawDescGZIP() []byte {
 	return file_membuss_proto_rawDescData
 }
 
-var file_membuss_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_membuss_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_membuss_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_membuss_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
 var file_membuss_proto_goTypes = []any{
 	(Reachability)(0),            // 0: membuss.v1.Reachability
-	(*PingRequest)(nil),          // 1: membuss.v1.PingRequest
-	(*PingResponse)(nil),         // 2: membuss.v1.PingResponse
-	(*AddRequest)(nil),           // 3: membuss.v1.AddRequest
-	(*AddResponse)(nil),          // 4: membuss.v1.AddResponse
-	(*GetRequest)(nil),           // 5: membuss.v1.GetRequest
-	(*GetChunk)(nil),             // 6: membuss.v1.GetChunk
-	(*SealRequest)(nil),          // 7: membuss.v1.SealRequest
-	(*SealResponse)(nil),         // 8: membuss.v1.SealResponse
-	(*UnsealRequest)(nil),        // 9: membuss.v1.UnsealRequest
-	(*UnsealResponse)(nil),       // 10: membuss.v1.UnsealResponse
-	(*StatRequest)(nil),          // 11: membuss.v1.StatRequest
-	(*StatResponse)(nil),         // 12: membuss.v1.StatResponse
-	(*ErasureInfo)(nil),          // 13: membuss.v1.ErasureInfo
-	(*NodePeerInfo)(nil),         // 14: membuss.v1.NodePeerInfo
-	(*PeersRequest)(nil),         // 15: membuss.v1.PeersRequest
-	(*PeersResponse)(nil),        // 16: membuss.v1.PeersResponse
-	(*DHTPeekRequest)(nil),       // 17: membuss.v1.DHTPeekRequest
-	(*DHTPeekResponse)(nil),      // 18: membuss.v1.DHTPeekResponse
-	(*GCRequest)(nil),            // 19: membuss.v1.GCRequest
-	(*GCResponse)(nil),           // 20: membuss.v1.GCResponse
-	(*AnchorStatusRequest)(nil),  // 21: membuss.v1.AnchorStatusRequest
-	(*AnchorStatusResponse)(nil), // 22: membuss.v1.AnchorStatusResponse
-	(*Block)(nil),                // 23: membuss.v1.Block
-	(*DAGNode)(nil),              // 24: membuss.v1.DAGNode
-	(*Shard)(nil),                // 25: membuss.v1.Shard
-	(*ErasureManifest)(nil),      // 26: membuss.v1.ErasureManifest
-	(*PeerInfo)(nil),             // 27: membuss.v1.PeerInfo
-	(*PEXMessage)(nil),           // 28: membuss.v1.PEXMessage
-	(*WantEntry)(nil),            // 29: membuss.v1.WantEntry
-	(*MemexMessage)(nil),         // 30: membuss.v1.MemexMessage
-	(*ObjectInfo)(nil),           // 31: membuss.v1.ObjectInfo
-	(*BloomAnnouncement)(nil),    // 32: membuss.v1.BloomAnnouncement
-	nil,                          // 33: membuss.v1.MemexMessage.ObjectInfosEntry
+	(MemFSType)(0),               // 1: membuss.v1.MemFSType
+	(*PingRequest)(nil),          // 2: membuss.v1.PingRequest
+	(*PingResponse)(nil),         // 3: membuss.v1.PingResponse
+	(*AddRequest)(nil),           // 4: membuss.v1.AddRequest
+	(*AddResponse)(nil),          // 5: membuss.v1.AddResponse
+	(*GetRequest)(nil),           // 6: membuss.v1.GetRequest
+	(*GetChunk)(nil),             // 7: membuss.v1.GetChunk
+	(*SealRequest)(nil),          // 8: membuss.v1.SealRequest
+	(*SealResponse)(nil),         // 9: membuss.v1.SealResponse
+	(*UnsealRequest)(nil),        // 10: membuss.v1.UnsealRequest
+	(*UnsealResponse)(nil),       // 11: membuss.v1.UnsealResponse
+	(*StatRequest)(nil),          // 12: membuss.v1.StatRequest
+	(*StatResponse)(nil),         // 13: membuss.v1.StatResponse
+	(*ErasureInfo)(nil),          // 14: membuss.v1.ErasureInfo
+	(*NodePeerInfo)(nil),         // 15: membuss.v1.NodePeerInfo
+	(*PeersRequest)(nil),         // 16: membuss.v1.PeersRequest
+	(*PeersResponse)(nil),        // 17: membuss.v1.PeersResponse
+	(*DHTPeekRequest)(nil),       // 18: membuss.v1.DHTPeekRequest
+	(*DHTPeekResponse)(nil),      // 19: membuss.v1.DHTPeekResponse
+	(*GCRequest)(nil),            // 20: membuss.v1.GCRequest
+	(*GCResponse)(nil),           // 21: membuss.v1.GCResponse
+	(*AnchorStatusRequest)(nil),  // 22: membuss.v1.AnchorStatusRequest
+	(*AnchorStatusResponse)(nil), // 23: membuss.v1.AnchorStatusResponse
+	(*Block)(nil),                // 24: membuss.v1.Block
+	(*DAGNode)(nil),              // 25: membuss.v1.DAGNode
+	(*Shard)(nil),                // 26: membuss.v1.Shard
+	(*ErasureManifest)(nil),      // 27: membuss.v1.ErasureManifest
+	(*PeerInfo)(nil),             // 28: membuss.v1.PeerInfo
+	(*PEXMessage)(nil),           // 29: membuss.v1.PEXMessage
+	(*WantEntry)(nil),            // 30: membuss.v1.WantEntry
+	(*MemexMessage)(nil),         // 31: membuss.v1.MemexMessage
+	(*ObjectInfo)(nil),           // 32: membuss.v1.ObjectInfo
+	(*BloomAnnouncement)(nil),    // 33: membuss.v1.BloomAnnouncement
+	(*MemFSNode)(nil),            // 34: membuss.v1.MemFSNode
+	(*MemFSBlock)(nil),           // 35: membuss.v1.MemFSBlock
+	(*DirEntry)(nil),             // 36: membuss.v1.DirEntry
+	(*MemFSMeta)(nil),            // 37: membuss.v1.MemFSMeta
+	nil,                          // 38: membuss.v1.MemexMessage.ObjectInfosEntry
+	nil,                          // 39: membuss.v1.MemFSMeta.AttrsEntry
 }
 var file_membuss_proto_depIdxs = []int32{
-	13, // 0: membuss.v1.StatResponse.erasure:type_name -> membuss.v1.ErasureInfo
-	14, // 1: membuss.v1.PeersResponse.peers:type_name -> membuss.v1.NodePeerInfo
-	14, // 2: membuss.v1.DHTPeekResponse.providers:type_name -> membuss.v1.NodePeerInfo
+	14, // 0: membuss.v1.StatResponse.erasure:type_name -> membuss.v1.ErasureInfo
+	15, // 1: membuss.v1.PeersResponse.peers:type_name -> membuss.v1.NodePeerInfo
+	15, // 2: membuss.v1.DHTPeekResponse.providers:type_name -> membuss.v1.NodePeerInfo
 	0,  // 3: membuss.v1.PeerInfo.reachability:type_name -> membuss.v1.Reachability
-	27, // 4: membuss.v1.PEXMessage.peers:type_name -> membuss.v1.PeerInfo
-	29, // 5: membuss.v1.MemexMessage.wants:type_name -> membuss.v1.WantEntry
-	23, // 6: membuss.v1.MemexMessage.blocks:type_name -> membuss.v1.Block
-	33, // 7: membuss.v1.MemexMessage.object_infos:type_name -> membuss.v1.MemexMessage.ObjectInfosEntry
-	31, // 8: membuss.v1.MemexMessage.ObjectInfosEntry.value:type_name -> membuss.v1.ObjectInfo
-	1,  // 9: membuss.v1.Node.Ping:input_type -> membuss.v1.PingRequest
-	3,  // 10: membuss.v1.MembussNode.Add:input_type -> membuss.v1.AddRequest
-	5,  // 11: membuss.v1.MembussNode.Get:input_type -> membuss.v1.GetRequest
-	7,  // 12: membuss.v1.MembussNode.Seal:input_type -> membuss.v1.SealRequest
-	9,  // 13: membuss.v1.MembussNode.Unseal:input_type -> membuss.v1.UnsealRequest
-	11, // 14: membuss.v1.MembussNode.Stat:input_type -> membuss.v1.StatRequest
-	15, // 15: membuss.v1.MembussNode.Peers:input_type -> membuss.v1.PeersRequest
-	17, // 16: membuss.v1.MembussNode.DHTPeek:input_type -> membuss.v1.DHTPeekRequest
-	19, // 17: membuss.v1.MembussNode.GC:input_type -> membuss.v1.GCRequest
-	21, // 18: membuss.v1.MembussNode.AnchorStatus:input_type -> membuss.v1.AnchorStatusRequest
-	2,  // 19: membuss.v1.Node.Ping:output_type -> membuss.v1.PingResponse
-	4,  // 20: membuss.v1.MembussNode.Add:output_type -> membuss.v1.AddResponse
-	6,  // 21: membuss.v1.MembussNode.Get:output_type -> membuss.v1.GetChunk
-	8,  // 22: membuss.v1.MembussNode.Seal:output_type -> membuss.v1.SealResponse
-	10, // 23: membuss.v1.MembussNode.Unseal:output_type -> membuss.v1.UnsealResponse
-	12, // 24: membuss.v1.MembussNode.Stat:output_type -> membuss.v1.StatResponse
-	16, // 25: membuss.v1.MembussNode.Peers:output_type -> membuss.v1.PeersResponse
-	18, // 26: membuss.v1.MembussNode.DHTPeek:output_type -> membuss.v1.DHTPeekResponse
-	20, // 27: membuss.v1.MembussNode.GC:output_type -> membuss.v1.GCResponse
-	22, // 28: membuss.v1.MembussNode.AnchorStatus:output_type -> membuss.v1.AnchorStatusResponse
-	19, // [19:29] is the sub-list for method output_type
-	9,  // [9:19] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	28, // 4: membuss.v1.PEXMessage.peers:type_name -> membuss.v1.PeerInfo
+	30, // 5: membuss.v1.MemexMessage.wants:type_name -> membuss.v1.WantEntry
+	24, // 6: membuss.v1.MemexMessage.blocks:type_name -> membuss.v1.Block
+	38, // 7: membuss.v1.MemexMessage.object_infos:type_name -> membuss.v1.MemexMessage.ObjectInfosEntry
+	1,  // 8: membuss.v1.MemFSNode.type:type_name -> membuss.v1.MemFSType
+	35, // 9: membuss.v1.MemFSNode.blocks:type_name -> membuss.v1.MemFSBlock
+	36, // 10: membuss.v1.MemFSNode.entries:type_name -> membuss.v1.DirEntry
+	37, // 11: membuss.v1.MemFSNode.meta:type_name -> membuss.v1.MemFSMeta
+	1,  // 12: membuss.v1.DirEntry.type:type_name -> membuss.v1.MemFSType
+	39, // 13: membuss.v1.MemFSMeta.attrs:type_name -> membuss.v1.MemFSMeta.AttrsEntry
+	32, // 14: membuss.v1.MemexMessage.ObjectInfosEntry.value:type_name -> membuss.v1.ObjectInfo
+	2,  // 15: membuss.v1.Node.Ping:input_type -> membuss.v1.PingRequest
+	4,  // 16: membuss.v1.MembussNode.Add:input_type -> membuss.v1.AddRequest
+	6,  // 17: membuss.v1.MembussNode.Get:input_type -> membuss.v1.GetRequest
+	8,  // 18: membuss.v1.MembussNode.Seal:input_type -> membuss.v1.SealRequest
+	10, // 19: membuss.v1.MembussNode.Unseal:input_type -> membuss.v1.UnsealRequest
+	12, // 20: membuss.v1.MembussNode.Stat:input_type -> membuss.v1.StatRequest
+	16, // 21: membuss.v1.MembussNode.Peers:input_type -> membuss.v1.PeersRequest
+	18, // 22: membuss.v1.MembussNode.DHTPeek:input_type -> membuss.v1.DHTPeekRequest
+	20, // 23: membuss.v1.MembussNode.GC:input_type -> membuss.v1.GCRequest
+	22, // 24: membuss.v1.MembussNode.AnchorStatus:input_type -> membuss.v1.AnchorStatusRequest
+	3,  // 25: membuss.v1.Node.Ping:output_type -> membuss.v1.PingResponse
+	5,  // 26: membuss.v1.MembussNode.Add:output_type -> membuss.v1.AddResponse
+	7,  // 27: membuss.v1.MembussNode.Get:output_type -> membuss.v1.GetChunk
+	9,  // 28: membuss.v1.MembussNode.Seal:output_type -> membuss.v1.SealResponse
+	11, // 29: membuss.v1.MembussNode.Unseal:output_type -> membuss.v1.UnsealResponse
+	13, // 30: membuss.v1.MembussNode.Stat:output_type -> membuss.v1.StatResponse
+	17, // 31: membuss.v1.MembussNode.Peers:output_type -> membuss.v1.PeersResponse
+	19, // 32: membuss.v1.MembussNode.DHTPeek:output_type -> membuss.v1.DHTPeekResponse
+	21, // 33: membuss.v1.MembussNode.GC:output_type -> membuss.v1.GCResponse
+	23, // 34: membuss.v1.MembussNode.AnchorStatus:output_type -> membuss.v1.AnchorStatusResponse
+	25, // [25:35] is the sub-list for method output_type
+	15, // [15:25] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_membuss_proto_init() }
@@ -2259,8 +2656,8 @@ func file_membuss_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_membuss_proto_rawDesc), len(file_membuss_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   33,
+			NumEnums:      2,
+			NumMessages:   38,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

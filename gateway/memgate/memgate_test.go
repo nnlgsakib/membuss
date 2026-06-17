@@ -14,8 +14,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 
+	"github.com/nnlgsakib/membuss/core/memfs"
 	"github.com/nnlgsakib/membuss/core/mid"
+	"github.com/nnlgsakib/membuss/core/store"
 )
 
 // memBackend is an in-memory Backend. It serves a single
@@ -106,6 +109,23 @@ func (b *memBackend) Ping(ctx context.Context) error {
 		return errNotFound
 	}
 	return nil
+}
+
+// --- Phase 17: MemFS stubs on memBackend ---
+
+// MemFSInfo is unimplemented on the test backend: it always
+// returns notFound so the existing handler tests do not
+// accidentally exercise the MemFS path.
+func (b *memBackend) MemFSInfo(ctx context.Context, m mid.MID) (MemFSInfo, error) {
+	return MemFSInfo{}, errNotFound
+}
+
+func (b *memBackend) MemFSPathGet(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error) {
+	return nil, 0, "", errNotFound
+}
+
+func (b *memBackend) MemFSList(ctx context.Context, m mid.MID) ([]MemFSEntry, error) {
+	return nil, errNotFound
 }
 
 var errNotFound = &notFoundError{}
@@ -531,5 +551,166 @@ func TestDownloadDisposition(t *testing.T) {
 	disp3 := resp3.Header.Get("Content-Disposition")
 	if !strings.Contains(disp3, custom) {
 		t.Fatalf("custom filename: got %q, want substring %q", disp3, custom)
+	}
+}
+
+// --- Phase 17: MemFS integration tests ---
+
+// memfsBackend is a memBackend extended with MemFS support
+// backed by an in-memory core/memfs.Builder. It lets us
+// exercise the full /mem/{mid}/... HTTP surface against a
+// real (if synthetic) tree.
+type memfsBackend struct {
+	*memBackend
+	resolver *memfs.Resolver
+}
+
+func (b *memfsBackend) MemFSInfo(ctx context.Context, m mid.MID) (MemFSInfo, error) {
+	st, err := b.resolver.Stat(ctx, m)
+	if err != nil {
+		return MemFSInfo{}, errNotFound
+	}
+	return MemFSInfo{
+		MID:  m.String(),
+		Type: memFSTypeString(st.Type),
+		Size: st.Size,
+	}, nil
+}
+
+func (b *memfsBackend) MemFSPathGet(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error) {
+	node, err := b.resolver.ResolvePath(ctx, m, path)
+	if err != nil {
+		return nil, 0, "", errNotFound
+	}
+	if !node.IsFile() {
+		return nil, 0, "", errNotFound
+	}
+	rc, err := b.resolver.Open(ctx, node.MustMID())
+	if err != nil {
+		return nil, 0, "", err
+	}
+	return rc, node.TotalSize(), "text/plain; charset=utf-8", nil
+}
+
+func (b *memfsBackend) MemFSList(ctx context.Context, m mid.MID) ([]MemFSEntry, error) {
+	st, err := b.resolver.Stat(ctx, m)
+	if err != nil {
+		return nil, errNotFound
+	}
+	if st.Type != memfs.TypeDir {
+		return nil, errNotFound
+	}
+	out := make([]MemFSEntry, 0, len(st.Entries))
+	for _, e := range st.Entries {
+		out = append(out, MemFSEntry{
+			Name: e.Name,
+			MID:  e.Mid.String(),
+			Type: memFSTypeString(e.Type),
+			Size: e.Size,
+		})
+	}
+	return out, nil
+}
+
+// memFSTypeString mirrors the production adapter's helper.
+func memFSTypeString(t memfs.MemFSType) string {
+	switch t {
+	case memfs.TypeFile:
+		return "file"
+	case memfs.TypeDir:
+		return "dir"
+	case memfs.TypeSymlink:
+		return "symlink"
+	default:
+		return "raw"
+	}
+}
+
+func TestMemFS_DirList(t *testing.T) {
+	bs, _ := store.NewMemStore(store.Options{InMemory: true})
+	defer bs.Close()
+	b := memfs.NewBuilder(bs)
+	mem := fstest.MapFS{
+		"x.txt": &fstest.MapFile{Data: []byte("X")},
+		"y.txt": &fstest.MapFile{Data: []byte("YY")},
+	}
+	root, err := b.AddDirectoryFromFS(mem, ".")
+	if err != nil {
+		t.Fatalf("add dir: %v", err)
+	}
+	be := &memfsBackend{memBackend: newMemBackend(), resolver: memfs.NewResolver(bs)}
+	srv := httptest.NewServer(newTestGate(t, be).Router())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/mem/" + root.MID.String() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "x.txt") || !strings.Contains(string(body), "y.txt") {
+		t.Errorf("listing missing entries: %s", string(body))
+	}
+}
+
+func TestMemFS_DirList_JSON(t *testing.T) {
+	bs, _ := store.NewMemStore(store.Options{InMemory: true})
+	defer bs.Close()
+	b := memfs.NewBuilder(bs)
+	root, err := b.AddDirectoryFromFS(fstest.MapFS{
+		"a.txt": &fstest.MapFile{Data: []byte("A")},
+	}, ".")
+	if err != nil {
+		t.Fatalf("add dir: %v", err)
+	}
+	be := &memfsBackend{memBackend: newMemBackend(), resolver: memfs.NewResolver(bs)}
+	srv := httptest.NewServer(newTestGate(t, be).Router())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/mem/" + root.MID.String() + "/?format=json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	var out struct {
+		MID  string `json:"mid"`
+		Type string `json:"type"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Type != "dir" {
+		t.Errorf("type: want dir, got %q", out.Type)
+	}
+}
+
+func TestMemFS_PathGet(t *testing.T) {
+	bs, _ := store.NewMemStore(store.Options{InMemory: true})
+	defer bs.Close()
+	b := memfs.NewBuilder(bs)
+	root, err := b.AddDirectoryFromFS(fstest.MapFS{
+		"hello.txt": &fstest.MapFile{Data: []byte("Hello, world!")},
+	}, ".")
+	if err != nil {
+		t.Fatalf("add dir: %v", err)
+	}
+	be := &memfsBackend{memBackend: newMemBackend(), resolver: memfs.NewResolver(bs)}
+	srv := httptest.NewServer(newTestGate(t, be).Router())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/mem/" + root.MID.String() + "/hello.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "Hello, world!" {
+		t.Errorf("body: %q", string(body))
 	}
 }

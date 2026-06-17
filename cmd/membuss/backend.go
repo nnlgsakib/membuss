@@ -7,7 +7,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -158,7 +157,7 @@ func (b *daemonBackend) Add(ctx context.Context, path, chunker string, chunkSize
 		// Announce to the DHT so other nodes can find this MID.
 		if b.dht != nil {
 			announceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			_ = b.dht.Provide(announceCtx, root)
+			provideRecursive(announceCtx, b.dht, b.store, root)
 			cancel()
 		}
 	}
@@ -324,7 +323,7 @@ func (b *daemonBackend) Seal(ctx context.Context, midStr string, recursive bool)
 	// Announce.
 	if b.dht != nil {
 		announceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		_ = b.dht.Provide(announceCtx, root)
+		provideRecursive(announceCtx, b.dht, b.store, root)
 		cancel()
 	}
 	return serverpkg.SealResult{Pinned: blocks, Already: false}, nil
@@ -504,97 +503,9 @@ func countDAG(bs store.Store, root mid.MID) (uint64, uint64, error) {
 // visit for every MID encountered (the root plus all
 // descendants).
 func walkDAG(bs store.Store, root mid.MID, visit func(mid.MID) error) error {
-	if err := visit(root); err != nil {
-		return err
-	}
-	raw, err := bs.Get(root)
-	if err != nil {
-		return err
-	}
-	// Leaf nodes: their raw data has no multibase prefix; we
-	// treat every node as internal unless the resolver can
-	// reach a leaf (we don't have a marker here, so we walk
-	// by reading the protobuf DAGNode. Internal nodes are
-	// DAGNode protobufs; leaves are raw data).
-	//
-	// Heuristic: a node with a parseable DAGNode protobuf
-	// and at least one link is internal; otherwise it's a
-	// leaf. This is what core/dag uses.
-	node, nerr := parseDAGNode(raw)
-	if nerr != nil {
-		// Leaf: the block's own data contributes bytes.
-		return nil
-	}
-	for _, linkStr := range node.Links {
-		child, perr := mid.Parse(linkStr)
-		if perr != nil {
-			continue
-		}
-		if err := walkDAG(bs, child, visit); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// parseDAGNode attempts to decode a DAGNode protobuf.
-func parseDAGNode(raw []byte) (struct{ Links []string }, error) {
-	links, err := parseDAGLinks(raw)
-	if err != nil {
-		return struct{ Links []string }{}, err
-	}
-	return struct{ Links []string }{Links: links}, nil
-}
-
-// parseDAGLinks decodes a DAGNode protobuf and returns its
-// link strings. The encoding is the canonical proto wire form
-// produced by core/dag's Builder.
-func parseDAGLinks(raw []byte) ([]string, error) {
-	var links []string
-	i := 0
-	for i < len(raw) {
-		tag, n := binary.Uvarint(raw[i:])
-		if n <= 0 {
-			return nil, fmt.Errorf("dag: bad tag")
-		}
-		i += n
-		fieldNum := tag >> 3
-		wireType := tag & 7
-		if fieldNum == 1 && wireType == 2 {
-			length, n2 := binary.Uvarint(raw[i:])
-			if n2 <= 0 {
-				return nil, fmt.Errorf("dag: bad length")
-			}
-			i += n2
-			if uint64(len(raw)-i) < length {
-				return nil, fmt.Errorf("dag: truncated")
-			}
-			links = append(links, string(raw[i:i+int(length)]))
-			i += int(length)
-		} else {
-			switch wireType {
-			case 0:
-				_, n3 := binary.Uvarint(raw[i:])
-				if n3 <= 0 {
-					return nil, fmt.Errorf("dag: bad varint")
-				}
-				i += n3
-			case 1:
-				i += 8
-			case 2:
-				length, n2 := binary.Uvarint(raw[i:])
-				if n2 <= 0 {
-					return nil, fmt.Errorf("dag: bad length")
-				}
-				i += n2 + int(length)
-			case 5:
-				i += 4
-			default:
-				return nil, fmt.Errorf("dag: unknown wire type %d", wireType)
-			}
-		}
-	}
-	return links, nil
+	return store.Walk(bs, root, func(m mid.MID, leaf bool) error {
+		return visit(m)
+	})
 }
 
 // sectionReader returns an io.ReadCloser that yields up to
@@ -610,4 +521,19 @@ func sectionReader(rc io.Reader, offset, limit uint64) io.Reader {
 		return io.NopCloser(rc)
 	}
 	return io.NopCloser(io.LimitReader(rc, int64(limit)))
+}
+
+// provideRecursive walks the DAG starting at root, announcing the root MID
+// and all discovered MemFS node MIDs to the DHT.
+func provideRecursive(ctx context.Context, dht *dht.MemDHT, s store.Store, root mid.MID) {
+	if dht == nil || s == nil || root.IsZero() {
+		return
+	}
+	_ = dht.Provide(ctx, root)
+	_ = store.Walk(s, root, func(m mid.MID, leaf bool) error {
+		if m.Codec() == mid.CodecMemFS {
+			_ = dht.Provide(ctx, m)
+		}
+		return nil
+	})
 }

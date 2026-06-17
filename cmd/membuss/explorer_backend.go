@@ -10,10 +10,14 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 
+	"github.com/nnlgsakib/membuss/core/memfs"
 	"github.com/nnlgsakib/membuss/core/mid"
 	"github.com/nnlgsakib/membuss/core/store"
 	explorer "github.com/nnlgsakib/membuss/gateway/explorer"
@@ -412,4 +416,170 @@ func (a *explorerAdapter) Add(ctx context.Context, name string, r io.Reader) (ex
 		MimeType: res.MimeType,
 		Present:  true,
 	}, nil
+}
+
+// AddDirectory ingests a directory as MemFS from a set of files with relative paths.
+func (a *explorerAdapter) AddDirectory(ctx context.Context, name string, files []explorer.DirectoryFile) (explorer.ContentInfo, error) {
+	b := a.b
+	if b == nil || b.store == nil {
+		return explorer.ContentInfo{}, errors.New("explorer: no backend")
+	}
+	if len(files) == 0 {
+		return explorer.ContentInfo{}, errors.New("explorer: no files")
+	}
+
+	tmp, err := os.MkdirTemp("", "membuss-explorer-add-dir-*")
+	if err != nil {
+		return explorer.ContentInfo{}, err
+	}
+	defer os.RemoveAll(tmp)
+
+	for _, f := range files {
+		rel := strings.ReplaceAll(f.Path, "\\", "/")
+		rel = path.Clean("/" + rel)
+		rel = strings.TrimPrefix(rel, "/")
+		if rel == "" || rel == "." {
+			continue
+		}
+		full := filepath.Join(tmp, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return explorer.ContentInfo{}, err
+		}
+		outFile, err := os.Create(full)
+		if err != nil {
+			return explorer.ContentInfo{}, err
+		}
+		if _, err := io.Copy(outFile, f.R); err != nil {
+			outFile.Close()
+			return explorer.ContentInfo{}, err
+		}
+		if err := outFile.Close(); err != nil {
+			return explorer.ContentInfo{}, err
+		}
+	}
+
+	memBuilder := memfs.NewBuilder(b.store)
+	res, err := memBuilder.AddDirectoryFromFS(os.DirFS(tmp), ".")
+	if err != nil {
+		return explorer.ContentInfo{}, err
+	}
+
+	_ = b.store.Seal(res.MID, true)
+	if b.dht != nil {
+		announceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		provideRecursive(announceCtx, b.dht, b.store, res.MID)
+		cancel()
+	}
+
+	// Use uploader-supplied folder name, or fallback.
+	dirName := name
+	if dirName == "" {
+		dirName = "upload"
+		if len(files) > 0 && files[0].Path != "" {
+			parts := strings.Split(strings.ReplaceAll(files[0].Path, "\\", "/"), "/")
+			if len(parts) > 0 && parts[0] != "" {
+				dirName = parts[0]
+			}
+		}
+	}
+
+	_ = store.SetObjectInfo(b.store, res.MID, store.ObjectInfo{
+		Name:     dirName,
+		MimeType: "inode/directory",
+		Size:     res.Size,
+	})
+
+	return explorer.ContentInfo{
+		MID:      res.MID.String(),
+		Size:     res.Size,
+		Blocks:   res.Block,
+		Sealed:   true,
+		Present:  true,
+		Name:     dirName,
+		MimeType: "inode/directory",
+	}, nil
+}
+
+func (a *explorerAdapter) Rename(ctx context.Context, m mid.MID, name string) error {
+	b := a.b
+	if b == nil || b.store == nil {
+		return errors.New("explorer: no backend")
+	}
+	info, err := store.GetObjectInfo(b.store, m)
+	if err != nil {
+		return err
+	}
+	info.Name = name
+	return store.SetObjectInfo(b.store, m, info)
+}
+
+// --- Phase 17: MemFS methods on explorerAdapter ---
+
+// MemFSInfo returns the metadata for a MemFS node.
+func (a *explorerAdapter) MemFSInfo(ctx context.Context, m mid.MID) (explorer.MemFSInfo, error) {
+	r := memfs.NewResolver(&fetchingBlockstore{
+		Blockstore: a.b.store,
+		b:          a.b,
+		ctx:        ctx,
+	})
+	st, err := r.Stat(ctx, m)
+	if err != nil {
+		return explorer.MemFSInfo{}, err
+	}
+	return explorer.MemFSInfo{
+		MID:   m.String(),
+		Type:  memFSTypeString(st.Type),
+		Size:  st.Size,
+		Mode:  uint32(st.Mode),
+		MTime: st.MTime.Unix(),
+		Mime:  st.MimeType,
+	}, nil
+}
+
+// MemFSList returns the entries of a MemFS directory.
+func (a *explorerAdapter) MemFSList(ctx context.Context, m mid.MID) ([]explorer.MemFSEntry, error) {
+	r := memfs.NewResolver(&fetchingBlockstore{
+		Blockstore: a.b.store,
+		b:          a.b,
+		ctx:        ctx,
+	})
+	st, err := r.Stat(ctx, m)
+	if err != nil {
+		return nil, err
+	}
+	if st.Type != memfs.TypeDir {
+		return nil, errors.New("not a directory")
+	}
+	out := make([]explorer.MemFSEntry, 0, len(st.Entries))
+	for _, e := range st.Entries {
+		out = append(out, explorer.MemFSEntry{
+			Name: e.Name,
+			MID:  e.Mid.String(),
+			Type: memFSTypeString(e.Type),
+			Size: e.Size,
+		})
+	}
+	return out, nil
+}
+
+// MemFSPathGet returns a streaming reader for the file at
+// m/path. Used by the explorer's preview pane.
+func (a *explorerAdapter) MemFSPathGet(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error) {
+	r := memfs.NewResolver(&fetchingBlockstore{
+		Blockstore: a.b.store,
+		b:          a.b,
+		ctx:        ctx,
+	})
+	node, err := r.ResolvePath(ctx, m, path)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	if !node.IsFile() {
+		return nil, 0, "", errors.New("not a file")
+	}
+	rc, err := r.Open(ctx, node.MustMID())
+	if err != nil {
+		return nil, 0, "", err
+	}
+	return rc, node.TotalSize(), node.MimeType(), nil
 }

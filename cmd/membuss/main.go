@@ -68,15 +68,11 @@ func main() {
 	noAnchor := flag.Bool("no-anchor", false, "disable the anchor engine even if config enables it")
 	flag.Parse()
 
-	// Phase 16: --datadir wins over --config when both are set, and falls
-	// back to MEMBUSS_DATADIR / $HOME/.memdata. The init-required guard
-	// below relies on a non-empty datadir so the error message can name
-	// the right path.
 	resolvedDatadir := config.ResolveDataDir(*datadirFlag)
-	if resolvedDatadir != "" {
+	if *datadirFlag != "" {
 		*cfgPath = config.DefaultConfigPath(resolvedDatadir)
 	} else if *cfgPath == "" {
-		*cfgPath = "membuss.yaml"
+		*cfgPath = config.DefaultConfigPath(resolvedDatadir)
 	}
 
 	// Build identifier flows into Ping responses.

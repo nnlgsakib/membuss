@@ -4,8 +4,11 @@
 package explorer
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -213,6 +216,35 @@ func (b *memBackend) Add(ctx context.Context, name string, r io.Reader) (Content
 		Name:     name,
 		MimeType: "application/octet-stream",
 	}, nil
+}
+
+func (b *memBackend) AddDirectory(ctx context.Context, name string, files []DirectoryFile) (ContentInfo, error) {
+	if len(files) == 0 {
+		return ContentInfo{}, fmt.Errorf("empty directory")
+	}
+	data, err := io.ReadAll(files[0].R)
+	if err != nil {
+		return ContentInfo{}, err
+	}
+	m := mid.FromBytes(data)
+	b.put(m, data)
+	dirName := name
+	if dirName == "" {
+		dirName = "upload"
+	}
+	return ContentInfo{
+		MID:      m.String(),
+		Size:     uint64(len(data)),
+		Blocks:   1,
+		Sealed:   true,
+		Present:  true,
+		Name:     dirName,
+		MimeType: "inode/directory",
+	}, nil
+}
+
+func (b *memBackend) Rename(ctx context.Context, m mid.MID, name string) error {
+	return nil
 }
 
 // --- helpers ---
@@ -523,5 +555,90 @@ func TestHumanBytes(t *testing.T) {
 		if got != c.want {
 			t.Errorf("humanBytes(%d) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// --- Phase 17: MemFS stubs on memBackend ---
+
+func (b *memBackend) MemFSInfo(ctx context.Context, m mid.MID) (MemFSInfo, error) {
+	return MemFSInfo{}, fmt.Errorf("memfs: test backend stub")
+}
+
+func (b *memBackend) MemFSList(ctx context.Context, m mid.MID) ([]MemFSEntry, error) {
+	return nil, fmt.Errorf("memfs: test backend stub")
+}
+
+func (b *memBackend) MemFSPathGet(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error) {
+	return nil, 0, "", fmt.Errorf("memfs: test backend stub")
+}
+
+func TestUpload(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", "test.txt")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err := fw.Write([]byte("hello upload")); err != nil {
+		t.Fatalf("Write file: %v", err)
+	}
+	mw.Close()
+
+	req, err := http.NewRequest("POST", srv.URL+"/upload", &buf)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatalf("Do request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("expected redirect (303), got status: %d", resp.StatusCode)
+	}
+}
+
+func TestUploadFolder(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	
+	// Create multiple file parts representing a folder upload
+	files := map[string]string{
+		"myfolder/file1.txt": "content1",
+		"myfolder/file2.txt": "content2",
+	}
+	
+	for path, content := range files {
+		fw, err := mw.CreateFormFile("files", path)
+		if err != nil {
+			t.Fatalf("CreateFormFile: %v", err)
+		}
+		if _, err := fw.Write([]byte(content)); err != nil {
+			t.Fatalf("Write file: %v", err)
+		}
+	}
+	mw.Close()
+
+	req, err := http.NewRequest("POST", srv.URL+"/upload", &buf)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatalf("Do request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("expected redirect (303), got status: %d", resp.StatusCode)
 	}
 }

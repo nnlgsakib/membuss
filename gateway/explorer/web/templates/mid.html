@@ -1,0 +1,156 @@
+{{define "mid_body"}}
+<section class="mid-detail">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; flex-wrap:wrap; gap:16px;">
+    <h1 style="margin:0;">MID {{if .Name}}&mdash; {{.Name}}{{end}}</h1>
+    {{if not .NotFound}}
+    <form method="POST" action="/explorer/mid/{{.MID}}/rename" style="display:inline-flex; gap:8px; align-items:center;">
+      <input type="text" name="name" value="{{.Name}}" placeholder="Rename content" required style="padding:6px 12px; background:var(--bg-secondary); border:1px solid var(--border-color); color:var(--text-primary); border-radius:6px; font-size:12px; font-family:var(--font-sans); transition:border-color 0.2s;">
+      <button class="btn" type="submit" style="padding:6px 12px; font-size:12px;">Rename</button>
+    </form>
+    {{end}}
+  </div>
+  <div class="mid-string mono">
+    <code id="midstr">{{.MID}}</code>
+    <button class="copy" data-copy="{{.MID}}">Copy</button>
+  </div>
+
+  {{if .NotFound}}
+    <p class="warn">This MID is not present in the local store.</p>
+	{{if eq .ResolveStatus 1}}
+		<p class="ok">Resolved from DHT: {{.ResolveMessage}}</p>
+	{{else if eq .ResolveStatus 2}}
+		<p class="warn">Not available right now &mdash; {{.ResolveMessage}}</p>
+		<p class="muted">Reloading this page will re-run the DHT lookup and try a fresh Memex fetch.</p>
+	{{else if eq .ResolveStatus 3}}
+		<p class="warn">Not found &mdash; {{.ResolveMessage}}</p>
+		<p class="muted">The MID may not be pinned on any node. If a peer is supposed to have it, ask them to <code>membuss-cli seal &lt;MID&gt;</code>.</p>
+	{{else if eq .ResolveStatus 4}}
+		<p class="warn">DHT lookup error &mdash; {{.ResolveMessage}}</p>
+	{{else}}
+		<p class="muted">DHT lookup for providers:</p>
+	{{end}}
+	<pre class="providers">{{range .Providers}}{{.}}
+{{end}}{{if not .Providers}}(no providers found){{end}}</pre>
+	<form method="GET" action="/explorer/mid/{{.MID}}" style="margin-top:0.5rem">
+		<button class="btn" type="submit">Retry DHT lookup</button>
+	</form>
+  {{else}}
+  {{if eq .MemFSType "dir"}}
+  <div class="grid">
+    <div class="card span-2">
+      <h2>Directory Listing</h2>
+      <p class="muted" style="margin-bottom: 16px;">MemFS directory with {{len .MemFSEntries}} entries.</p>
+      <div class="table-responsive">
+        <table class="data">
+          <thead>
+            <tr><th>Name</th><th>Type</th><th>Size</th><th>MID</th></tr>
+          </thead>
+          <tbody>
+            {{range .MemFSEntries}}
+            <tr>
+              <td><a href="/explorer/mid/{{.MID}}">{{.Name}}</a></td>
+              <td>{{.Type}}</td>
+              <td>{{.Size | humanBytes}}</td>
+              <td class="muted mono"><a href="/explorer/mid/{{.MID}}">{{slice .MID 0 16}}…</a></td>
+            </tr>
+            {{end}}
+            {{if not .MemFSEntries}}
+            <tr><td colspan="4" class="muted" style="text-align:center;">(empty directory)</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Directory Info</h2>
+      <dl>
+        <dt>Size</dt><dd>{{.Size | humanBytes}} ({{.Size}} bytes)</dd>
+        <dt>Blocks</dt><dd>{{.Blocks}}</dd>
+        <dt>Sealed</dt><dd>{{if .Sealed}}yes{{else}}no{{end}}</dd>
+        <dt>Codec</dt><dd>0x{{printf "%x" .Codec}}</dd>
+        <dt>Content-Type</dt><dd>inode/directory</dd>
+      </dl>
+      <div class="actions">
+        <a class="btn primary" href="/mem/{{.MID}}/" target="_blank">Open Gateway</a>
+        <a class="btn" href="/explorer/mid/{{.MID}}/dag">DAG</a>
+        {{if .Sealed}}
+        <form method="POST" action="/explorer/mid/{{.MID}}/unseal" style="display:inline">
+          <button class="btn warn" type="submit">Unseal</button>
+        </form>
+        {{else}}
+        <form method="POST" action="/explorer/mid/{{.MID}}/seal" style="display:inline">
+          <button class="btn primary" type="submit">Seal</button>
+        </form>
+        {{end}}
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Erasure Coding</h2>
+      <dl>
+        <dt>Layout</dt><dd>{{.DataShards}} data + {{.ParityShards}} parity</dd>
+        <dt>Total shards</dt><dd>{{.TotalShards}}</dd>
+        <dt>Health</dt><dd>{{.HealthLabel}} ({{.Health}})</dd>
+      </dl>
+    </div>
+
+    <div class="card span-2">
+      <h2>Providers (DHT)</h2>
+      <pre class="providers">{{range .Providers}}{{.}}
+{{end}}{{if not .Providers}}(no providers found in DHT){{end}}</pre>
+    </div>
+  </div>
+  {{else if eq .MemFSType "symlink"}}
+  <div class="grid">
+    <div class="card">
+      <h2>Symlink</h2>
+      <p>Target: <code>{{.SymlinkTarget}}</code></p>
+    </div>
+  </div>
+  {{else}}
+  <div class="grid">
+    <div class="card">
+      <h2>Content</h2>
+      <dl>
+        <dt>Size</dt><dd>{{.Size | humanBytes}} ({{.Size}} bytes)</dd>
+        <dt>Blocks</dt><dd>{{.Blocks}}</dd>
+        <dt>Sealed</dt><dd>{{if .Sealed}}yes{{else}}no{{end}}</dd>
+        <dt>Codec</dt><dd>0x{{printf "%x" .Codec}}</dd>
+        <dt>Content-Type</dt><dd>{{if .ContentType}}{{.ContentType}}{{else}}(unknown){{end}}</dd>
+      </dl>
+      <div class="actions">
+        <a class="btn primary" href="/mem/{{.MID}}" target="_blank">View</a>
+        <a class="btn" href="/mem/{{.MID}}?download=1&amp;filename={{if .Name}}{{.Name}}{{else}}{{.MID}}.bin{{end}}" target="_self" download>Download</a>
+        <a class="btn" href="/explorer/mid/{{.MID}}/dag">DAG</a>
+        {{if .Sealed}}
+        <form method="POST" action="/explorer/mid/{{.MID}}/unseal" style="display:inline">
+          <button class="btn warn" type="submit">Unseal</button>
+        </form>
+        {{else}}
+        <form method="POST" action="/explorer/mid/{{.MID}}/seal" style="display:inline">
+          <button class="btn primary" type="submit">Seal</button>
+        </form>
+        {{end}}
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Erasure Coding</h2>
+      <dl>
+        <dt>Layout</dt><dd>{{.DataShards}} data + {{.ParityShards}} parity</dd>
+        <dt>Total shards</dt><dd>{{.TotalShards}}</dd>
+        <dt>Health</dt><dd>{{.HealthLabel}} ({{.Health}})</dd>
+      </dl>
+    </div>
+
+    <div class="card span-2">
+      <h2>Providers (DHT)</h2>
+      <pre class="providers">{{range .Providers}}{{.}}
+{{end}}{{if not .Providers}}(no providers found in DHT){{end}}</pre>
+    </div>
+  </div>
+  {{end}}
+  {{end}}
+</section>
+{{end}}

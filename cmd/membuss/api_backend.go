@@ -6,12 +6,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
+	"path"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/nnlgsakib/membuss/api"
+	"github.com/nnlgsakib/membuss/core/memfs"
 	"github.com/nnlgsakib/membuss/core/mid"
 )
 
@@ -165,3 +172,190 @@ func (a *apiAdapter) NodeInfo() api.NodeInfo {
 		Build:   "",
 	}
 }
+
+// --- Phase 17: MemFS methods on apiAdapter ---
+
+// memFSBuilder returns a *memfs.Builder that writes into the
+// daemon's local store.
+func (a *apiAdapter) memFSBuilder() *memfs.Builder {
+	return memfs.NewBuilder(a.b.store)
+}
+
+// memFSResolver returns a *memfs.Resolver that reads from
+// the daemon's local store, wrapping it with fetchingBlockstore to resolve missing blocks from the network.
+func (a *apiAdapter) memFSResolver(ctx context.Context) *memfs.Resolver {
+	return memfs.NewResolver(&fetchingBlockstore{
+		Blockstore: a.b.store,
+		b:          a.b,
+		ctx:        ctx,
+	})
+}
+
+// AddFile ingests a file as a MemFS FILE node. When wrapDir
+// is true the result is wrapped in a single-entry DIR so
+// the returned MID is a directory MID addressable through
+// the gateway.
+func (a *apiAdapter) AddFile(ctx context.Context, name string, r io.Reader, wrapDir bool) (api.AddResult, error) {
+	if a == nil || a.b == nil || a.b.store == nil {
+		return api.AddResult{}, errors.New("api: no backend")
+	}
+	if r == nil {
+		return api.AddResult{}, errors.New("api: nil reader")
+	}
+	// Read the body fully so we can both MemFS-add and
+	// (when needed) fall through to the legacy store.
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return api.AddResult{}, err
+	}
+	b := a.memFSBuilder()
+	res, err := b.AddFile(name, bytes.NewReader(data), 0o644, time.Time{}, "")
+	if err != nil {
+		return api.AddResult{}, err
+	}
+	if wrapDir {
+		dirRes, err := b.AddDir(name, []memfs.DirEntry{
+			{Name: name, Mid: res.MID, Type: memfs.TypeFile, Size: res.Size},
+		}, 0o755, time.Time{})
+		if err != nil {
+			return api.AddResult{}, err
+		}
+		res = dirRes
+	}
+	// Seal and announce, mirroring the legacy Add path.
+	_ = a.b.store.Seal(res.MID, true)
+	if a.b.dht != nil {
+		announceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		provideRecursive(announceCtx, a.b.dht, a.b.store, res.MID)
+		cancel()
+	}
+	return api.AddResult{
+		MID:    res.MID.String(),
+		Size:   res.Size,
+		Blocks: res.Block,
+		Name:   name,
+	}, nil
+}
+
+// AddDirectory ingests a multipart directory upload. Each
+// part is written to a temp file so memfs.AddDirectoryFromFS
+// can walk it with os.DirFS.
+func (a *apiAdapter) AddDirectory(ctx context.Context, parts []api.DirectoryPart) (api.AddResult, error) {
+	if a == nil || a.b == nil || a.b.store == nil {
+		return api.AddResult{}, errors.New("api: no backend")
+	}
+	if len(parts) == 0 {
+		return api.AddResult{}, errors.New("api: no parts")
+	}
+	tmp, err := os.MkdirTemp("", "membuss-api-add-dir-*")
+	if err != nil {
+		return api.AddResult{}, err
+	}
+	defer os.RemoveAll(tmp)
+
+	for _, p := range parts {
+		// Normalize separators: accept both "/" and the
+		// OS-specific separator. fs.FS uses "/".
+		rel := strings.ReplaceAll(p.Path, string(filepath.Separator), "/")
+		rel = path.Clean("/" + rel)
+		rel = strings.TrimPrefix(rel, "/")
+		if rel == "" || rel == "." {
+			continue
+		}
+		full := filepath.Join(tmp, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return api.AddResult{}, err
+		}
+		f, err := os.Create(full)
+		if err != nil {
+			return api.AddResult{}, err
+		}
+		if _, err := f.Write(p.Data); err != nil {
+			f.Close()
+			return api.AddResult{}, err
+		}
+		if err := f.Close(); err != nil {
+			return api.AddResult{}, err
+		}
+	}
+	b := a.memFSBuilder()
+	res, err := b.AddDirectoryFromFS(os.DirFS(tmp), ".")
+	if err != nil {
+		return api.AddResult{}, err
+	}
+	_ = a.b.store.Seal(res.MID, true)
+	if a.b.dht != nil {
+		announceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		provideRecursive(announceCtx, a.b.dht, a.b.store, res.MID)
+		cancel()
+	}
+	return api.AddResult{
+		MID:    res.MID.String(),
+		Size:   res.Size,
+		Blocks: res.Block,
+	}, nil
+}
+
+// Ls returns the entries of a MemFS directory.
+func (a *apiAdapter) Ls(ctx context.Context, m mid.MID) ([]api.LsEntry, error) {
+	if a == nil || a.b == nil || a.b.store == nil {
+		return nil, errors.New("api: no backend")
+	}
+	r := a.memFSResolver(ctx)
+	st, err := r.Stat(ctx, m)
+	if err != nil {
+		return nil, err
+	}
+	if st.Type != memfs.TypeDir {
+		return nil, errors.New("api: not a directory")
+	}
+	out := make([]api.LsEntry, 0, len(st.Entries))
+	for _, e := range st.Entries {
+		out = append(out, api.LsEntry{
+			Name: e.Name,
+			MID:  e.Mid.String(),
+			Type: memFSTypeString(e.Type),
+			Size: e.Size,
+		})
+	}
+	return out, nil
+}
+
+// GetPath returns a streaming reader for a file at m/path.
+func (a *apiAdapter) GetPath(ctx context.Context, m mid.MID, p string) (io.ReadSeekCloser, uint64, string, error) {
+	if a == nil || a.b == nil || a.b.store == nil {
+		return nil, 0, "", errors.New("api: no backend")
+	}
+	r := a.memFSResolver(ctx)
+	node, err := r.ResolvePath(ctx, m, p)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	if !node.IsFile() {
+		return nil, 0, "", errors.New("api: not a file")
+	}
+	rc, err := r.Open(ctx, m)
+	if err != nil {
+		// Try the resolved node MID.
+		rc, err = r.Open(ctx, node.MustMID())
+		if err != nil {
+			return nil, 0, "", err
+		}
+	}
+	return rc, node.TotalSize(), node.MimeType(), nil
+}
+
+// fsFile is a small adapter that lets memfs.AddDirectoryFromFS
+// consume a list of parts. It is intentionally unused — we
+// always materialize to a temp directory first because fs.FS
+// has no streaming variant and the parts are already
+// buffered by the multipart reader.
+var _ fs.File = (*fsFile)(nil)
+
+type fsFile struct {
+	io.ReadSeeker
+	info fs.FileInfo
+}
+
+func (f *fsFile) Stat() (fs.FileInfo, error) { return f.info, nil }
+func (f *fsFile) Close() error               { return nil }

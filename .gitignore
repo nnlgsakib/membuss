@@ -1,4 +1,4 @@
-﻿# Go
+# Go
 /bin/
 /dist/
 *.exe
@@ -46,4 +46,16 @@ secrets.yaml
 
 # Local dev artifacts
 /dev/
+
+
+# graphify
+graphify-out/
+
+# AI Assistant configs & caches
+.antigravitycli/
+.claude/
+CLAUDE.md
+skills-lock.json
+.agents/skills/
+
 

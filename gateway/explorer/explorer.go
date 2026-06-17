@@ -29,7 +29,7 @@ import (
 	"github.com/nnlgsakib/membuss/core/mid"
 )
 
-//go:embed assets/*.html assets/*.css assets/*.js
+//go:embed web/templates/*.html web/static/*.css web/static/*.js
 var assetFS embed.FS
 
 // ResolveStatus is the outcome of the explorer's "fetch
@@ -120,6 +120,13 @@ type AnchorInfo struct {
 	Synced     int64
 }
 
+// DirectoryFile is one file in a folder upload.
+type DirectoryFile struct {
+	Path string
+	Size int64
+	R    io.Reader
+}
+
 // Backend is the contract the explorer depends on. The
 // daemon supplies a real implementation; tests inject a
 // memBackend.
@@ -156,6 +163,10 @@ type Backend interface {
 	// resulting MID + metadata. name is the original
 	// filename (used for Content-Disposition on download).
 	Add(ctx context.Context, name string, r io.Reader) (ContentInfo, error)
+	// AddDirectory ingests a directory as MemFS from a set of files with relative paths.
+	AddDirectory(ctx context.Context, name string, files []DirectoryFile) (ContentInfo, error)
+	// Rename updates the name metadata of a MID.
+	Rename(ctx context.Context, m mid.MID, name string) error
 	// Peers returns the local PEX peer table.
 	Peers(ctx context.Context, limit int) ([]PeerInfo, error)
 	// SealedMIDs lists all sealed MIDs in the local store.
@@ -186,6 +197,35 @@ type Backend interface {
 	// AnchorMode reports whether the daemon was started
 	// with anchor mode enabled.
 	AnchorMode(ctx context.Context) bool
+
+	// --- Phase 17: MemFS support ---
+
+	// MemFSInfo describes a MemFS node: its type, size, mode,
+	// mtime, mime, and (for directories) the entries.
+	MemFSInfo(ctx context.Context, m mid.MID) (MemFSInfo, error)
+	// MemFSList returns the entries of a MemFS directory.
+	MemFSList(ctx context.Context, m mid.MID) ([]MemFSEntry, error)
+	// MemFSPathGet returns a streaming reader for the file
+	// at m/path.
+	MemFSPathGet(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error)
+}
+
+// MemFSInfo describes a MemFS node.
+type MemFSInfo struct {
+	MID   string
+	Type  string
+	Size  uint64
+	Mode  uint32
+	MTime int64
+	Mime  string
+}
+
+// MemFSEntry is one row of a MemFS directory listing.
+type MemFSEntry struct {
+	Name string `json:"name"`
+	MID  string `json:"mid"`
+	Type string `json:"type"`
+	Size uint64 `json:"size"`
 }
 
 // Config configures an Explorer.
@@ -239,7 +279,7 @@ func New(cfg Config) (*Explorer, error) {
 	funcs := template.FuncMap{
 		"humanBytes": humanBytes,
 	}
-	tpl, err := template.New("explorer").Funcs(funcs).ParseFS(assetFS, "assets/*.html")
+	tpl, err := template.New("explorer").Funcs(funcs).ParseFS(assetFS, "web/templates/*.html")
 	if err != nil {
 		return nil, fmt.Errorf("explorer: parse templates: %w", err)
 	}
@@ -273,6 +313,7 @@ func (e *Explorer) buildRouter() http.Handler {
 	r.Get("/mid/{mid}/resolve-stream", e.handleResolveStream)
 	r.Post("/mid/{mid}/seal", e.handleSeal)
 	r.Post("/mid/{mid}/unseal", e.handleUnseal)
+	r.Post("/mid/{mid}/rename", e.handleRename)
 	r.Get("/peers", e.handlePeers)
 	r.Get("/anchors", e.handleAnchors)
 	r.Get("/node", e.handleNode)
@@ -288,6 +329,11 @@ func (e *Explorer) buildRouter() http.Handler {
 
 // --- handlers ---
 
+type sealedMIDView struct {
+	MID  string
+	Name string
+}
+
 type indexData struct {
 	Title       string
 	NodeInfo    nodeInfoView
@@ -296,7 +342,7 @@ type indexData struct {
 	SealedCount int
 	BlockCount  uint64
 	Uptime      int64
-	SealedList  []string
+	SealedList  []sealedMIDView
 }
 
 type nodeInfoView struct {
@@ -312,23 +358,43 @@ func (e *Explorer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	b := e.cfg.Backend
 	version, build := b.NodeVersion(ctx)
 	sealed, _ := b.SealedMIDs(ctx)
-	sealedStrs := make([]string, 0, len(sealed))
+	
+	sealedList := make([]sealedMIDView, 0, len(sealed))
 	for _, m := range sealed {
-		sealedStrs = append(sealedStrs, m.String())
+		name := ""
+		if info, err := b.Stat(ctx, m); err == nil && info.Name != "" {
+			name = info.Name
+		}
+		sealedList = append(sealedList, sealedMIDView{
+			MID:  m.String(),
+			Name: name,
+		})
 	}
-	sort.Strings(sealedStrs)
-	if len(sealedStrs) > 50 {
-		sealedStrs = sealedStrs[:50]
+	sort.Slice(sealedList, func(i, j int) bool {
+		// If one of the elements is unnamed, sort it to the end or compare MIDs
+		if sealedList[i].Name == "" && sealedList[j].Name != "" {
+			return false
+		}
+		if sealedList[i].Name != "" && sealedList[j].Name == "" {
+			return true
+		}
+		if sealedList[i].Name != sealedList[j].Name {
+			return sealedList[i].Name < sealedList[j].Name
+		}
+		return sealedList[i].MID < sealedList[j].MID
+	})
+	if len(sealedList) > 50 {
+		sealedList = sealedList[:50]
 	}
 	peers, _ := b.Peers(ctx, e.cfg.PeerLimit)
 	data := indexData{
-		Title:    "Home",
-		PeerCount: len(peers),
+		Title:       "Home",
+		PeerCount:   len(peers),
 		StoreBytes:  mustStoreBytes(ctx, b),
 		SealedCount: len(sealed),
 		BlockCount:  mustBlockCount(ctx, b),
 		Uptime:      int64(b.Uptime(ctx).Seconds()),
-		SealedList:  sealedStrs,
+		SealedList:  sealedList,
 		NodeInfo: nodeInfoView{
 			PeerID:     b.LocalPeerID(ctx),
 			Addrs:      b.LocalAddrs(ctx),
@@ -344,6 +410,9 @@ type midData struct {
 	Title         string
 	MID           string
 	NotFound      bool
+	MemFSType     string
+	MemFSEntries  []MemFSEntry
+	SymlinkTarget string
 	Size          uint64
 	Blocks        uint64
 	Sealed        bool
@@ -425,6 +494,17 @@ func (e *Explorer) handleMID(w http.ResponseWriter, r *http.Request) {
 		data.TotalShards = data.DataShards + data.ParityShards
 		data.Health = fmt.Sprintf("%d/%d shards needed", data.DataShards, data.TotalShards)
 		data.HealthLabel = "OK"
+		// Phase 17: probe for MemFS metadata so the
+		// template can switch on type (file / dir /
+		// symlink / metadata / raw).
+		if minfo, err := b.MemFSInfo(ctx, root); err == nil {
+			data.MemFSType = minfo.Type
+			if minfo.Type == "dir" {
+				if entries, lerr := b.MemFSList(ctx, root); lerr == nil {
+					data.MemFSEntries = entries
+				}
+			}
+		}
 	}
 	e.render(w, "mid.html", data)
 }
@@ -517,11 +597,13 @@ func (e *Explorer) handleResolveStream(w http.ResponseWriter, r *http.Request) {
 	b := e.cfg.Backend
 
 	type sseEvent struct {
-		Blocks uint64 `json:"blocks,omitempty"`
-		Total  uint64 `json:"total,omitempty"`
-		Done   bool   `json:"done,omitempty"`
-		MID    string `json:"mid,omitempty"`
-		Error  string `json:"error,omitempty"`
+		State     string   `json:"state,omitempty"`
+		Blocks    uint64   `json:"blocks,omitempty"`
+		Total     uint64   `json:"total,omitempty"`
+		Done      bool     `json:"done,omitempty"`
+		MID       string   `json:"mid,omitempty"`
+		Error     string   `json:"error,omitempty"`
+		Providers []string `json:"providers,omitempty"`
 	}
 
 	sendEvent := func(ev sseEvent) {
@@ -529,6 +611,12 @@ func (e *Explorer) handleResolveStream(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 	}
+
+	// 1. Initial State: connecting to DHT
+	sendEvent(sseEvent{State: "connecting"})
+
+	provs, _ := b.Providers(ctx, root, e.cfg.ProviderLimit)
+	sendEvent(sseEvent{State: "connecting", Providers: provs})
 
 	timeout := e.cfg.ResolveTimeout
 	if timeout <= 0 {
@@ -538,7 +626,16 @@ func (e *Explorer) handleResolveStream(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	rc, info, err := b.ResolveWithProgress(rctx, root, func(blocksResolved, blocksTotal uint64) {
-		sendEvent(sseEvent{Blocks: blocksResolved, Total: blocksTotal})
+		state := "downloading"
+		if blocksTotal > 1 && blocksResolved <= 1 {
+			state = "checking"
+		}
+		sendEvent(sseEvent{
+			State:     state,
+			Blocks:    blocksResolved,
+			Total:     blocksTotal,
+			Providers: provs,
+		})
 	})
 	if err != nil {
 		sendEvent(sseEvent{Error: err.Error()})
@@ -599,6 +696,7 @@ type anchorsData struct {
 	Title      string
 	AnchorInfo AnchorInfo
 	Anchors    []AnchorRow
+	AnchorMode bool
 }
 
 func (e *Explorer) handleAnchors(w http.ResponseWriter, r *http.Request) {
@@ -613,6 +711,7 @@ func (e *Explorer) handleAnchors(w http.ResponseWriter, r *http.Request) {
 		Title:      "Anchors",
 		AnchorInfo: b.AnchorStatus(ctx),
 		Anchors:    rows,
+		AnchorMode: b.AnchorMode(ctx),
 	})
 }
 
@@ -685,6 +784,39 @@ func (e *Explorer) handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	ctx := r.Context()
+	b := e.cfg.Backend
+
+	// Check if this is a folder upload (multiple files sent under "files")
+	if files, ok := r.MultipartForm.File["files"]; ok && len(files) > 0 {
+		var dirFiles []DirectoryFile
+		for _, fh := range files {
+			f, err := fh.Open()
+			if err != nil {
+				http.Error(w, "open file: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer f.Close()
+
+			dirFiles = append(dirFiles, DirectoryFile{
+				Path: fh.Filename,
+				Size: fh.Size,
+				R:    f,
+			})
+		}
+
+		folderName := r.FormValue("folder_name")
+		res, err := b.AddDirectory(ctx, folderName, dirFiles)
+		if err != nil {
+			http.Error(w, "add directory: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, "/explorer/mid/"+res.MID, http.StatusSeeOther)
+		return
+	}
+
+	// Otherwise, fall back to single file upload
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		http.Error(w, "no file: "+err.Error(), http.StatusBadRequest)
@@ -692,8 +824,6 @@ func (e *Explorer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	ctx := r.Context()
-	b := e.cfg.Backend
 	res, err := b.Add(ctx, header.Filename, file)
 	if err != nil {
 		http.Error(w, "add: "+err.Error(), http.StatusInternalServerError)
@@ -702,12 +832,35 @@ func (e *Explorer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/explorer/mid/"+res.MID, http.StatusSeeOther)
 }
 
+func (e *Explorer) handleRename(w http.ResponseWriter, r *http.Request) {
+	midStr := chi.URLParam(r, "mid")
+	root, err := mid.Parse(midStr)
+	if err != nil {
+		http.Error(w, "bad mid: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	newName := strings.TrimSpace(r.FormValue("name"))
+	if newName == "" {
+		http.Error(w, "empty name", http.StatusBadRequest)
+		return
+	}
+	if err := e.cfg.Backend.Rename(r.Context(), root, newName); err != nil {
+		http.Error(w, "rename: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/explorer/mid/"+midStr, http.StatusSeeOther)
+}
+
 // handleStatic serves an embedded asset file.
 func (e *Explorer) handleStatic(name, contentType string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Cache-Control", "public, max-age=300")
-		data, err := assetFS.ReadFile(path.Join("assets", name))
+		data, err := assetFS.ReadFile(path.Join("web", "static", name))
 		if err != nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return

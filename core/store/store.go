@@ -1,4 +1,4 @@
-﻿// Package store defines the Blockstore interface that core/dag
+// Package store defines the Blockstore interface that core/dag
 // reads from and writes to, plus an in-memory implementation used
 // for tests and for nodes that want ephemeral storage.
 //
@@ -48,12 +48,15 @@ type Memstore struct {
 	meta   map[string][]byte
 
 	sealsMu sync.RWMutex
-	seals   map[string]struct{}
+	seals   map[string]bool
 }
 
 // NewMemstore returns an empty in-memory Blockstore.
 func NewMemstore() *Memstore {
-	return &Memstore{blocks: make(map[string][]byte)}
+	return &Memstore{
+		blocks: make(map[string][]byte),
+		seals:  make(map[string]bool),
+	}
 }
 
 func (m *Memstore) Put(mid mid.MID, data []byte) error {
@@ -100,7 +103,10 @@ func (m *Memstore) AllSealed() ([]mid.MID, error) {
 	m.sealsMu.RLock()
 	defer m.sealsMu.RUnlock()
 	out := make([]mid.MID, 0, len(m.seals))
-	for k := range m.seals {
+	for k, isChild := range m.seals {
+		if isChild {
+			continue
+		}
 		midID, err := mid.Parse(k)
 		if err != nil {
 			continue
@@ -186,18 +192,42 @@ func (m *Memstore) Len() int {
 func (m *Memstore) Seal(root mid.MID, recursive bool) error {
 	m.sealsMu.Lock()
 	if m.seals == nil {
-		m.seals = make(map[string]struct{})
+		m.seals = make(map[string]bool)
 	}
-	m.seals[root.String()] = struct{}{}
+	m.seals[root.String()] = false
 	m.sealsMu.Unlock()
+
+	if !recursive {
+		return nil
+	}
+	_ = Walk(m, root, func(id mid.MID, _ bool) error {
+		if id.Equal(root) {
+			return nil
+		}
+		if id.Codec() == mid.CodecMemFS {
+			m.sealsMu.Lock()
+			m.seals[id.String()] = true
+			m.sealsMu.Unlock()
+		}
+		return nil
+	})
 	return nil
 }
 
-// Unseal removes a seal record.
+// Unseal removes a seal record and recursively unseals child MemFS nodes.
 func (m *Memstore) Unseal(root mid.MID) error {
 	m.sealsMu.Lock()
 	delete(m.seals, root.String())
 	m.sealsMu.Unlock()
+
+	_ = Walk(m, root, func(id mid.MID, _ bool) error {
+		if id.Codec() == mid.CodecMemFS {
+			m.sealsMu.Lock()
+			delete(m.seals, id.String())
+			m.sealsMu.Unlock()
+		}
+		return nil
+	})
 	return nil
 }
 
