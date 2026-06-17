@@ -1,4 +1,4 @@
-﻿# Membuss
+# Membuss
 
 > Decentralized, content-addressed distributed storage and delivery
 > network written in Go.
@@ -434,6 +434,82 @@ These are the next concrete directions, in rough priority order:
 - **Streaming / live content.** A Memex extension for block
   ranges fetched as they become available, suitable for
   audio/video.
+
+## Running Manually (Without Docker)
+
+You can build and run both the Membuss daemon and CLI natively on your host machine without containerization.
+
+### 1. Prerequisites
+- **Go**: Version 1.21 or higher installed on your system.
+- **make**: (Optional) For Unix-like systems, a standard `make` utility.
+
+### 2. Compilation
+To compile the binaries directly to the `bin/` directory, run:
+```bash
+make build
+```
+This compiles:
+- `bin/membuss` (or `bin/membuss.exe` on Windows): The peer daemon.
+- `bin/membuss-cli` (or `bin/membuss-cli.exe` on Windows): The control CLI.
+
+*(Alternative compile without `make`)*:
+```bash
+go build -o bin/membuss ./cmd/membuss
+go build -o bin/membuss-cli ./cmd/membuss-cli
+```
+
+### 3. Running the Daemon
+The daemon runs as a background engine and manages the local BadgerDB blockstore, Kademlia DHT table, Memex block transfer streams, and HTTP gateways.
+
+To start the daemon using the default configuration file:
+```bash
+# Unix/macOS
+./bin/membuss -config membuss.yaml
+
+# Windows (PowerShell)
+.\bin\membuss.exe -config membuss.yaml
+```
+
+#### Configuration (`membuss.yaml`)
+You can configure bind addresses, data directories, and anchor modes in the config file. Key fields include:
+- `listen_addrs`: Multiaddresses libp2p binds to (default: port `4001`).
+- `data_dir`: Directory for BadgerDB files (default: `./data`).
+- `gateway_addr`: Public Mem-Gate HTTP server address (default: `127.0.0.1:8080`).
+- `api_addr`: Local Node control API address (default: `127.0.0.1:5001`).
+- `grpc_addr`: Local gRPC address CLI uses to communicate (default: `127.0.0.1:50051`).
+- `anchor_mode`: When enabled, local node acts as a full-sync anchor engine mirroring announcements (default: `false`).
+
+### 4. Operating via CLI
+With the daemon running, use the CLI in another terminal window to manage and seal content:
+
+* **Add File**: Ingest a single file into the local store and obtain its MID.
+  ```bash
+  ./bin/membuss-cli add <filepath>
+  ```
+* **Add Directory**: Ingest a folder hierarchy as a UnixFS-equivalent MemFS structure.
+  ```bash
+  ./bin/membuss-cli add-dir <dirpath>
+  ```
+* **Pin/Seal Content**: Seal content recursively to prevent Garbage Collection (GC) sweeps.
+  ```bash
+  ./bin/membuss-cli seal <MID>
+  ```
+* **Unseal Content**: Remove the recursive seal pin from a MID.
+  ```bash
+  ./bin/membuss-cli unseal <MID>
+  ```
+* **Stat Metadata**: Inspect block sizes, codecs, and providers.
+  ```bash
+  ./bin/membuss-cli stat <MID>
+  ```
+* **List Peers**: View all discovered network table peers.
+  ```bash
+  ./bin/membuss-cli peers
+  ```
+
+### 5. Accessing Web Interfaces
+- **Web Explorer & Gateway**: Open `http://localhost:8080/explorer/` in your browser. This built-in dashboard lets you browse sealed MIDs, inspect active DHT providers, watch Merkle DAG structures, and view real-time resolver downloads.
+- **Node Local API**: The control endpoint runs at `http://localhost:5001`.
 
 ## Docker
 
