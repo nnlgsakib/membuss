@@ -302,6 +302,7 @@ func (a *NodeAPI) handleAdd(w http.ResponseWriter, r *http.Request) {
 	// DIR node so the returned MID is addressable via the
 	// /mem/{mid}/ gateway path.
 	wrap := r.URL.Query().Get("wrap") == "dir"
+	name = sanitizePath(name)
 	res, err := a.cfg.Backend.AddFile(r.Context(), name, reader, wrap)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err)
@@ -356,6 +357,7 @@ func (a *NodeAPI) handleAddDir(w http.ResponseWriter, r *http.Request) {
 			part.Close()
 			continue
 		}
+		path = sanitizePath(path)
 		// Read the part body fully while the request is still
 		// open. The request body is closed by the defer above
 		// as soon as this handler returns, so any consumer
@@ -372,7 +374,7 @@ func (a *NodeAPI) handleAddDir(w http.ResponseWriter, r *http.Request) {
 		}
 		parts = append(parts, DirectoryPart{
 			Path: path,
-			Name: part.FileName(),
+			Name: sanitizePath(part.FileName()),
 			Data: data,
 		})
 	}
@@ -579,4 +581,20 @@ func newRequestID() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
+}
+
+// sanitizePath strips control characters, quotes, and invalid
+// characters to prevent HTML injection in downstream consumers.
+// It permits slashes (/) so directory structures are preserved.
+func sanitizePath(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '_'
+		}
+		switch r {
+		case '"', '\\', '<', '>', '|', ':', '*', '?':
+			return '_'
+		}
+		return r
+	}, s)
 }

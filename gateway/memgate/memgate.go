@@ -15,9 +15,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -300,7 +302,7 @@ func (m *MemGate) handleGet(w http.ResponseWriter, r *http.Request) {
 		// caller set explicitly (e.g. tests).
 		if w.Header().Get("Content-Disposition") == "" {
 			w.Header().Set("Content-Disposition",
-				fmt.Sprintf(`%s; filename=%q`, disp, name))
+				mime.FormatMediaType(disp, map[string]string{"filename": sanitizeFilename(name)}))
 		}
 		// X-Membuss-* mirrors for tooling that cannot
 		// read Content-Disposition reliably.
@@ -363,12 +365,12 @@ func (m *MemGate) handleDirList(w http.ResponseWriter, r *http.Request) {
 		`.muted{color:#888;font-size:.9em}</style></head><body>`+
 		`<h1>Directory <code>%s</code></h1>`+
 		`<table><tr><th>Name</th><th>Type</th><th>Size</th><th>MID</th></tr>`,
-		root.String(), root.String())
+		html.EscapeString(root.String()), html.EscapeString(root.String()))
 	for _, e := range entries {
 		fmt.Fprintf(w, `<tr><td><a href="/mem/%s/%s">%s</a></td>`+
 			`<td>%s</td><td>%d</td>`+
 			`<td class="muted"><a href="/explorer/mid/%s">%s…</a></td></tr>`,
-			root.String(), e.Name, e.Name, e.Type, e.Size, e.MID, shortMID(e.MID))
+			url.PathEscape(root.String()), url.PathEscape(e.Name), html.EscapeString(e.Name), html.EscapeString(e.Type), e.Size, url.PathEscape(e.MID), html.EscapeString(shortMID(e.MID)))
 	}
 	fmt.Fprintf(w, `</table></body></html>`)
 }
@@ -418,7 +420,7 @@ func (m *MemGate) handlePathGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Membuss-Name", filename)
 	w.Header().Set("X-Membuss-MimeType", ct)
 	if w.Header().Get("Content-Disposition") == "" {
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename=%q`, filename))
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": sanitizeFilename(filename)}))
 	}
 	if size > 0 {
 		w.Header().Set("Content-Length", strconv.FormatUint(size, 10))
@@ -561,38 +563,45 @@ func parseRange(s string, size int64) (int64, int64, error) {
 	startStr := strings.TrimSpace(spec[:dash])
 	endStr := strings.TrimSpace(spec[dash+1:])
 
-	var start, end int64
+	if size < 0 {
+		return 0, 0, fmt.Errorf("negative size")
+	}
+	var start, end uint64
 	var err error
 	if startStr == "" {
 		// Suffix range: last N bytes.
-		n, perr := strconv.ParseInt(endStr, 10, 64)
-		if perr != nil || n <= 0 {
+		n, perr := strconv.ParseUint(endStr, 10, 64)
+		if perr != nil || n == 0 {
 			return 0, 0, fmt.Errorf("bad suffix length")
 		}
-		if n > size {
-			n = size
+		if n > uint64(size) {
+			n = uint64(size)
 		}
-		start = size - n
-		end = size
-		return start, end, nil
+		start = uint64(size) - n
+		end = uint64(size)
+		return int64(start), int64(end), nil
 	}
-	start, err = strconv.ParseInt(startStr, 10, 64)
+	start, err = strconv.ParseUint(startStr, 10, 64)
 	if err != nil {
 		return 0, 0, fmt.Errorf("bad start: %w", err)
 	}
 	if endStr == "" {
-		end = size
+		end = uint64(size)
 	} else {
-		end, err = strconv.ParseInt(endStr, 10, 64)
+		end, err = strconv.ParseUint(endStr, 10, 64)
 		if err != nil {
 			return 0, 0, fmt.Errorf("bad end: %w", err)
 		}
-		end++ // bytes=N-M is inclusive of M
+		if size > 0 && end >= uint64(size-1) {
+			end = uint64(size)
+		} else {
+			end++ // bytes=N-M is inclusive of M
+		}
 	}
-	if start < 0 || start >= size || end <= start || end > size {
+	if start >= uint64(size) || end <= start || end > uint64(size) {
 		return 0, 0, fmt.Errorf("range out of bounds")
 	}
-	return start, end, nil
+	return int64(start), int64(end), nil
 }
 
 // detectContentType picks a MIME type using (in order):
@@ -621,6 +630,21 @@ func chooseContentType(info, fallback string) string {
 		return info
 	}
 	return fallback
+}
+
+// sanitizeFilename strips control characters, quotes, and invalid
+// characters to prevent header and HTML injection.
+func sanitizeFilename(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '_'
+		}
+		switch r {
+		case '"', '\\', '/', '<', '>', '|', ':', '*', '?':
+			return '_'
+		}
+		return r
+	}, s)
 }
 
 // --- LRU ---
