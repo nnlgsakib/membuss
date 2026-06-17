@@ -194,7 +194,10 @@ func (a *memgateAdapter) DAGNodeJSON(ctx context.Context, m mid.MID) ([]byte, er
 			}
 		}
 	} else {
-		links, _ = parseDAGLinks(raw)
+		var node membusspb.DAGNode
+		if uerr := proto.Unmarshal(raw, &node); uerr == nil {
+			links = node.Links
+		}
 	}
 	size := uint64(len(raw))
 	view := map[string]any{
