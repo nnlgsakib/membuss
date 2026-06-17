@@ -201,6 +201,9 @@ func (m *Memstore) Seal(root mid.MID, recursive bool) error {
 		return nil
 	}
 	_ = Walk(m, root, func(id mid.MID, _ bool) error {
+		if id.Equal(root) {
+			return nil
+		}
 		if id.Codec() == mid.CodecMemFS {
 			m.sealsMu.Lock()
 			m.seals[id.String()] = true

@@ -47,6 +47,9 @@ func (s *MemStore) Seal(root mid.MID, recursive bool) error {
 		return nil
 	}
 	werr := Walk(s, root, func(m mid.MID, _ bool) error {
+		if m.Equal(root) {
+			return nil
+		}
 		if m.Codec() == mid.CodecMemFS {
 			_ = s.writeSeal(m, true)
 		}
