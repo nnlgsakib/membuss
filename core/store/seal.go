@@ -39,7 +39,7 @@ func (s *MemStore) Seal(root mid.MID, recursive bool) error {
 		return errors.New("store: zero MID")
 	}
 
-	if err := s.writeSeal(root); err != nil {
+	if err := s.writeSeal(root, false); err != nil {
 		return err
 	}
 
@@ -48,7 +48,7 @@ func (s *MemStore) Seal(root mid.MID, recursive bool) error {
 	}
 	werr := Walk(s, root, func(m mid.MID, _ bool) error {
 		if m.Codec() == mid.CodecMemFS {
-			_ = s.writeSeal(m)
+			_ = s.writeSeal(m, true)
 		}
 		return nil
 	})
@@ -147,6 +147,7 @@ func (s *MemStore) AllSealed() ([]mid.MID, error) {
 			raw = raw[len(prefix):]
 			
 			codec := mid.CodecRaw
+			isChild := false
 			item := it.Item()
 			if item.ValueSize() == 8 {
 				var val [8]byte
@@ -155,8 +156,14 @@ func (s *MemStore) AllSealed() ([]mid.MID, error) {
 					return nil
 				})
 				if err == nil {
-					codec = binary.BigEndian.Uint64(val[:])
+					v := binary.BigEndian.Uint64(val[:])
+					isChild = (v & (1 << 63)) != 0
+					codec = v &^ (1 << 63)
 				}
+			}
+			
+			if isChild {
+				continue
 			}
 			
 			m, err := mid.FromMultihash(codec, raw)
@@ -316,10 +323,14 @@ func (s *MemStore) GCWithMinAge(ctx context.Context, minAge time.Duration) (uint
 }
 
 // writeSeal writes a single seal record.
-func (s *MemStore) writeSeal(m mid.MID) error {
+func (s *MemStore) writeSeal(m mid.MID, child bool) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		val := make([]byte, 8)
-		binary.BigEndian.PutUint64(val, m.Codec())
+		codecVal := m.Codec()
+		if child {
+			codecVal |= 1 << 63
+		}
+		binary.BigEndian.PutUint64(val, codecVal)
 		return txn.Set(sealKey(m), val)
 	})
 }
