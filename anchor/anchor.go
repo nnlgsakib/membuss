@@ -292,8 +292,16 @@ func (e *AnchorEngine) Status() AnchorStatus {
 	anchors := len(e.anchors)
 	e.mu.Unlock()
 	var held int64
-	if sz, err := e.cfg.Store.Size(); err == nil {
-		held = int64(sz)
+	if ab, ok := e.cfg.Store.(interface {
+		AllBlocks() ([]mid.MID, error)
+	}); ok {
+		if blocks, err := ab.AllBlocks(); err == nil {
+			held = int64(len(blocks))
+		}
+	} else if lenGetter, ok := e.cfg.Store.(interface {
+		Len() int
+	}); ok {
+		held = int64(lenGetter.Len())
 	}
 	return AnchorStatus{
 		PeerID:     e.cfg.Host.ID().String(),
