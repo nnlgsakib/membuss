@@ -114,10 +114,14 @@ func (a *apiAdapter) Stat(ctx context.Context, m mid.MID) (api.StatInfo, error) 
 		return api.StatInfo{Present: false}, err
 	}
 	return api.StatInfo{
-		Present: res.Present,
-		Size:    res.Size,
-		Blocks:  res.Blocks,
-		Sealed:  res.Sealed,
+		Present:       res.Present,
+		Size:          res.Size,
+		Blocks:        res.Blocks,
+		Sealed:        res.Sealed,
+		Name:          res.Name,
+		MimeType:      res.MimeType,
+		Sealers:       res.Sealers,
+		AnchorSealers: res.AnchorSealers,
 	}, nil
 }
 
@@ -134,8 +138,9 @@ func (a *apiAdapter) Peers(limit int) ([]api.PeerInfo, error) {
 	out := make([]api.PeerInfo, 0, len(infos))
 	for _, p := range infos {
 		out = append(out, api.PeerInfo{
-			PeerID: p.PeerID,
-			Addrs:  p.Addrs,
+			PeerID:   p.PeerID,
+			Addrs:    p.Addrs,
+			IsAnchor: p.IsAnchor,
 		})
 	}
 	return out, nil

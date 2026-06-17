@@ -3,6 +3,7 @@
   <h1>Anchors</h1>
   <p class="muted">Anchor nodes (full-sync engines) known to this peer.</p>
 
+  {{if .AnchorMode}}
   <div class="card">
     <h2>Local Anchor Engine</h2>
     <dl>
@@ -14,6 +15,7 @@
       <dt>Synced</dt><dd>{{.AnchorInfo.Synced}}</dd>
     </dl>
   </div>
+  {{end}}
 
   <div class="table-responsive">
     <table class="data">
@@ -33,11 +35,7 @@
         {{else}}
         <tr>
           <td colspan="2" class="muted">
-            {{if .AnchorMode}}
-            No other anchors registered.
-            {{else}}
-            No anchors registered (anchor mode is disabled).
-            {{end}}
+            No other anchors registered on the network yet.
           </td>
         </tr>
         {{end}}

@@ -371,7 +371,45 @@ func (b *daemonBackend) Stat(ctx context.Context, midStr string) (serverpkg.Stat
 		Name:     oi.Name,
 		MimeType: oi.MimeType,
 	}
+
+	if b.dht != nil {
+		provCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		provs, _ := b.dht.FindProviders(provCtx, root)
+		cancel()
+		info.Sealers = len(provs)
+
+		anchors := b.getKnownAnchors(ctx)
+		for _, p := range provs {
+			if _, ok := anchors[p.ID.String()]; ok {
+				info.AnchorSealers++
+			}
+		}
+	}
+
 	return info, nil
+}
+
+func (b *daemonBackend) getKnownAnchors(ctx context.Context) map[string]struct{} {
+	anchors := make(map[string]struct{})
+	if b.anchor != nil {
+		for _, a := range b.anchor.AnchorPeers() {
+			anchors[a.ID.String()] = struct{}{}
+		}
+	}
+	if b.dht != nil {
+		sCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		ch, err := b.dht.SearchValue(sCtx, anchor.AnchorRegistryKey)
+		if err == nil {
+			for val := range ch {
+				ai, err := anchor.DecodeAnchorValue(val)
+				if err == nil && ai.ID != "" {
+					anchors[ai.ID.String()] = struct{}{}
+				}
+			}
+		}
+	}
+	return anchors
 }
 
 // Peers returns the local PEX peer table.
@@ -379,6 +417,7 @@ func (b *daemonBackend) Peers(limit uint32) ([]serverpkg.NodePeerInfo, uint32, e
 	if b.pex == nil {
 		return nil, 0, nil
 	}
+	anchors := b.getKnownAnchors(context.Background())
 	infos := b.pex.Peers()
 	out := make([]serverpkg.NodePeerInfo, 0, len(infos))
 	for _, p := range infos {
@@ -386,9 +425,11 @@ func (b *daemonBackend) Peers(limit uint32) ([]serverpkg.NodePeerInfo, uint32, e
 		for _, a := range p.Addrs {
 			addrs = append(addrs, a)
 		}
+		_, isAnchor := anchors[p.PeerId]
 		out = append(out, serverpkg.NodePeerInfo{
-			PeerID: p.PeerId,
-			Addrs:  addrs,
+			PeerID:   p.PeerId,
+			Addrs:    addrs,
+			IsAnchor: isAnchor,
 		})
 	}
 	if limit > 0 && uint32(len(out)) > limit {
@@ -412,15 +453,18 @@ func (b *daemonBackend) DHTPeek(ctx context.Context, midStr string, limit uint32
 	if err != nil {
 		return nil, err
 	}
+	anchors := b.getKnownAnchors(ctx)
 	out := make([]serverpkg.NodePeerInfo, 0, len(provs))
 	for _, p := range provs {
 		addrs := make([]string, 0, len(p.Addrs))
 		for _, a := range p.Addrs {
 			addrs = append(addrs, a.String())
 		}
+		_, isAnchor := anchors[p.ID.String()]
 		out = append(out, serverpkg.NodePeerInfo{
-			PeerID: p.ID.String(),
-			Addrs:  addrs,
+			PeerID:   p.ID.String(),
+			Addrs:    addrs,
+			IsAnchor: isAnchor,
 		})
 	}
 	if limit > 0 && uint32(len(out)) > limit {

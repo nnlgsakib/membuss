@@ -87,6 +87,8 @@ type ContentInfo struct {
 	// older daemon.
 	Name     string
 	MimeType string
+	Sealers       int
+	AnchorSealers int
 }
 
 // ErrNotFound is returned by Backend.Resolve when the MID
@@ -101,6 +103,7 @@ var ErrNotFound = errors.New("explorer: not found locally and no provider reacha
 type PeerInfo struct {
 	PeerID    string
 	Addrs     []string
+	IsAnchor  bool
 	Connected bool
 }
 
@@ -426,6 +429,8 @@ type midData struct {
 	Providers     []string
 	Name          string
 	MimeType      string
+	Sealers       int
+	AnchorSealers int
 	// ResolveStatus reports what the explorer's
 	// background fetch attempt did when the MID was
 	// not local. The four interesting values are
@@ -465,6 +470,8 @@ func (e *Explorer) handleMID(w http.ResponseWriter, r *http.Request) {
 		NotFound: !present,
 		Name:     info.Name,
 		MimeType: info.MimeType,
+		Sealers:       info.Sealers,
+		AnchorSealers: info.AnchorSealers,
 	}
 	if !present {
 		provs, _ := b.Providers(ctx, root, e.cfg.ProviderLimit)

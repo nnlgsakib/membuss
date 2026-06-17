@@ -127,12 +127,15 @@ type StatInfo struct {
 	// added by an older daemon.
 	Name     string
 	MimeType string
+	Sealers       int
+	AnchorSealers int
 }
 
 // PeerInfo is one row of the local peer table.
 type PeerInfo struct {
-	PeerID string
-	Addrs  []string
+	PeerID   string
+	Addrs    []string
+	IsAnchor bool
 }
 
 // GCInfo is the return value of Backend.GC.

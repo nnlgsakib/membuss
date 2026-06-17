@@ -8,6 +8,7 @@
         <tr>
           <th>Peer ID</th>
           <th>Addresses</th>
+          <th>Anchor</th>
           <th>Status</th>
         </tr>
       </thead>
@@ -20,10 +21,11 @@
               {{range .Addrs}}<li class="mono small">{{.}}</li>{{end}}
             </ul>
           </td>
+          <td>{{if .IsAnchor}}yes{{else}}no{{end}}</td>
           <td>{{if .Connected}}connected{{else}}known{{end}}</td>
         </tr>
         {{else}}
-        <tr><td colspan="3" class="muted">No peers known yet.</td></tr>
+        <tr><td colspan="4" class="muted">No peers known yet.</td></tr>
         {{end}}
       </tbody>
     </table>

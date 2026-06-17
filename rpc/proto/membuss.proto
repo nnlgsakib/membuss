@@ -1,4 +1,4 @@
-﻿// Wire schema for the Membuss libp2p protocols (PEX, Memex) and
+// Wire schema for the Membuss libp2p protocols (PEX, Memex) and
 // the CLI <-> daemon gRPC service.
 syntax = "proto3";
 
@@ -102,6 +102,8 @@ message StatResponse {
   // Phase 19: human-friendly metadata stored at Add time.
   string name = 7;
   string mime_type = 8;
+  int32 sealers = 9;
+  int32 anchor_sealers = 10;
 }
 
 message ErasureInfo {
@@ -116,6 +118,7 @@ message ErasureInfo {
 message NodePeerInfo {
   string peer_id = 1;
   repeated string addrs = 2;
+  bool is_anchor = 3;
 }
 
 message PeersRequest {

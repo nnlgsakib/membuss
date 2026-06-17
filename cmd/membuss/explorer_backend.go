@@ -17,6 +17,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 
+	"github.com/nnlgsakib/membuss/anchor"
 	"github.com/nnlgsakib/membuss/core/memfs"
 	"github.com/nnlgsakib/membuss/core/mid"
 	"github.com/nnlgsakib/membuss/core/store"
@@ -46,32 +47,21 @@ func newExplorerAdapter(b *daemonBackend, anchorMode bool) *explorerAdapter {
 
 // Stat returns a metadata snapshot.
 func (a *explorerAdapter) Stat(ctx context.Context, m mid.MID) (explorer.ContentInfo, error) {
-	b := a.b
-	if b.store == nil {
-		return explorer.ContentInfo{}, errors.New("explorer: no store")
-	}
-	has, err := b.store.Has(m)
+	st, err := a.b.Stat(ctx, m.String())
 	if err != nil {
 		return explorer.ContentInfo{}, err
 	}
-	if !has {
-		return explorer.ContentInfo{}, nil
-	}
-	sealed, _ := b.store.IsSealed(m)
-	blocks, size, err := countDAG(b.store, m)
-	if err != nil {
-		return explorer.ContentInfo{}, err
-	}
-	oi, _ := store.GetObjectInfo(b.store, m)
 	return explorer.ContentInfo{
-		MID:      m.String(),
-		Size:     size,
-		Blocks:   blocks,
-		Sealed:   sealed,
-		Present:  true,
-		Codec:    m.Codec(),
-		Name:     oi.Name,
-		MimeType: oi.MimeType,
+		MID:           m.String(),
+		Size:          st.Size,
+		Blocks:        st.Blocks,
+		Sealed:        st.Sealed,
+		Present:       st.Present,
+		Codec:         st.Codec,
+		Name:          st.Name,
+		MimeType:      st.MimeType,
+		Sealers:       st.Sealers,
+		AnchorSealers: st.AnchorSealers,
 	}, nil
 }
 
@@ -199,13 +189,16 @@ func (a *explorerAdapter) ResolveWithProgress(ctx context.Context, m mid.MID, pr
 		}
 		return nil, explorer.ContentInfo{}, err
 	}
+	st, _ := a.b.Stat(ctx, m.String())
 	return rc, explorer.ContentInfo{
-		MID:      info.MID,
-		Size:     info.Size,
-		Blocks:   info.Blocks,
-		Sealed:   info.Sealed,
-		Name:     info.Name,
-		MimeType: info.MimeType,
+		MID:           info.MID,
+		Size:          info.Size,
+		Blocks:        info.Blocks,
+		Sealed:        info.Sealed,
+		Name:          info.Name,
+		MimeType:      info.MimeType,
+		Sealers:       st.Sealers,
+		AnchorSealers: st.AnchorSealers,
 	}, nil
 }
 
@@ -216,23 +209,16 @@ var _ memgate.ContentInfo
 
 // Peers returns the local PEX peer table.
 func (a *explorerAdapter) Peers(ctx context.Context, limit int) ([]explorer.PeerInfo, error) {
-	b := a.b
-	if b.pex == nil {
-		return nil, nil
-	}
-	infos := b.pex.Peers()
-	if limit > 0 && len(infos) > limit {
-		infos = infos[:limit]
+	infos, _, err := a.b.Peers(uint32(limit))
+	if err != nil {
+		return nil, err
 	}
 	out := make([]explorer.PeerInfo, 0, len(infos))
 	for _, p := range infos {
-		addrs := make([]string, 0, len(p.Addrs))
-		for _, a := range p.Addrs {
-			addrs = append(addrs, a)
-		}
 		out = append(out, explorer.PeerInfo{
-			PeerID:    p.PeerId,
-			Addrs:     addrs,
+			PeerID:    p.PeerID,
+			Addrs:     p.Addrs,
+			IsAnchor:  p.IsAnchor,
 			Connected: false, // explorer does not have a direct "connected" view
 		})
 	}
@@ -286,20 +272,37 @@ func (a *explorerAdapter) StoreBytes(ctx context.Context) (uint64, error) {
 
 // AnchorPeers returns the registered anchor peers.
 func (a *explorerAdapter) AnchorPeers(ctx context.Context) ([]explorer.AnchorRow, error) {
-	if a.b.anchor == nil {
-		return nil, nil
-	}
-	anchors := a.b.anchor.AnchorPeers()
-	out := make([]explorer.AnchorRow, 0, len(anchors))
-	for _, ai := range anchors {
-		addrs := make([]string, 0, len(ai.Addrs))
-		for _, m := range ai.Addrs {
-			addrs = append(addrs, m.String())
+	var out []explorer.AnchorRow
+	if a.b.anchor != nil {
+		for _, ai := range a.b.anchor.AnchorPeers() {
+			addrs := make([]string, 0, len(ai.Addrs))
+			for _, m := range ai.Addrs {
+				addrs = append(addrs, m.String())
+			}
+			out = append(out, explorer.AnchorRow{
+				PeerID: ai.ID.String(),
+				Addrs:  addrs,
+			})
 		}
-		out = append(out, explorer.AnchorRow{
-			PeerID: ai.ID.String(),
-			Addrs:  addrs,
-		})
+	} else if a.b.dht != nil {
+		sCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		ch, err := a.b.dht.SearchValue(sCtx, "/membuss/anchors/v1")
+		if err == nil {
+			for val := range ch {
+				ai, err := anchor.DecodeAnchorValue(val)
+				if err == nil && ai.ID != "" {
+					addrs := make([]string, 0, len(ai.Addrs))
+					for _, m := range ai.Addrs {
+						addrs = append(addrs, m.String())
+					}
+					out = append(out, explorer.AnchorRow{
+						PeerID: ai.ID.String(),
+						Addrs:  addrs,
+					})
+				}
+			}
+		}
 	}
 	return out, nil
 }
@@ -408,13 +411,13 @@ func (a *explorerAdapter) Add(ctx context.Context, name string, r io.Reader) (ex
 		return explorer.ContentInfo{}, err
 	}
 	return explorer.ContentInfo{
-		MID:      res.MID,
-		Size:     res.Size,
-		Blocks:   res.Blocks,
-		Sealed:   res.Sealed,
-		Name:     res.Name,
-		MimeType: res.MimeType,
-		Present:  true,
+		MID:           res.MID,
+		Size:          res.Size,
+		Blocks:        res.Blocks,
+		Sealed:        res.Sealed,
+		Name:          res.Name,
+		MimeType:      res.MimeType,
+		Present:       true,
 	}, nil
 }
 
@@ -490,13 +493,13 @@ func (a *explorerAdapter) AddDirectory(ctx context.Context, name string, files [
 	})
 
 	return explorer.ContentInfo{
-		MID:      res.MID.String(),
-		Size:     res.Size,
-		Blocks:   res.Block,
-		Sealed:   true,
-		Present:  true,
-		Name:     dirName,
-		MimeType: "inode/directory",
+		MID:           res.MID.String(),
+		Size:          res.Size,
+		Blocks:        res.Block,
+		Sealed:        true,
+		Present:       true,
+		Name:          name,
+		MimeType:      "inode/directory",
 	}, nil
 }
 

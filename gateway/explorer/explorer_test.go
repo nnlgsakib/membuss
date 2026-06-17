@@ -474,7 +474,8 @@ func TestPeers(t *testing.T) {
 }
 
 func TestAnchors(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv, b := newTestServer(t)
+	b.setAnchorMode(true)
 	resp, body := get(t, srv, "/anchors")
 	if resp.StatusCode != 200 {
 		t.Errorf("status: %d", resp.StatusCode)

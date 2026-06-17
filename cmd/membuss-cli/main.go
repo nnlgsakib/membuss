@@ -351,6 +351,7 @@ func newStatCmd() *cobra.Command {
 				fmt.Fprintf(tw, "size\t%s (%d bytes)\n", formatBytes(resp.Size), resp.Size)
 				fmt.Fprintf(tw, "blocks\t%d\n", resp.Blocks)
 				fmt.Fprintf(tw, "sealed\t%t\n", resp.Sealed)
+				fmt.Fprintf(tw, "sealers\t%d (anchors: %d)\n", resp.Sealers, resp.AnchorSealers)
 				fmt.Fprintf(tw, "codec\t0x%x\n", resp.Codec)
 				if resp.Erasure != nil {
 					fmt.Fprintf(tw, "erasure\t%d+%d (%d shards)\n", resp.Erasure.DataShards, resp.Erasure.ParityShards, len(resp.Erasure.ShardMids))
@@ -377,9 +378,9 @@ func newPeersCmd() *cobra.Command {
 					return err
 				}
 				tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-				fmt.Fprintf(tw, "PEER ID\tADDRS\n")
+				fmt.Fprintf(tw, "PEER ID\tANCHOR\tADDRS\n")
 				for _, p := range resp.Peers {
-					fmt.Fprintf(tw, "%s\t%s\n", p.PeerId, strings.Join(p.Addrs, ","))
+					fmt.Fprintf(tw, "%s\t%t\t%s\n", p.PeerId, p.IsAnchor, strings.Join(p.Addrs, ","))
 				}
 				fmt.Fprintf(tw, "\n")
 				fmt.Fprintf(tw, "total\t%d (showing %d)\n", resp.Total, len(resp.Peers))
@@ -417,9 +418,9 @@ func newDHTPeekCmd() *cobra.Command {
 					return err
 				}
 				tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-				fmt.Fprintf(tw, "PEER ID\tADDRS\n")
+				fmt.Fprintf(tw, "PEER ID\tANCHOR\tADDRS\n")
 				for _, p := range resp.Providers {
-					fmt.Fprintf(tw, "%s\t%s\n", p.PeerId, strings.Join(p.Addrs, ","))
+					fmt.Fprintf(tw, "%s\t%t\t%s\n", p.PeerId, p.IsAnchor, strings.Join(p.Addrs, ","))
 				}
 				return tw.Flush()
 			})

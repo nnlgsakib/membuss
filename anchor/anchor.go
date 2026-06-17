@@ -19,6 +19,7 @@ package anchor
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -200,6 +201,9 @@ func (e *AnchorEngine) Start(ctx context.Context) error {
 		}}
 	}
 	e.loadRegistry()
+	if val, err := e.cfg.Store.GetMeta("anchor_synced"); err == nil && len(val) == 8 {
+		atomic.StoreInt64(&e.synced, int64(binary.BigEndian.Uint64(val)))
+	}
 	for _, ai := range e.cfg.BootstrapAnchors {
 		e.AddAnchor(ai)
 	}
@@ -383,7 +387,10 @@ func (e *AnchorEngine) tick(ctx context.Context) {
 			continue
 		}
 		e.sealFetched(ctx, m)
-		atomic.AddInt64(&e.synced, 1)
+		val := atomic.AddInt64(&e.synced, 1)
+		buf := make([]byte, 8)
+		binary.BigEndian.PutUint64(buf, uint64(val))
+		_ = e.cfg.Store.PutMeta("anchor_synced", buf)
 		e.markSeen(m)
 	}
 }
@@ -439,7 +446,10 @@ func (e *AnchorEngine) fetchIfMissing(ctx context.Context, m mid.MID) {
 		return
 	}
 	e.sealFetched(ctx, m)
-	atomic.AddInt64(&e.synced, 1)
+	val := atomic.AddInt64(&e.synced, 1)
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, uint64(val))
+	_ = e.cfg.Store.PutMeta("anchor_synced", buf)
 	e.markSeen(m)
 }
 

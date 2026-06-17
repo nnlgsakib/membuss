@@ -69,6 +69,7 @@
         <dt>Blocks</dt><dd>{{.Blocks}}</dd>
         <dt>Sealed</dt><dd>{{if .Sealed}}yes{{else}}no{{end}}</dd>
         <dt>Codec</dt><dd>0x{{printf "%x" .Codec}}</dd>
+        <dt>Sealers</dt><dd>{{.Sealers}} (anchors: {{.AnchorSealers}})</dd>
         <dt>Content-Type</dt><dd>inode/directory</dd>
       </dl>
       <div class="actions">
@@ -117,7 +118,8 @@
         <dt>Blocks</dt><dd>{{.Blocks}}</dd>
         <dt>Sealed</dt><dd>{{if .Sealed}}yes{{else}}no{{end}}</dd>
         <dt>Codec</dt><dd>0x{{printf "%x" .Codec}}</dd>
-        <dt>Content-Type</dt><dd>{{if .ContentType}}{{.ContentType}}{{else}}(unknown){{end}}</dd>
+        <dt>Sealers</dt><dd>{{.Sealers}} (anchors: {{.AnchorSealers}})</dd>
+        <dt>Content-Type</dt><dd>{{if .MimeType}}{{.MimeType}}{{else}}application/octet-stream{{end}}</dd>
       </dl>
       <div class="actions">
         <a class="btn primary" href="/mem/{{.MID}}" target="_blank">View</a>
