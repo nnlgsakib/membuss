@@ -18,11 +18,18 @@
 #   make docker-compose-down   docker compose down -v
 #   make docker-compose-logs   docker compose logs -f
 
+# Detect OS for binary extension
+ifeq ($(OS),Windows_NT)
+    BIN_EXT := .exe
+else
+    BIN_EXT :=
+endif
+
 GO            ?= go
 PKG           := ./...
 BUILD_DIR     := bin
-DAEMON_BIN    := $(BUILD_DIR)/membuss
-CLI_BIN       := $(BUILD_DIR)/membuss-cli
+DAEMON_BIN    := $(BUILD_DIR)/membuss$(BIN_EXT)
+CLI_BIN       := $(BUILD_DIR)/membuss-cli$(BIN_EXT)
 CONFIG_FILE   ?= membuss.yaml
 
 # Docker knobs. Override on the command line, e.g.
@@ -38,7 +45,6 @@ COMPOSE       ?= docker compose
         docker-compose-up docker-compose-down docker-compose-logs
 
 build:
-	mkdir -p $(BUILD_DIR)
 	$(GO) build -o $(DAEMON_BIN)  ./cmd/membuss
 	$(GO) build -o $(CLI_BIN)     ./cmd/membuss-cli
 
