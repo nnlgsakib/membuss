@@ -122,9 +122,6 @@ func (b *Builder) AddFile(name string, r io.Reader, mode fs.FileMode, mtime time
 		totalSize += uint64(blk.Size())
 	}
 
-	if len(leaves) == 0 {
-		return AddResult{}, errors.New("memfs: empty input")
-	}
 
 	// Build the FILE node envelope.
 	pb := &membusspb.MemFSNode{

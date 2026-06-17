@@ -435,3 +435,28 @@ func TestDirFS_Walk(t *testing.T) {
 		t.Errorf("walk visited %d nodes, want >= 3", count)
 	}
 }
+
+func TestAddFile_Empty(t *testing.T) {
+	bs := newTestStore(t)
+	b := NewBuilder(bs)
+
+	res, err := b.AddFile("empty.txt", bytes.NewReader(nil), 0644, time.Now(), "text/plain")
+	if err != nil {
+		t.Fatalf("AddFile empty: %v", err)
+	}
+	if res.Size != 0 {
+		t.Errorf("Size: got %d, want 0", res.Size)
+	}
+
+	r := NewResolver(bs)
+	n, err := r.Resolve(context.TODO(), res.MID)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !n.IsFile() {
+		t.Errorf("expected file node, got type %v", n.GetType())
+	}
+	if n.TotalSize() != 0 {
+		t.Errorf("TotalSize: got %d, want 0", n.TotalSize())
+	}
+}
