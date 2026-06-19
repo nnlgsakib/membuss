@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package membuss.v1;
+
+option go_package = "github.com/nnlgsakib/membuss/proto;membusspb";
+
+enum ValidityType {
+  EOL = 0;   // expires at validity timestamp
+}
+
+message MemRoute {
+  bytes  target  = 1;   // MID or /mem/... path
+  uint32 weight  = 2;   // relative weight (0-100)
+  string label   = 3;   // e.g. "staging", "production", "canary"
+  map<string,string> conditions = 4; // e.g. country, user-agent
+}
+
+message MemLogEntry {
+  uint64 sequence   = 1;
+  bytes  value      = 2;   // MID at that sequence
+  int64  timestamp  = 3;
+  bytes  signature  = 4;   // signed by key or delegate
+  string message    = 5;   // optional human note e.g. "v2.1 release"
+}
+
+message MemLog {
+  repeated MemLogEntry entries = 1;
+}
+
+message MemNSRecord {
+  bytes  value          = 1;   // target: MID or path e.g. /mem/mem1abc...
+  bytes  signature      = 2;   // signature over value+sequence+validity
+  uint64 sequence       = 3;   // monotonically increasing version number
+  int64  validity       = 4;   // unix ns expiry timestamp
+  bytes  public_key     = 5;   // signer's public key (for verification)
+  uint64 ttl            = 6;   // hint for caching (nanoseconds)
+  ValidityType validity_type = 7;
+
+  // Advanced features IPNS cannot do:
+  repeated MemRoute  routes     = 8;  // weighted multi-target routing
+  repeated bytes     delegates  = 9;  // delegated signer public keys
+  MemLog             changelog  = 10; // signed history of changes
+  map<string,string> meta       = 11; // arbitrary metadata
+}

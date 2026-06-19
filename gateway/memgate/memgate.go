@@ -29,6 +29,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/nnlgsakib/membuss/core/memns"
 	"github.com/nnlgsakib/membuss/core/mid"
 )
 
@@ -136,6 +137,9 @@ type Config struct {
 	// enforced on the public Mem-Gate server, evaluated
 	// per minute. Zero disables rate limiting. Default 100.
 	RateLimitPerMin int
+
+	// Phase 18: MemNS resolver
+	MemNSResolver *memns.Resolver
 }
 
 // MemGate is the public HTTP gateway.
@@ -199,13 +203,23 @@ func (m *MemGate) buildRouter() chi.Router {
 	// limiter by setting RateLimitPerMin=0 in config.
 	r.Use(m.ipLimiter.Middleware)
 
+	// Phase 18: custom domain serving middleware
+	r.Use(m.customDomainMiddleware)
+
 	r.Get("/healthz", m.handleHealth)
 	r.Get("/mem/{mid}", m.handleGet)
 	r.Head("/mem/{mid}", m.handleHead)
 	// Directory listing (HTML or JSON) when the path
 	// component is empty.
 	r.Get("/mem/{mid}/", m.handleDirList)
-	r.Get("/mem/{mid}/{path:*}", m.handlePathGet)
+	r.Get("/mem/{mid}/*", m.handlePathGet)
+
+	// Phase 18: MemNS and MemLink routes
+	r.Get("/memns/{name}", m.handleMemNSResolve)
+	r.Get("/memns/{name}/*", m.handleMemNSResolve)
+	r.Get("/memlink/{domain}", m.handleMemLinkGet)
+	r.Get("/memlink/{domain}/*", m.handleMemLinkGet)
+
 	if m.cfg.ExplorerHandler != nil {
 		r.Mount("/explorer", m.cfg.ExplorerHandler)
 	}
@@ -346,6 +360,20 @@ func (m *MemGate) handleDirList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "memfs: "+err.Error(), http.StatusNotFound)
 		return
 	}
+	// Auto-serve index.html if it exists and ?format is not set
+	if r.URL.Query().Get("format") == "" {
+		hasIndex := false
+		for _, e := range entries {
+			if e.Name == "index.html" {
+				hasIndex = true
+				break
+			}
+		}
+		if hasIndex {
+			m.serveMemFSPath(w, r, midStr, "index.html")
+			return
+		}
+	}
 	if r.URL.Query().Get("format") == "json" {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -386,50 +414,9 @@ func shortMID(s string) string {
 }
 
 func (m *MemGate) handlePathGet(w http.ResponseWriter, r *http.Request) {
-	// /mem/{mid}/{path:*} — MemFS path traversal. We try
-	// MemFSPathGet first; on miss we fall back to legacy
-	// DAG resolution so legacy routes keep working.
 	midStr := chi.URLParam(r, "mid")
-	root, err := mid.Parse(midStr)
-	if err != nil {
-		http.Error(w, "bad mid: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	innerPath := chi.URLParam(r, "path")
-	if innerPath == "" {
-		// No inner path — just serve the MID itself.
-		m.handleResolved(w, r, root, midStr)
-		return
-	}
-	rc, size, mimeType, err := m.cfg.Backend.MemFSPathGet(r.Context(), root, innerPath)
-	if err != nil {
-		// Fall through to the legacy handler so callers
-		// using DAG-only content still get a 200.
-		m.handleResolved(w, r, root, midStr)
-		return
-	}
-	defer rc.Close()
-	ct := mimeType
-	if ct == "" {
-		ct = "application/octet-stream"
-	}
-	filename := filepath.Base(innerPath)
-	w.Header().Set("Content-Type", ct)
-	w.Header().Set("X-Membuss-MID", midStr)
-	w.Header().Set("X-Membuss-Path", "/"+innerPath)
-	w.Header().Set("X-Membuss-Name", filename)
-	w.Header().Set("X-Membuss-MimeType", ct)
-	if w.Header().Get("Content-Disposition") == "" {
-		w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": sanitizeFilename(filename)}))
-	}
-	if size > 0 {
-		w.Header().Set("Content-Length", strconv.FormatUint(size, 10))
-	}
-	w.Header().Set("ETag", `"`+midStr+"/"+innerPath+`"`)
-	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Cache-Control", "public, immutable, max-age=31536000")
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(w, rc)
+	innerPath := chi.URLParam(r, "*")
+	m.serveMemFSPath(w, r, midStr, innerPath)
 }
 
 func (m *MemGate) handleDAGJSON(w http.ResponseWriter, r *http.Request, root mid.MID) {
@@ -767,4 +754,172 @@ func (l *lru) MarshalJSON() ([]byte, error) {
 	}
 	v := view{Entries: l.len(), Bytes: l.bytes(), Max: l.max()}
 	return json.Marshal(v)
+}
+
+// Phase 18: custom domain serving middleware.
+func (m *MemGate) customDomainMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if idx := strings.Index(host, ":"); idx != -1 {
+			host = host[:idx]
+		}
+
+		// Don't intercept localhost or local IPs
+		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		path := r.URL.Path
+		// Don't intercept system paths
+		if strings.HasPrefix(path, "/mem/") ||
+			strings.HasPrefix(path, "/healthz") ||
+			strings.HasPrefix(path, "/explorer") ||
+			strings.HasPrefix(path, "/memns/") ||
+			strings.HasPrefix(path, "/memlink/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if m.cfg.MemNSResolver == nil {
+			http.Error(w, "MemNS resolver not configured", http.StatusInternalServerError)
+			return
+		}
+
+		// Resolve domain to MID
+		resolved, err := m.cfg.MemNSResolver.Resolve(r.Context(), host)
+		if err != nil {
+			http.Error(w, "Domain not found or resolve failed: "+err.Error(), http.StatusNotFound)
+			return
+		}
+
+		midStr := resolved
+		if strings.HasPrefix(midStr, "/mem/") {
+			midStr = midStr[5:]
+		}
+
+		innerPath := strings.TrimPrefix(path, "/")
+		m.serveMemFSPath(w, r, midStr, innerPath)
+	})
+}
+
+func (m *MemGate) handleMemNSResolve(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	innerPath := chi.URLParam(r, "*")
+
+	if m.cfg.MemNSResolver == nil {
+		http.Error(w, "MemNS resolver not configured", http.StatusInternalServerError)
+		return
+	}
+
+	resolved, err := m.cfg.MemNSResolver.Resolve(r.Context(), name)
+	if err != nil {
+		http.Error(w, "memns resolve failed: "+err.Error(), http.StatusNotFound)
+		return
+	}
+
+	midStr := resolved
+	if strings.HasPrefix(midStr, "/mem/") {
+		midStr = midStr[5:]
+	}
+
+	if strings.HasPrefix(resolved, "https://") || strings.HasPrefix(resolved, "/ipfs/") {
+		http.Redirect(w, r, resolved, http.StatusTemporaryRedirect)
+		return
+	}
+
+	m.serveMemFSPath(w, r, midStr, innerPath)
+}
+
+func (m *MemGate) handleMemLinkGet(w http.ResponseWriter, r *http.Request) {
+	domain := chi.URLParam(r, "domain")
+	innerPath := chi.URLParam(r, "*")
+
+	if m.cfg.MemNSResolver == nil {
+		http.Error(w, "MemNS resolver not configured", http.StatusInternalServerError)
+		return
+	}
+
+	resolved, err := m.cfg.MemNSResolver.Resolve(r.Context(), domain)
+	if err != nil {
+		http.Error(w, "memlink resolve failed: "+err.Error(), http.StatusNotFound)
+		return
+	}
+
+	midStr := resolved
+	if strings.HasPrefix(midStr, "/mem/") {
+		midStr = midStr[5:]
+	}
+
+	m.serveMemFSPath(w, r, midStr, innerPath)
+}
+
+func (m *MemGate) serveMemFSPath(w http.ResponseWriter, r *http.Request, midStr, innerPath string) {
+	root, err := mid.Parse(midStr)
+	if err != nil {
+		http.Error(w, "bad mid: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	info, err := m.cfg.Backend.MemFSInfo(r.Context(), root)
+	isDir := err == nil && info.Type == "dir"
+
+	if isDir && innerPath == "" && !strings.HasSuffix(r.URL.Path, "/") {
+		http.Redirect(w, r, r.URL.Path+"/", http.StatusMovedPermanently)
+		return
+	}
+
+	if isDir && innerPath == "" {
+		entries, err := m.cfg.Backend.MemFSList(r.Context(), root)
+		if err == nil {
+			hasIndex := false
+			for _, e := range entries {
+				if e.Name == "index.html" {
+					hasIndex = true
+					break
+				}
+			}
+			if hasIndex {
+				innerPath = "index.html"
+			}
+		}
+	}
+
+	if innerPath == "" {
+		m.handleResolved(w, r, root, midStr)
+		return
+	}
+
+	rc, size, mimeType, err := m.cfg.Backend.MemFSPathGet(r.Context(), root, innerPath)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, "not found: "+err.Error(), http.StatusNotFound)
+		} else {
+			http.Error(w, "memfs: "+err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	defer rc.Close()
+
+	ct := mimeType
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	filename := filepath.Base(innerPath)
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("X-Membuss-MID", midStr)
+	w.Header().Set("X-Membuss-Path", "/"+innerPath)
+	w.Header().Set("X-Membuss-Name", filename)
+	w.Header().Set("X-Membuss-MimeType", ct)
+	if w.Header().Get("Content-Disposition") == "" {
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": sanitizeFilename(filename)}))
+	}
+	if size > 0 {
+		w.Header().Set("Content-Length", strconv.FormatUint(size, 10))
+	}
+	w.Header().Set("ETag", `"`+midStr+"/"+innerPath+`"`)
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Cache-Control", "public, immutable, max-age=31536000")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, rc)
 }

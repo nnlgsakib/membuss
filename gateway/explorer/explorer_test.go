@@ -573,6 +573,20 @@ func (b *memBackend) MemFSPathGet(ctx context.Context, m mid.MID, path string) (
 	return nil, 0, "", fmt.Errorf("memfs: test backend stub")
 }
 
+// --- Phase 18: MemNS stubs on memBackend ---
+
+func (b *memBackend) KeyringKeys(ctx context.Context) ([]KeyringKeyInfo, error) {
+	return nil, nil
+}
+
+func (b *memBackend) ResolveMemNSRecord(ctx context.Context, name string) (MemNSRecordInfo, error) {
+	return MemNSRecordInfo{}, fmt.Errorf("memns: test backend stub")
+}
+
+func (b *memBackend) ResolveMemLink(ctx context.Context, domain string) (MemLinkInfo, error) {
+	return MemLinkInfo{}, fmt.Errorf("memlink: test backend stub")
+}
+
 func TestUpload(t *testing.T) {
 	srv, _ := newTestServer(t)
 

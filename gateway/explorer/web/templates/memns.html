@@ -1,0 +1,98 @@
+{{define "memns_body"}}
+<div class="mid-detail">
+  <div class="eyebrow">Mutable Name (MemNS)</div>
+  <h1 style="word-break: break-all;">{{.Name}}</h1>
+
+  <div class="card span-2" style="margin-top: 24px;">
+    <h2>Details</h2>
+    <dl style="grid-template-columns: 180px 1fr;">
+      <dt>Current Target</dt>
+      <dd class="mono" style="text-align: left; word-break: break-all;">
+        {{if .IsMID}}
+        <a href="/explorer/mid/{{.CleanValue}}">{{.Value}}</a>
+        {{else}}
+        {{.Value}}
+        {{end}}
+      </dd>
+      
+      <dt>Sequence Number</dt>
+      <dd style="text-align: left;">{{.Sequence}}</dd>
+      
+      <dt>Expires At</dt>
+      <dd style="text-align: left;">{{.ExpiresAt.Format "2006-01-02 15:04:05 UTC"}}</dd>
+      
+      <dt>TTL</dt>
+      <dd style="text-align: left;">{{.TTL}}</dd>
+    </dl>
+  </div>
+
+  {{if .Routes}}
+  <div class="card span-2" style="margin-top: 24px;">
+    <h2>Routes (Weighted Multi-Target)</h2>
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Label</th>
+          <th>Target</th>
+          <th>Weight</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Routes}}
+        <tr>
+          <td>{{if .Label}}{{.Label}}{{else}}<span class="muted">n/a</span>{{end}}</td>
+          <td class="mono"><a href="/explorer/mid/{{.Target}}">{{.Target}}</a></td>
+          <td>{{.Weight}}%</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{end}}
+
+  {{if .Delegates}}
+  <div class="card span-2" style="margin-top: 24px;">
+    <h2>Delegated Signers</h2>
+    <ul class="addrs" style="margin-top: 10px;">
+      {{range .Delegates}}
+      <li class="mono small">{{.}}</li>
+      {{end}}
+    </ul>
+  </div>
+  {{end}}
+
+  <div class="card span-2" style="margin-top: 24px;">
+    <h2>Publish History (MemLog Timeline)</h2>
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Seq</th>
+          <th>Timestamp</th>
+          <th>MID / Target</th>
+          <th>Note</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Changelog}}
+        <tr>
+          <td class="mono">{{.Sequence}}</td>
+          <td>{{.Timestamp.Format "2006-01-02 15:04:05 UTC"}}</td>
+          <td class="mono">
+            {{if hasPrefix .Value "/mem/"}}
+            <a href="/explorer/mid/{{trimPrefix .Value "/mem/"}}">{{.Value}}</a>
+            {{else}}
+            {{.Value}}
+            {{end}}
+          </td>
+          <td class="muted">{{if .Message}}{{.Message}}{{else}}<span class="dimmed">—</span>{{end}}</td>
+        </tr>
+        {{else}}
+        <tr>
+          <td colspan="4" class="muted" style="text-align: center;">No history entries</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</div>
+{{end}}

@@ -20,6 +20,7 @@ import (
 	"github.com/nnlgsakib/membuss/api"
 	"github.com/nnlgsakib/membuss/core/memfs"
 	"github.com/nnlgsakib/membuss/core/mid"
+	"github.com/nnlgsakib/membuss/core/store"
 )
 
 // apiAdapter wraps daemonBackend to satisfy api.Backend.
@@ -245,7 +246,7 @@ func (a *apiAdapter) AddFile(ctx context.Context, name string, r io.Reader, wrap
 // AddDirectory ingests a multipart directory upload. Each
 // part is written to a temp file so memfs.AddDirectoryFromFS
 // can walk it with os.DirFS.
-func (a *apiAdapter) AddDirectory(ctx context.Context, parts []api.DirectoryPart) (api.AddResult, error) {
+func (a *apiAdapter) AddDirectory(ctx context.Context, name string, parts []api.DirectoryPart) (api.AddResult, error) {
 	if a == nil || a.b == nil || a.b.store == nil {
 		return api.AddResult{}, errors.New("api: no backend")
 	}
@@ -287,6 +288,14 @@ func (a *apiAdapter) AddDirectory(ctx context.Context, parts []api.DirectoryPart
 	res, err := b.AddDirectoryFromFS(os.DirFS(tmp), ".")
 	if err != nil {
 		return api.AddResult{}, err
+	}
+	name = filepath.Clean(name)
+	if name != "" && name != "." && name != "/" && name != "\\" {
+		_ = store.SetObjectInfo(a.b.store, res.MID, store.ObjectInfo{
+			Name:     name,
+			MimeType: "inode/directory",
+			Size:     res.Size,
+		})
 	}
 	_ = a.b.store.Seal(res.MID, true)
 	if a.b.dht != nil {

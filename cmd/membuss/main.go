@@ -49,6 +49,9 @@ import (
 
 	"github.com/nnlgsakib/membuss/anchor"
 	"github.com/nnlgsakib/membuss/config"
+	"github.com/nnlgsakib/membuss/core/keyring"
+	"github.com/nnlgsakib/membuss/core/memlink"
+	"github.com/nnlgsakib/membuss/core/memns"
 	"github.com/nnlgsakib/membuss/core/store"
 	"github.com/nnlgsakib/membuss/net/dht"
 	"github.com/nnlgsakib/membuss/net/herald"
@@ -58,6 +61,7 @@ import (
 	"github.com/nnlgsakib/membuss/obs/logging"
 	"github.com/nnlgsakib/membuss/obs/metrics"
 	serverpkg "github.com/nnlgsakib/membuss/rpc/server"
+	"golang.org/x/crypto/acme/autocert"
 )
 
 func main() {
@@ -318,6 +322,19 @@ func main() {
 	mx.Start()
 	defer mx.Stop()
 
+	// Phase 18: MemNS and KeyRing setup
+	kr := keyring.NewKeyRing(cfg.DataDir)
+	pm, err := memns.NewPubSubManager(h)
+	if err != nil {
+		logger.Warn("gossipsub init failed", "err", err.Error())
+	}
+	cache := memns.NewRecordCache(1000)
+	memnsRes := memns.NewResolver(mdht, pm, cache)
+	dnsRes := memlink.NewDNSResolver(func(ctx context.Context, name string) (string, error) {
+		return memnsRes.Resolve(ctx, name)
+	})
+	memnsRes.SetDNSResolver(dnsRes)
+
 	// 6) Mem-Herald.
 	hd, err := herald.New(herald.Config{
 		Store:    bs,
@@ -326,6 +343,8 @@ func main() {
 		Interval: cfg.ReprovideInterval,
 		Rate:     100,
 		Burst:    8,
+		KeyRing:  kr,
+		MemDHT:   mdht,
 	})
 	if err != nil {
 		logger.Error("herald", "err", err.Error())
@@ -429,7 +448,7 @@ func main() {
 	}
 	fmt.Fprintf(os.Stdout, "  grpc_addr:      %s\n", cfg.GRPCAddr)
 	// 9) Mem-Gate: public HTTP gateway + CDN edge.
-	gateSrv, err := startGateway(cfg.GatewayAddr, newMemgateAdapter(backend), newExplorerAdapter(backend, cfg.AnchorMode), cfg.GatewayRateLimitPerMin, cfg.GatewayTLS)
+	gateSrv, err := startGateway(cfg.GatewayAddr, newMemgateAdapter(backend), newExplorerAdapter(backend, cfg.AnchorMode, kr, memnsRes), cfg.GatewayRateLimitPerMin, cfg.GatewayTLS, memnsRes, cfg.DataDir)
 	if err != nil {
 		logger.Error("gateway", "err", err.Error())
 		os.Exit(1)
@@ -437,7 +456,7 @@ func main() {
 	fmt.Fprintf(os.Stdout, "  gateway_addr:   %s\n", gateSrv.Addr())
 
 	// 10) Node API: local control plane over HTTP/JSON.
-	apiSrv, err := startNodeAPI(cfg.APIAddr, newAPIAdapter(backend), mtrx, cfg.APIKey, cfg.APITLS)
+	apiSrv, err := startNodeAPI(cfg.APIAddr, newAPIAdapter(backend), mtrx, cfg.APIKey, cfg.APITLS, kr, memnsRes, cfg.DataDir)
 	if err != nil {
 		logger.Error("api", "err", err.Error())
 		os.Exit(1)
@@ -582,40 +601,43 @@ func (s *serverGRPC) GracefulStop() { s.gsrv.GracefulStop() }
 // rateLimitPerMin is the per-IP request budget enforced on
 // every public request. tls enables HTTPS when its
 // CertFile/KeyFile are set.
-func startGateway(addr string, b memgate.Backend, exp *explorerAdapter, rateLimitPerMin int, tlsCfg config.TLSConfig) (*httpServer, error) {
+func startGateway(addr string, b memgate.Backend, exp *explorerAdapter, rateLimitPerMin int, tlsCfg config.TLSConfig, memnsRes *memns.Resolver, dataDir string) (*httpServer, error) {
 	mg, err := memgate.New(memgate.Config{
 		Backend:         b,
 		MaxCacheBytes:   64 << 20, // 64 MiB LRU
 		ExplorerHandler: buildExplorer(exp),
 		RateLimitPerMin: rateLimitPerMin,
+		MemNSResolver:   memnsRes,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("memgate: %w", err)
 	}
-	return startHTTP(addr, "membuss-gateway", mg.Handler(), tlsCfg)
+	return startHTTP(addr, "membuss-gateway", mg.Handler(), tlsCfg, dataDir)
 }
 
 // startNodeAPI brings up the local Node control API. mtrx
 // exposes Prometheus at /metrics; apiKey enables X-Membuss-Key
 // auth on every /api/v1 endpoint; tls enables HTTPS.
-func startNodeAPI(addr string, b api.Backend, mtrx *metrics.Metrics, apiKey string, tlsCfg config.TLSConfig) (*httpServer, error) {
+func startNodeAPI(addr string, b api.Backend, mtrx *metrics.Metrics, apiKey string, tlsCfg config.TLSConfig, keyring *keyring.KeyRing, memnsRes *memns.Resolver, dataDir string) (*httpServer, error) {
 	nodeAPI, err := api.New(api.Config{
 		Backend:        b,
 		MaxUploadBytes: 1 << 30, // 1 GiB
 		APIKey:         apiKey,
 		Metrics:        mtrx,
+		KeyRing:        keyring,
+		MemNSResolver:  memnsRes,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("nodeapi: %w", err)
 	}
-	return startHTTP(addr, "membuss-api", nodeAPI.Handler(), tlsCfg)
+	return startHTTP(addr, "membuss-api", nodeAPI.Handler(), tlsCfg, dataDir)
 }
 
 // startHTTP binds an http.Handler to addr in a goroutine and
 // returns a handle whose Close method does a graceful shutdown.
 // A non-ErrServerClosed error from Serve is logged. When tls
 // is non-empty, the server runs HTTPS with the supplied cert+key.
-func startHTTP(addr, name string, h http.Handler, tlsCfg config.TLSConfig) (*httpServer, error) {
+func startHTTP(addr, name string, h http.Handler, tlsCfg config.TLSConfig, dataDir string) (*httpServer, error) {
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      h,
@@ -623,13 +645,51 @@ func startHTTP(addr, name string, h http.Handler, tlsCfg config.TLSConfig) (*htt
 		WriteTimeout: 5 * time.Minute,
 		IdleTimeout:  2 * time.Minute,
 	}
-	if tlsCfg.Enabled() {
-		cert, err := cryptoTLS.LoadX509KeyPair(tlsCfg.CertFile, tlsCfg.KeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("%s: load tls: %w", name, err)
+
+	var certManager *autocert.Manager
+	if name == "membuss-gateway" && os.Getenv("MEMBUSS_GATEWAY_AUTOCERT") == "true" {
+		certDir := filepath.Join(dataDir, "certs")
+		_ = os.MkdirAll(certDir, 0700)
+		certManager = &autocert.Manager{
+			Prompt:     autocert.AcceptTOS,
+			Cache:      autocert.DirCache(certDir),
+			HostPolicy: func(ctx context.Context, host string) error {
+				_, err := net.LookupTXT("_memlink." + host)
+				if err != nil {
+					return fmt.Errorf("host %s not authorized: %w", host, err)
+				}
+				return nil
+			},
 		}
-		srv.TLSConfig = &cryptoTLS.Config{Certificates: []cryptoTLS.Certificate{cert}, MinVersion: cryptoTLS.VersionTLS12}
 	}
+
+	if tlsCfg.Enabled() || certManager != nil {
+		srv.TLSConfig = &cryptoTLS.Config{
+			MinVersion: cryptoTLS.VersionTLS12,
+		}
+
+		if tlsCfg.Enabled() {
+			cert, err := cryptoTLS.LoadX509KeyPair(tlsCfg.CertFile, tlsCfg.KeyFile)
+			if err != nil {
+				return nil, fmt.Errorf("%s: load tls: %w", name, err)
+			}
+			srv.TLSConfig.Certificates = []cryptoTLS.Certificate{cert}
+		}
+
+		if certManager != nil {
+			srv.TLSConfig.GetCertificate = func(hello *cryptoTLS.ClientHelloInfo) (*cryptoTLS.Certificate, error) {
+				cert, err := certManager.GetCertificate(hello)
+				if err == nil && cert != nil {
+					return cert, nil
+				}
+				if len(srv.TLSConfig.Certificates) > 0 {
+					return &srv.TLSConfig.Certificates[0], nil
+				}
+				return nil, err
+			}
+		}
+	}
+
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", addr, err)

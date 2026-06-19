@@ -211,6 +211,55 @@ type Backend interface {
 	// MemFSPathGet returns a streaming reader for the file
 	// at m/path.
 	MemFSPathGet(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error)
+
+	// --- Phase 18: MemNS support ---
+	KeyringKeys(ctx context.Context) ([]KeyringKeyInfo, error)
+	ResolveMemNSRecord(ctx context.Context, name string) (MemNSRecordInfo, error)
+	ResolveMemLink(ctx context.Context, domain string) (MemLinkInfo, error)
+}
+
+// KeyringKeyInfo represents metadata about a key in the keyring.
+type KeyringKeyInfo struct {
+	Name      string    `json:"name"`
+	MemNSName string    `json:"memns_name"`
+	Type      string    `json:"type"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// MemNSRecordInfo represents a resolved MemNS record.
+type MemNSRecordInfo struct {
+	Name      string            `json:"name"`
+	Value     string            `json:"value"`
+	Sequence  uint64            `json:"sequence"`
+	ExpiresAt time.Time         `json:"expires_at"`
+	TTL       time.Duration     `json:"ttl"`
+	Routes    []MemRouteInfo    `json:"routes"`
+	Delegates []string          `json:"delegates"`
+	Changelog []MemLogEntryInfo `json:"changelog"`
+}
+
+// MemRouteInfo represents a route in a MemNS record.
+type MemRouteInfo struct {
+	Target string `json:"target"`
+	Weight uint32 `json:"weight"`
+	Label  string `json:"label"`
+}
+
+// MemLogEntryInfo represents an entry in the MemLog changelog.
+type MemLogEntryInfo struct {
+	Sequence  uint64    `json:"sequence"`
+	Value     string    `json:"value"`
+	Timestamp time.Time `json:"timestamp"`
+	Message   string    `json:"message"`
+}
+
+// MemLinkInfo represents DNS resolution metadata for a domain.
+type MemLinkInfo struct {
+	Domain            string `json:"domain"`
+	RawTXT            string `json:"raw_txt"`
+	ResolvedMemNSName string `json:"resolved_memns_name"`
+	ResolvedMID       string `json:"resolved_mid"`
+	TTLRemaining      int    `json:"ttl_remaining"`
 }
 
 // MemFSInfo describes a MemFS node.
@@ -281,6 +330,8 @@ func New(cfg Config) (*Explorer, error) {
 
 	funcs := template.FuncMap{
 		"humanBytes": humanBytes,
+		"hasPrefix":  strings.HasPrefix,
+		"trimPrefix": strings.TrimPrefix,
 	}
 	tpl, err := template.New("explorer").Funcs(funcs).ParseFS(assetFS, "web/templates/*.html")
 	if err != nil {
@@ -323,6 +374,8 @@ func (e *Explorer) buildRouter() http.Handler {
 	r.Post("/search", e.handleSearch)
 	r.Get("/upload", e.handleUploadPage)
 	r.Post("/upload", e.handleUpload)
+	r.Get("/memns/{name}", e.handleMemNSPage)
+	r.Get("/memlink/{domain}", e.handleMemLinkPage)
 
 	// Static assets.
 	r.Get("/static/style.css", e.handleStatic("style.css", "text/css; charset=utf-8"))
@@ -727,6 +780,7 @@ func (e *Explorer) handleNode(w http.ResponseWriter, r *http.Request) {
 	b := e.cfg.Backend
 	version, build := b.NodeVersion(ctx)
 	sealed, _ := b.SealedMIDs(ctx)
+	keys, _ := b.KeyringKeys(ctx)
 	e.render(w, "node.html", map[string]any{
 		"Title":       "Node",
 		"NodeInfo": nodeInfoView{
@@ -738,28 +792,37 @@ func (e *Explorer) handleNode(w http.ResponseWriter, r *http.Request) {
 		},
 		"StoreBytes":  mustStoreBytes(ctx, b),
 		"SealedCount": len(sealed),
+		"Keys":        keys,
 	})
 }
 
-// handleSearch is a POST handler that takes a MID from a
-// form field and redirects to the MID detail page. An
-// invalid MID is reported via the X-Membuss-Status header
-// (no JS, no template rendering on error).
+// handleSearch is a POST handler that takes a query from a
+// form field and redirects to the appropriate page.
 func (e *Explorer) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	midStr := sanitizeMIDString(r.FormValue("mid"))
-	if midStr == "" {
-		http.Error(w, "empty mid", http.StatusBadRequest)
+	query := sanitizeMIDString(r.FormValue("mid"))
+	if query == "" {
+		http.Error(w, "empty query", http.StatusBadRequest)
 		return
 	}
-	if _, err := mid.Parse(midStr); err != nil {
+	if strings.HasPrefix(query, "/memns/") || strings.HasPrefix(query, "k51") {
+		name := strings.TrimPrefix(query, "/memns/")
+		http.Redirect(w, r, "/explorer/memns/"+name, http.StatusSeeOther)
+		return
+	}
+	if strings.Contains(query, ".") && !strings.HasPrefix(query, "mem1") {
+		http.Redirect(w, r, "/explorer/memlink/"+query, http.StatusSeeOther)
+		return
+	}
+	cleanMID := strings.TrimPrefix(query, "/mem/")
+	if _, err := mid.Parse(cleanMID); err != nil {
 		http.Error(w, "bad mid: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	http.Redirect(w, r, "/explorer/mid/"+midStr, http.StatusSeeOther)
+	http.Redirect(w, r, "/explorer/mid/"+cleanMID, http.StatusSeeOther)
 }
 
 // sanitizeMIDString strips invisible Unicode characters
@@ -862,6 +925,65 @@ func (e *Explorer) handleRename(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/explorer/mid/"+midStr, http.StatusSeeOther)
 }
 
+func (e *Explorer) handleMemNSPage(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	ctx := r.Context()
+	info, err := e.cfg.Backend.ResolveMemNSRecord(ctx, name)
+	if err != nil {
+		http.Error(w, "Failed to resolve MemNS record: "+err.Error(), http.StatusNotFound)
+		return
+	}
+
+	cleanVal := info.Value
+	if strings.HasPrefix(cleanVal, "/mem/") {
+		cleanVal = strings.TrimPrefix(cleanVal, "/mem/")
+	}
+	isMID := strings.HasPrefix(info.Value, "/mem/") || strings.HasPrefix(info.Value, "mem1")
+
+	data := map[string]any{
+		"Title":      "MemNS " + name,
+		"Name":       name,
+		"Value":      info.Value,
+		"CleanValue": cleanVal,
+		"IsMID":      isMID,
+		"Sequence":   info.Sequence,
+		"ExpiresAt":  info.ExpiresAt,
+		"TTL":        info.TTL.String(),
+		"Routes":     info.Routes,
+		"Delegates":  info.Delegates,
+		"Changelog":  info.Changelog,
+	}
+	e.render(w, "memns.html", data)
+}
+
+func (e *Explorer) handleMemLinkPage(w http.ResponseWriter, r *http.Request) {
+	domain := chi.URLParam(r, "domain")
+	ctx := r.Context()
+	info, err := e.cfg.Backend.ResolveMemLink(ctx, domain)
+	if err != nil {
+		data := map[string]any{
+			"Title":             "MemLink " + domain,
+			"Domain":            domain,
+			"RawTXT":            "",
+			"ResolvedMemNSName": "",
+			"ResolvedMID":       "",
+			"TTLRemaining":      -1,
+		}
+		e.render(w, "memlink.html", data)
+		return
+	}
+
+	data := map[string]any{
+		"Title":             "MemLink " + domain,
+		"Domain":            domain,
+		"RawTXT":            info.RawTXT,
+		"ResolvedMemNSName": info.ResolvedMemNSName,
+		"ResolvedMID":       info.ResolvedMID,
+		"TTLRemaining":      info.TTLRemaining,
+	}
+	e.render(w, "memlink.html", data)
+}
+
 // handleStatic serves an embedded asset file.
 func (e *Explorer) handleStatic(name, contentType string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -888,14 +1010,16 @@ func (e *Explorer) handleStatic(name, contentType string) http.HandlerFunc {
 // the page's *_body template via {{template}}.
 func buildPages(master *template.Template) (map[string]*template.Template, error) {
 	pb := map[string]string{
-		"index.html":        "index_body",
-		"mid.html":          "mid_body",
+		"index.html":         "index_body",
+		"mid.html":           "mid_body",
 		"mid-resolving.html": "mid-resolving_body",
-		"dag.html":          "dag_body",
-		"peers.html":        "peers_body",
-		"anchors.html":      "anchors_body",
-		"node.html":         "node_body",
-		"upload.html":       "upload_body",
+		"dag.html":           "dag_body",
+		"peers.html":         "peers_body",
+		"anchors.html":       "anchors_body",
+		"node.html":          "node_body",
+		"upload.html":        "upload_body",
+		"memns.html":         "memns_body",
+		"memlink.html":       "memlink_body",
 	}
 	pages := make(map[string]*template.Template, len(pb))
 	for page, bodyName := range pb {

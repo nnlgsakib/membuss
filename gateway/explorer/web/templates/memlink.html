@@ -1,0 +1,38 @@
+{{define "memlink_body"}}
+<div class="mid-detail">
+  <div class="eyebrow">Domain Link (MemLink)</div>
+  <h1>{{.Domain}}</h1>
+
+  <div class="card span-2" style="margin-top: 24px;">
+    <h2>Resolution Debug</h2>
+    <dl style="grid-template-columns: 180px 1fr;">
+      <dt>Domain</dt>
+      <dd class="mono" style="text-align: left;">{{.Domain}}</dd>
+
+      <dt>Raw TXT Value</dt>
+      <dd class="mono" style="text-align: left; word-break: break-all;">{{if .RawTXT}}{{.RawTXT}}{{else}}<span class="warn">No TXT record found</span>{{end}}</dd>
+
+      <dt>Resolved MemNS Name</dt>
+      <dd class="mono" style="text-align: left;">
+        {{if .ResolvedMemNSName}}
+        <a href="/explorer/memns/{{trimPrefix .ResolvedMemNSName "/memns/"}}">{{.ResolvedMemNSName}}</a>
+        {{else}}
+        <span class="muted">n/a</span>
+        {{end}}
+      </dd>
+
+      <dt>Resolved MID</dt>
+      <dd class="mono" style="text-align: left;">
+        {{if .ResolvedMID}}
+        <a href="/explorer/mid/{{.ResolvedMID}}">{{.ResolvedMID}}</a>
+        {{else}}
+        <span class="muted">n/a</span>
+        {{end}}
+      </dd>
+
+      <dt>Cache TTL Remaining</dt>
+      <dd style="text-align: left;">{{if ge .TTLRemaining 0}}{{.TTLRemaining}} seconds{{else}}<span class="muted">expired / uncached</span>{{end}}</dd>
+    </dl>
+  </div>
+</div>
+{{end}}

@@ -125,6 +125,7 @@ func New(ctx context.Context, cfg Config) (*MemDHT, error) {
 		// stored and retrieved. The kad-dht default validator
 		// only allows "/pk/..." (public-key) records.
 		kaddht.NamespacedValidator("membuss", permissiveValidator{}),
+		kaddht.NamespacedValidator("memns", permissiveValidator{}),
 	}
 	if cfg.Datastore != nil {
 		// Provider-record persistence. Without this, the

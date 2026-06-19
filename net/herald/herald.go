@@ -25,11 +25,15 @@ package herald
 import (
 	"context"
 	"errors"
+	"log"
 	"sync"
 	"time"
 
+	"github.com/nnlgsakib/membuss/core/keyring"
+	"github.com/nnlgsakib/membuss/core/memns"
 	"github.com/nnlgsakib/membuss/core/mid"
 	"github.com/nnlgsakib/membuss/core/store"
+	"github.com/nnlgsakib/membuss/net/dht"
 )
 
 // Strategy selects which MIDs the herald re-announces.
@@ -100,6 +104,10 @@ type Config struct {
 	// Now overrides the wall clock for tests. Default
 	// is time.Now.
 	Now func() time.Time
+
+	// Phase 18: MemNS record re-publishing fields
+	KeyRing *keyring.KeyRing
+	MemDHT  *dht.MemDHT
 }
 
 // MemHerald is the long-lived reprovisioner.
@@ -155,7 +163,31 @@ func New(cfg Config) (*MemHerald, error) {
 // content right at startup.
 func (h *MemHerald) Start(ctx context.Context) {
 	go h.loop(ctx)
-	h.RunOnce(ctx)
+	if h.cfg.MemDHT == nil {
+		h.RunOnce(ctx)
+	} else {
+		go func() {
+			// Wait for DHT routing table to have at least one peer before running the initial reprovide.
+			// This avoids failing to announce at startup due to 0 peers.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second): // initial short delay
+				// Check if we have peers, otherwise wait a bit longer, up to 30 seconds
+				for i := 0; i < 6; i++ {
+					if h.cfg.MemDHT.RoutingTableSize() > 0 {
+						break
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(5 * time.Second):
+					}
+				}
+			}
+			h.RunOnce(ctx)
+		}()
+	}
 }
 
 // Stop is a no-op kept for symmetry with other long-lived
@@ -191,6 +223,58 @@ func (h *MemHerald) RunOnce(ctx context.Context) int {
 	h.lastRun = h.cfg.Now()
 	h.lastCount = announced
 	h.mu.Unlock()
+
+	// Phase 18: MemNS record re-publishing
+	if h.cfg.KeyRing != nil && h.cfg.MemDHT != nil {
+		keys, err := h.cfg.KeyRing.List()
+		if err == nil {
+			republished := 0
+			for _, kInfo := range keys {
+				key, err := h.cfg.KeyRing.Get(kInfo.Name)
+				if err != nil {
+					log.Printf("herald: failed to get key %s: %v", kInfo.Name, err)
+					continue
+				}
+				rec, err := h.cfg.KeyRing.LoadRecord(kInfo.Name)
+				if err != nil {
+					log.Printf("herald: failed to load record for key %s: %v", kInfo.Name, err)
+					continue
+				}
+
+				// Update validity and re-sign record to keep it alive
+				ttl := 24 * time.Hour
+				if rec.Ttl > 0 {
+					ttl = time.Duration(rec.Ttl)
+				}
+				rec.Validity = h.cfg.Now().Add(ttl).UnixNano()
+
+				canonical := memns.CanonicalBytes(rec)
+				sig, err := key.PrivKey.Sign(canonical)
+				if err != nil {
+					log.Printf("herald: failed to re-sign record for key %s: %v", kInfo.Name, err)
+					continue
+				}
+				rec.Signature = sig
+
+				// Save updated record back to disk
+				if err := h.cfg.KeyRing.SaveRecord(kInfo.Name, rec); err != nil {
+					log.Printf("herald: failed to save updated record for key %s: %v", kInfo.Name, err)
+				}
+
+				if err := memns.PublishDHT(ctx, h.cfg.MemDHT, key, rec); err != nil {
+					log.Printf("herald: failed to publish record for key %s to DHT: %v", kInfo.Name, err)
+				} else {
+					republished++
+				}
+			}
+			if republished > 0 {
+				log.Printf("herald: re-published %d MemNS records", republished)
+			}
+		} else {
+			log.Printf("herald: failed to list keys in keyring: %v", err)
+		}
+	}
+
 	return announced
 }
 

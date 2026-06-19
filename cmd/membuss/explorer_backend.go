@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -18,12 +19,16 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"github.com/nnlgsakib/membuss/anchor"
+	"github.com/nnlgsakib/membuss/core/keyring"
 	"github.com/nnlgsakib/membuss/core/memfs"
+	"github.com/nnlgsakib/membuss/core/memlink"
+	"github.com/nnlgsakib/membuss/core/memns"
 	"github.com/nnlgsakib/membuss/core/mid"
 	"github.com/nnlgsakib/membuss/core/store"
 	explorer "github.com/nnlgsakib/membuss/gateway/explorer"
 	"github.com/nnlgsakib/membuss/gateway/memgate"
 	"github.com/nnlgsakib/membuss/net/memex"
+	membusspb "github.com/nnlgsakib/membuss/proto"
 )
 
 var _ explorer.Backend = (*explorerAdapter)(nil)
@@ -39,10 +44,12 @@ type explorerAdapter struct {
 	// anchorMode is the immutable config value the
 	// daemon was started with.
 	anchorMode bool
+	keyring    *keyring.KeyRing
+	memnsRes   *memns.Resolver
 }
 
-func newExplorerAdapter(b *daemonBackend, anchorMode bool) *explorerAdapter {
-	return &explorerAdapter{b: b, started: time.Now(), anchorMode: anchorMode}
+func newExplorerAdapter(b *daemonBackend, anchorMode bool, keyring *keyring.KeyRing, memnsRes *memns.Resolver) *explorerAdapter {
+	return &explorerAdapter{b: b, started: time.Now(), anchorMode: anchorMode, keyring: keyring, memnsRes: memnsRes}
 }
 
 // Stat returns a metadata snapshot.
@@ -475,6 +482,10 @@ func (a *explorerAdapter) AddDirectory(ctx context.Context, name string, files [
 	}
 
 	// Use uploader-supplied folder name, or fallback.
+	name = filepath.Clean(name)
+	if name == "." || name == "/" || name == "\\" {
+		name = ""
+	}
 	dirName := name
 	if dirName == "" {
 		dirName = "upload"
@@ -585,4 +596,151 @@ func (a *explorerAdapter) MemFSPathGet(ctx context.Context, m mid.MID, path stri
 		return nil, 0, "", err
 	}
 	return rc, node.TotalSize(), node.MimeType(), nil
+}
+
+// KeyringKeys lists the keyring keys.
+func (a *explorerAdapter) KeyringKeys(ctx context.Context) ([]explorer.KeyringKeyInfo, error) {
+	if a.keyring == nil {
+		return nil, errors.New("keyring not configured")
+	}
+	keys, err := a.keyring.List()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]explorer.KeyringKeyInfo, 0, len(keys))
+	for _, k := range keys {
+		kType := "ed25519"
+		if key, err := a.keyring.Get(k.Name); err == nil {
+			kType = strings.ToLower(key.PubKey.Type().String())
+		}
+		out = append(out, explorer.KeyringKeyInfo{
+			Name:      k.Name,
+			MemNSName: k.MemNSName,
+			Type:      kType,
+			CreatedAt: k.CreatedAt,
+		})
+	}
+	return out, nil
+}
+
+// ResolveMemNSRecord resolves a MemNS record.
+func (a *explorerAdapter) ResolveMemNSRecord(ctx context.Context, name string) (explorer.MemNSRecordInfo, error) {
+	if a.memnsRes == nil {
+		return explorer.MemNSRecordInfo{}, errors.New("memns resolver not configured")
+	}
+
+	cleanName := name
+	if strings.HasPrefix(cleanName, "/memns/") {
+		cleanName = cleanName[7:]
+	}
+
+	var rec *membusspb.MemNSRecord
+	var err error
+
+	// If we own the key, try loading the record locally first
+	if a.keyring != nil {
+		keys, _ := a.keyring.List()
+		for _, k := range keys {
+			kMemNS := k.MemNSName
+			if strings.HasPrefix(kMemNS, "/memns/") {
+				kMemNS = kMemNS[7:]
+			}
+			if kMemNS == cleanName {
+				rec, err = a.keyring.LoadRecord(k.Name)
+				break
+			}
+		}
+	}
+
+	// If not owned or not found locally, fetch from DHT
+	if rec == nil {
+		rec, err = memns.ResolveDHT(ctx, a.memnsRes.DHTClient(), cleanName)
+		if err != nil {
+			return explorer.MemNSRecordInfo{}, err
+		}
+	}
+
+	// Map routes
+	routes := make([]explorer.MemRouteInfo, 0, len(rec.Routes))
+	for _, r := range rec.Routes {
+		routes = append(routes, explorer.MemRouteInfo{
+			Target: string(r.Target),
+			Weight: r.Weight,
+			Label:  r.Label,
+		})
+	}
+
+	// Map delegates
+	delegates := make([]string, 0, len(rec.Delegates))
+	for _, d := range rec.Delegates {
+		delegates = append(delegates, string(d))
+	}
+
+	// Map changelog
+	changelog := make([]explorer.MemLogEntryInfo, 0)
+	if rec.Changelog != nil {
+		for _, e := range rec.Changelog.Entries {
+			changelog = append(changelog, explorer.MemLogEntryInfo{
+				Sequence:  e.Sequence,
+				Value:     string(e.Value),
+				Timestamp: time.Unix(0, e.Timestamp),
+				Message:   e.Message,
+			})
+		}
+	}
+
+	return explorer.MemNSRecordInfo{
+		Name:      "/memns/" + cleanName,
+		Value:     string(rec.Value),
+		Sequence:  rec.Sequence,
+		ExpiresAt: time.Unix(0, rec.Validity),
+		TTL:       time.Duration(rec.Ttl),
+		Routes:    routes,
+		Delegates: delegates,
+		Changelog: changelog,
+	}, nil
+}
+
+// ResolveMemLink resolves a MemLink domain and returns its resolution details.
+func (a *explorerAdapter) ResolveMemLink(ctx context.Context, domain string) (explorer.MemLinkInfo, error) {
+	if a.memnsRes == nil {
+		return explorer.MemLinkInfo{}, errors.New("memns resolver not configured")
+	}
+	dnsResAPI := a.memnsRes.DNS()
+	if dnsResAPI == nil {
+		return explorer.MemLinkInfo{}, errors.New("dns resolver not configured")
+	}
+
+	dnsRes, ok := dnsResAPI.(*memlink.DNSResolver)
+	if !ok {
+		return explorer.MemLinkInfo{}, errors.New("unexpected DNS resolver type")
+	}
+
+	rawTXT, err := dnsRes.LookupTXTRecord(domain)
+	if err != nil {
+		return explorer.MemLinkInfo{}, fmt.Errorf("lookup txt record failed: %w", err)
+	}
+
+	parsed, err := memlink.ParseTXTRecord(rawTXT)
+	if err != nil {
+		return explorer.MemLinkInfo{}, fmt.Errorf("failed to parse TXT record: %w", err)
+	}
+
+	resolved, err := dnsRes.Resolve(ctx, domain)
+	if err != nil {
+		return explorer.MemLinkInfo{}, fmt.Errorf("dns resolve failed: %w", err)
+	}
+
+	ttl := 300
+	if parsed.TTL > 0 {
+		ttl = parsed.TTL
+	}
+
+	return explorer.MemLinkInfo{
+		Domain:            domain,
+		RawTXT:            rawTXT,
+		ResolvedMemNSName: parsed.MemNSName,
+		ResolvedMID:       resolved,
+		TTLRemaining:      ttl,
+	}, nil
 }
