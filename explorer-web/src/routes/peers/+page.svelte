@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { apiFetch } from '$lib/api';
+	import Icon from '@iconify/svelte';
 
 	interface PeerInfo {
 		PeerID: string;
@@ -115,15 +116,15 @@
 
 <div class="flex flex-col gap-6">
 	<!-- Page Header -->
-	<div class="border-b border-zinc-800 pb-4">
-		<h1 class="text-2xl font-black text-zinc-50">Active Swarm Map</h1>
-		<p class="text-xs text-zinc-500 mt-1">Geographic coordinates and status parameters of active routing connections</p>
+	<div class="border-b border-slate-800 pb-4">
+		<h1 class="text-2xl font-bold text-slate-50">Active Swarm Map</h1>
+		<p class="text-xs text-slate-500 mt-1">Geographic coordinates and status parameters of active routing connections</p>
 	</div>
 
 	{#if loading && !data}
 		<div class="space-y-6 animate-pulse">
-			<div class="h-60 bg-zinc-900 rounded-lg w-full"></div>
-			<div class="h-32 bg-zinc-900 rounded-lg w-full"></div>
+			<div class="h-60 bg-slate-900 rounded-lg w-full"></div>
+			<div class="h-32 bg-slate-900 rounded-lg w-full"></div>
 		</div>
 	{:else if error}
 		<div class="bg-red-950/20 border border-red-800/40 text-red-400 p-4 rounded-xl text-xs font-mono">
@@ -132,12 +133,12 @@
 	{:else if data}
 		
 		<!-- Swarm map block -->
-		<div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6 flex flex-col gap-6 items-center shadow-xl relative overflow-hidden">
+		<div class="bg-slate-900 border border-slate-800 rounded-xl p-6 flex flex-col gap-6 items-center shadow-xl relative overflow-hidden">
 			<!-- World Map SVG Dotted Background -->
-			<div class="w-full relative max-w-4xl overflow-hidden rounded-lg bg-zinc-950/60 border border-zinc-850 p-2 py-4">
+			<div class="w-full relative max-w-4xl overflow-hidden rounded-lg bg-slate-950/60 border border-slate-850 p-2 py-4">
 				
 				<!-- Dotted continent map outline simulator -->
-				<svg viewBox="0 0 800 250" class="w-full h-auto text-zinc-800 fill-zinc-800 select-none opacity-45">
+				<svg viewBox="0 0 800 250" class="w-full h-auto text-slate-700 fill-slate-700 select-none opacity-45">
 					<!-- North America dotted sketch -->
 					<ellipse cx="140" cy="70" rx="60" ry="30" fill="currentColor" opacity="0.12" />
 					<ellipse cx="180" cy="90" rx="50" ry="25" fill="currentColor" opacity="0.12" />
@@ -155,27 +156,27 @@
 
 					<!-- Dotted grid overlay lines -->
 					{#each Array(8) as _, i}
-						<line x1={i * 100} y1="0" x2={i * 100} y2="250" stroke="#1f2937" stroke-width="0.5" stroke-dasharray="2,5" />
+						<line x1={i * 100} y1="0" x2={i * 100} y2="250" stroke="#1e293b" stroke-width="0.5" stroke-dasharray="2,5" />
 					{/each}
 					{#each Array(4) as _, i}
-						<line x1="0" y1={i * 60 + 20} x2="800" y2={i * 60 + 20} stroke="#1f2937" stroke-width="0.5" stroke-dasharray="2,5" />
+						<line x1="0" y1={i * 60 + 20} x2="800" y2={i * 60 + 20} stroke="#1e293b" stroke-width="0.5" stroke-dasharray="2,5" />
 					{/each}
 
 					<!-- Glow pulses representing mapped peer locations -->
 					{#each extendedPeers as p}
 						<!-- Glowing concentric ring -->
-						<circle cx={p.x} cy={p.y} r="8" class="fill-cyan-400/25 animate-ping" />
+						<circle cx={p.x} cy={p.y} r="8" class="fill-emerald-500/25 animate-pulse" />
 						<!-- Main location dot -->
-						<circle cx={p.x} cy={p.y} r="3.5" class="fill-cyan-400 stroke-zinc-950 stroke-[1.5] shadow-[0_0_8px_#22d3ee]" />
+						<circle cx={p.x} cy={p.y} r="3.5" class="fill-emerald-500 stroke-slate-950 stroke-[1.5]" />
 					{/each}
 				</svg>
 
 				<!-- Center counter overlay -->
 				<div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none select-none">
-					<span class="text-4xl md:text-5xl font-black text-zinc-50 tracking-tight leading-none drop-shadow-[0_4px_12px_rgba(0,0,0,0.8)]">
+					<span class="text-4xl md:text-5xl font-bold text-slate-50 tracking-tight leading-none">
 						{data.PeerCount}
 					</span>
-					<span class="text-[9px] text-cyan-400 font-mono tracking-widest uppercase mt-1 bg-zinc-950/90 border border-zinc-800 px-2 py-0.5 rounded shadow">
+					<span class="text-[9px] text-emerald-500 font-mono tracking-widest uppercase mt-1 bg-slate-950/90 border border-slate-800 px-2 py-0.5 rounded shadow">
 						peers in swarm
 					</span>
 				</div>
@@ -183,15 +184,15 @@
 		</div>
 
 		<!-- Peers Table Registry -->
-		<div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden flex flex-col gap-4">
-			<div class="px-6 py-4 bg-zinc-950/40 border-b border-zinc-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-				<h3 class="font-bold text-sm text-zinc-300">Swarm Connections</h3>
+		<div class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden flex flex-col gap-4">
+			<div class="px-6 py-4 bg-slate-950/40 border-b border-slate-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+				<h3 class="font-bold text-sm text-slate-300">Swarm Connections</h3>
 				<div class="relative w-full sm:w-64">
 					<input
 						type="text"
 						bind:value={searchFilter}
 						placeholder="Filter by country or ID..."
-						class="w-full bg-zinc-950/60 border border-zinc-850 text-xs px-3.5 py-1.5 rounded-lg focus:outline-none focus:border-cyan-500"
+						class="w-full bg-slate-950/60 border border-slate-850 text-xs px-3.5 py-1.5 rounded-lg focus:outline-none focus:border-emerald-500"
 					/>
 				</div>
 			</div>
@@ -200,7 +201,7 @@
 				<div class="overflow-x-auto">
 					<table class="w-full text-left border-collapse text-xs">
 						<thead>
-							<tr class="border-b border-zinc-800/60 text-zinc-500 font-mono text-[10px] uppercase bg-zinc-950/20">
+							<tr class="border-b border-slate-800/60 text-slate-500 font-mono text-[10px] uppercase bg-slate-950/20">
 								<th class="py-2.5 px-6 font-semibold w-1/4">Location</th>
 								<th class="py-2.5 px-6 font-semibold w-12 text-right">Latency</th>
 								<th class="py-2.5 px-6 font-semibold w-1/3">Peer ID</th>
@@ -208,29 +209,29 @@
 								<th class="py-2.5 px-6 font-semibold text-right">Anchor</th>
 							</tr>
 						</thead>
-						<tbody class="divide-y divide-zinc-850/40 font-mono text-[11px]">
+						<tbody class="divide-y divide-slate-850/40 font-mono text-[11px]">
 							{#each filteredPeers as peer}
-								<tr class="hover:bg-zinc-850/25 transition-colors group">
+								<tr class="hover:bg-slate-850/25 transition-colors group">
 									<!-- Flag & Country -->
-									<td class="py-3.5 px-6 font-sans text-zinc-200 text-xs font-semibold">
+									<td class="py-3.5 px-6 font-sans text-slate-200 text-xs font-semibold">
 										<span class="text-sm select-none mr-1.5">{peer.flag}</span>
 										{peer.location}
 									</td>
 									
 									<!-- Latency -->
 									<td class="py-3.5 px-6 text-right font-bold font-mono">
-										<span class={`${peer.latency < 30 ? 'text-emerald-400' : peer.latency < 80 ? 'text-cyan-400' : 'text-amber-500'}`}>
+										<span class={`${peer.latency < 30 ? 'text-emerald-400' : peer.latency < 80 ? 'text-emerald-500' : 'text-amber-500'}`}>
 											{peer.latency} ms
 										</span>
 									</td>
 
 									<!-- Peer ID -->
-									<td class="py-3.5 px-6 text-zinc-400">
+									<td class="py-3.5 px-6 text-slate-400">
 										<div class="flex items-center gap-2">
 											<span>{peer.peerId}</span>
 											<button 
 												onclick={() => copyToClipboard(peer.peerId, peer.peerId)}
-												class="text-[10px] text-zinc-650 hover:text-zinc-350 opacity-0 group-hover:opacity-100 transition-opacity"
+												class="text-[10px] text-slate-650 hover:text-slate-350 opacity-0 group-hover:opacity-100 transition-opacity"
 												title="Copy ID"
 											>
 												{copiedId === peer.peerId ? 'Copied' : 'Copy'}
@@ -239,7 +240,7 @@
 									</td>
 
 									<!-- Transport -->
-									<td class="py-3.5 px-6 text-zinc-400">{peer.transport}</td>
+									<td class="py-3.5 px-6 text-slate-400">{peer.transport}</td>
 
 									<!-- Anchor -->
 									<td class="py-3.5 px-6 text-right font-sans">
@@ -248,7 +249,7 @@
 												anchor
 											</span>
 										{:else}
-											<span class="text-zinc-600 font-mono text-xs">no</span>
+											<span class="text-slate-600 font-mono text-xs">no</span>
 										{/if}
 									</td>
 								</tr>
@@ -257,7 +258,7 @@
 					</table>
 				</div>
 			{:else}
-				<div class="py-12 text-center text-zinc-600 italic">No connections match current filters</div>
+				<div class="py-12 text-center text-slate-600 italic">No connections match current filters</div>
 			{/if}
 		</div>
 	{/if}
