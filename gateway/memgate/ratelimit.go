@@ -3,6 +3,7 @@ package memgate
 import (
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -77,6 +78,12 @@ func (i *ipLimiter) Middleware(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The explorer is a local admin UI — skip rate-limiting so
+		// SPA page loads and live-data polling are not throttled.
+		if strings.HasPrefix(r.URL.Path, "/explorer") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		ip, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil {
 			ip = r.RemoteAddr

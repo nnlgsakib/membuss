@@ -153,6 +153,24 @@ func (b *memBackend) SealedMIDs(ctx context.Context) ([]mid.MID, error) {
 	return out, nil
 }
 
+func (b *memBackend) AllStoredMIDs(ctx context.Context) ([]StoredMIDView, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]StoredMIDView, 0, len(b.content))
+	for k := range b.content {
+		m, err := mid.Parse(k)
+		if err != nil {
+			continue
+		}
+		out = append(out, StoredMIDView{
+			MID:    m.String(),
+			Name:   "",
+			Sealed: b.sealed[k],
+		})
+	}
+	return out, nil
+}
+
 func (b *memBackend) SealedCount(ctx context.Context) (int, error) {
 	mids, err := b.SealedMIDs(ctx)
 	if err != nil {

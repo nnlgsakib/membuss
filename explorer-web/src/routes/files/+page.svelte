@@ -5,13 +5,14 @@
 	import { goto } from '$app/navigation';
 	import Icon from '@iconify/svelte';
 
-	interface SealedMID {
+	interface StoredMID {
 		MID: string;
 		Name: string;
+		Sealed: boolean;
 	}
 
 	interface IndexData {
-		SealedList: SealedMID[];
+		AllFiles: StoredMID[];
 	}
 
 	// Local file cache derived from SealedList + query sizes
@@ -79,11 +80,11 @@
 	async function loadFiles() {
 		try {
 			const indexRes: IndexData = await apiFetch('/');
-			const sealedList = indexRes.SealedList || [];
+			const allFiles = indexRes.AllFiles || [];
 			
-			// Map SealedList to LocalFile objects
+			// Map AllFiles to LocalFile objects
 			const mapped: LocalFile[] = [];
-			for (const item of sealedList) {
+			for (const item of allFiles) {
 				let size = 0;
 				let type: 'file' | 'dir' = 'file';
 				let mime = 'application/octet-stream';
@@ -101,7 +102,7 @@
 				mapped.push({
 					mid: item.MID,
 					name: item.Name || 'Unnamed Record',
-					sealed: true,
+					sealed: item.Sealed,
 					size,
 					mime,
 					type
@@ -195,10 +196,15 @@
 
 			if (d.done) {
 				es.close();
-				resolvingMIDs[idx].statusText = 'Resolved!';
+				resolvingMIDs[idx].statusText = 'Pinning to local store...';
 				resolvingMIDs[idx].percent = 100;
-				loadFiles(); // reload list
-				setTimeout(() => removeResolving(midVal), 2000);
+				// Seal (pin) the fetched content so it appears in the file list
+				fetch(`${base}/mid/${midVal}/seal`, { method: 'POST' })
+					.finally(() => {
+						loadFiles();
+						resolvingMIDs[idx].statusText = 'Resolved!';
+						setTimeout(() => removeResolving(midVal), 2000);
+					});
 				return;
 			}
 

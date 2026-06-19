@@ -13,10 +13,10 @@
 	}
 
 	interface KeyringKey {
-		Name: string;
-		MemNSName: string;
-		Type: string;
-		CreatedAt: string;
+		name: string;
+		memns_name: string;
+		type: string;
+		created_at: string;
 	}
 
 	interface NodeData {
@@ -178,34 +178,34 @@
 								</tr>
 							</thead>
 							<tbody class="divide-y divide-slate-800/40">
-								{#each data.Keys as key}
-									<tr class="hover:bg-slate-800/25 transition-colors">
-										<!-- Key Name -->
-										<td class="py-3.5 px-6 font-bold text-slate-200 font-mono text-xs">{key.Name}</td>
-										
-										<!-- MemNS Domain -->
-										<td class="py-3.5 px-6 font-mono text-xs">
-											{#if key.MemNSName}
-												<a 
-													href={`${base}/memns/${key.MemNSName.replace('/memns/', '')}`} 
-													class="text-cyan-400 hover:underline hover:text-cyan-300"
-												>
-													{key.MemNSName}
-												</a>
-											{:else}
-												<span class="text-slate-600 italic">No bound domain</span>
-											{/if}
-										</td>
+							{#each data.Keys as key}
+								<tr class="hover:bg-slate-800/25 transition-colors">
+									<!-- Key Name -->
+									<td class="py-3.5 px-6 font-bold text-slate-200 font-mono text-xs">{key.name}</td>
+									
+									<!-- MemNS Domain -->
+									<td class="py-3.5 px-6 font-mono text-xs">
+										{#if key.memns_name}
+											<a 
+												href={`${base}/memns/${key.memns_name.replace('/memns/', '')}`} 
+												class="text-cyan-400 hover:underline hover:text-cyan-300"
+											>
+												{key.memns_name}
+											</a>
+										{:else}
+											<span class="text-slate-600 italic">No bound domain</span>
+										{/if}
+									</td>
 
-										<!-- Type -->
-										<td class="py-3.5 px-6 text-slate-400 font-mono text-xs">{key.Type}</td>
+									<!-- Type -->
+									<td class="py-3.5 px-6 text-slate-400 font-mono text-xs">{key.type}</td>
 
-										<!-- Created At -->
-										<td class="py-3.5 px-6 text-slate-500 text-right font-mono text-xs">
-											{formatDate(key.CreatedAt)}
-										</td>
-									</tr>
-								{/each}
+									<!-- Created At -->
+									<td class="py-3.5 px-6 text-slate-500 text-right font-mono text-xs">
+										{formatDate(key.created_at)}
+									</td>
+								</tr>
+							{/each}
 							</tbody>
 						</table>
 					</div>

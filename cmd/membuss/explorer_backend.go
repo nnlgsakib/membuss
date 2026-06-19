@@ -47,10 +47,24 @@ type explorerAdapter struct {
 	anchorMode bool
 	keyring    *keyring.KeyRing
 	memnsRes   *memns.Resolver
+	// allRoots tracks all root MIDs known to this node
+	// (both sealed and unsealed). Populated from sealed
+	// list on startup, extended as content is added or
+	// fetched.
+	allRoots map[string]struct{}
 }
 
 func newExplorerAdapter(b *daemonBackend, anchorMode bool, keyring *keyring.KeyRing, memnsRes *memns.Resolver) *explorerAdapter {
-	return &explorerAdapter{b: b, started: time.Now(), anchorMode: anchorMode, keyring: keyring, memnsRes: memnsRes}
+	a := &explorerAdapter{b: b, started: time.Now(), anchorMode: anchorMode, keyring: keyring, memnsRes: memnsRes, allRoots: make(map[string]struct{})}
+	// Populate allRoots from sealed MIDs on startup.
+	if b.store != nil {
+		if sealed, err := b.store.AllSealed(); err == nil {
+			for _, m := range sealed {
+				a.allRoots[m.String()] = struct{}{}
+			}
+		}
+	}
+	return a
 }
 
 // Stat returns a metadata snapshot.
@@ -169,23 +183,24 @@ func (a *explorerAdapter) ResolveWithProgress(ctx context.Context, m mid.MID, pr
 		})
 		if serr == nil {
 			if _, ferr := sess.Fetch(ctx); ferr == nil {
-			has = true
-		} else {
-			// Providers existed but the Memex
-			// session failed. The caller
-			// (explorer.handleMID) re-checks
-			// Providers() to distinguish
-			// ResolveAttempted from
-			// ResolveNoProviders, so we
-			// return ErrNotFound here and let
-			// that classification happen.
-			return nil, explorer.ContentInfo{}, explorer.ErrNotFound
-		}
+				has = true
+			} else {
+				// The Memex session reported progress (blocks
+				// downloaded) but the final reassembly or
+				// verification step failed. Re-check the store
+				// because individual blocks may have been stored
+				// even though the session-level Fetch errored.
+				if h2, herr := b.store.Has(m); herr == nil && h2 {
+					has = true
+				}
+			}
 		}
 	}
 	if !has {
 		return nil, explorer.ContentInfo{}, explorer.ErrNotFound
 	}
+	// Track this MID as a known root so it appears in the file list.
+	a.allRoots[m.String()] = struct{}{}
 	// Reuse the memgate adapter's Resolve so the size /
 	// blocks / sealed numbers are computed exactly the
 	// same way the public gateway would compute them.
@@ -240,6 +255,40 @@ func (a *explorerAdapter) SealedMIDs(ctx context.Context) ([]mid.MID, error) {
 		return nil, nil
 	}
 	return b.store.AllSealed()
+}
+
+// AllStoredMIDs lists every root MID in the local store,
+// regardless of seal status, with its sealed flag.
+func (a *explorerAdapter) AllStoredMIDs(ctx context.Context) ([]explorer.StoredMIDView, error) {
+	b := a.b
+	if b.store == nil {
+		return nil, nil
+	}
+	sealed, err := b.store.AllSealed()
+	if err != nil {
+		return nil, err
+	}
+	sealedSet := make(map[string]struct{}, len(sealed))
+	for _, m := range sealed {
+		sealedSet[m.String()] = struct{}{}
+	}
+	out := make([]explorer.StoredMIDView, 0, len(a.allRoots))
+	for key := range a.allRoots {
+		m, err := mid.Parse(key)
+		if err != nil {
+			continue
+		}
+		name := ""
+		if info, serr := store.GetObjectInfo(b.store, m); serr == nil && info.Name != "" {
+			name = info.Name
+		}
+		out = append(out, explorer.StoredMIDView{
+			MID:    key,
+			Name:   name,
+			Sealed: func() bool { _, ok := sealedSet[key]; return ok }(),
+		})
+	}
+	return out, nil
 }
 
 // SealedCount returns the count of sealed MIDs.
@@ -427,6 +476,7 @@ func (a *explorerAdapter) Add(ctx context.Context, name string, r io.Reader) (ex
 	if err != nil {
 		return explorer.ContentInfo{}, err
 	}
+	a.allRoots[res.MID] = struct{}{}
 	return explorer.ContentInfo{
 		MID:           res.MID,
 		Size:          res.Size,
@@ -512,6 +562,8 @@ func (a *explorerAdapter) AddDirectory(ctx context.Context, name string, files [
 		MimeType: "inode/directory",
 		Size:     res.Size,
 	})
+
+	a.allRoots[res.MID.String()] = struct{}{}
 
 	return explorer.ContentInfo{
 		MID:           res.MID.String(),

@@ -35,11 +35,12 @@
 	// Bandwidth Live SVG Charts States
 	let bandwidthIn = $state<number[]>([]);
 	let bandwidthOut = $state<number[]>([]);
-	let currentInSpeed = $state(0); // bytes/sec
-	let currentOutSpeed = $state(0); // bytes/sec
+	let currentInSpeed = $state(0);
+	let currentOutSpeed = $state(0);
 	let chartWidth = 700;
 	let chartHeight = 220;
 
+	let dataInterval: number;
 	let graphInterval: number;
 
 	let socket: WebSocket | null = null;
@@ -53,46 +54,24 @@
 
 		socket.onopen = () => {
 			wsConnected = true;
-			error = null;
 		};
 
 		socket.onmessage = (event) => {
-			const stats = JSON.parse(event.data);
-			if (!data) {
-				data = {
-					Title: 'Home',
-					NodeInfo: { PeerID: '', Addrs: [], Version: '', Build: '', AnchorMode: false },
-					PeerCount: 0, StoreBytes: 0, SealedCount: 0, BlockCount: 0, Uptime: 0,
-					BandwidthIn: 0, BandwidthOut: 0, TotalBytesIn: 0, TotalBytesOut: 0,
-					SealedList: []
-				};
-			}
-
-			data.PeerCount = stats.peerCount;
-			data.StoreBytes = stats.storeBytes;
-			data.SealedCount = stats.sealedCount;
-			data.BlockCount = stats.blockCount;
-			data.Uptime = stats.uptime;
-			data.BandwidthIn = stats.bandwidthIn;
-			data.BandwidthOut = stats.bandwidthOut;
-			data.TotalBytesIn = stats.totalBytesIn;
-			data.TotalBytesOut = stats.totalBytesOut;
-
-			if (stats.nodeInfo) data.NodeInfo = stats.nodeInfo;
-			if (stats.sealedList) data.SealedList = stats.sealedList;
-
-			updateUptimeString();
-			loading = false;
+			try {
+				const stats = JSON.parse(event.data);
+				if (data) {
+					// Update live bandwidth fields only
+					data.BandwidthIn = stats.bandwidthIn ?? 0;
+					data.BandwidthOut = stats.bandwidthOut ?? 0;
+					data.TotalBytesIn = stats.totalBytesIn ?? 0;
+					data.TotalBytesOut = stats.totalBytesOut ?? 0;
+					data.PeerCount = stats.peerCount ?? 0;
+				}
+			} catch (_) {}
 		};
 
 		socket.onclose = () => {
 			wsConnected = false;
-			// If WS fails and we have no data yet, do a one-time HTTP fetch
-			// so the dashboard isn't blank.
-			if (!data) {
-				loadDashboard();
-			}
-			// Reconnect after 3 seconds
 			setTimeout(() => {
 				if (socket && socket.readyState === WebSocket.CLOSED) {
 					connectWS();
@@ -136,14 +115,10 @@
 		formattedUptime = parts.join(' ');
 	}
 
-	// Generate clean animated points for the live network charts
 	function tickBandwidth() {
-		// Fluctuate around actual backend metrics, defaulting to a baseline if none available
 		const inBase = data && data.BandwidthIn !== undefined ? data.BandwidthIn : 0;
 		const outBase = data && data.BandwidthOut !== undefined ? data.BandwidthOut : 0;
 
-		// Add a tiny random jitter (e.g. up to 10%) to keep it feeling alive,
-		// but matching the scale of the real traffic.
 		const jitterIn = inBase > 0 ? (Math.random() - 0.5) * 0.1 * inBase : (Math.random() * 2 * 1024);
 		const jitterOut = outBase > 0 ? (Math.random() - 0.5) * 0.1 * outBase : (Math.random() * 1 * 1024);
 
@@ -154,11 +129,10 @@
 		bandwidthOut = [...bandwidthOut.slice(-40), currentOutSpeed];
 	}
 
-	// SVG Path drawing helpers
 	function getSvgPath(speeds: number[], color: string): string {
 		if (speeds.length === 0) return '';
 		const maxSpeed = Math.max(...bandwidthIn, ...bandwidthOut, 100 * 1024);
-		const maxVal = maxSpeed * 1.2; // 20% headroom
+		const maxVal = maxSpeed * 1.2;
 		const padding = 10;
 		const points = speeds.map((speed, i) => {
 			const x = (i / 40) * (chartWidth - padding * 2) + padding;
@@ -171,7 +145,7 @@
 	function getAreaPath(speeds: number[]): string {
 		if (speeds.length === 0) return '';
 		const maxSpeed = Math.max(...bandwidthIn, ...bandwidthOut, 100 * 1024);
-		const maxVal = maxSpeed * 1.2; // 20% headroom
+		const maxVal = maxSpeed * 1.2;
 		const padding = 10;
 		const points = speeds.map((speed, i) => {
 			const x = (i / 40) * (chartWidth - padding * 2) + padding;
@@ -185,16 +159,21 @@
 	}
 
 	onMount(() => {
-		// Initialize graphs
 		bandwidthIn = Array(40).fill(0).map(() => 50 * 1024 + Math.random() * 100 * 1024);
 		bandwidthOut = Array(40).fill(0).map(() => 20 * 1024 + Math.random() * 30 * 1024);
 
-		// Pure WebSocket mode — connect immediately. No HTTP polling fallback.
+		// 1. Load full dashboard via HTTP first (reliable data)
+		loadDashboard();
+
+		// 2. Open WebSocket for live bandwidth updates only
 		connectWS();
 
+		// 3. Refresh data every 15s as fallback / for non-bandwidth fields
+		dataInterval = setInterval(loadDashboard, 15000) as unknown as number;
 		graphInterval = setInterval(tickBandwidth, 1000) as unknown as number;
 
 		return () => {
+			clearInterval(dataInterval);
 			clearInterval(graphInterval);
 			if (socket) {
 				socket.close();

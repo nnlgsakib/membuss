@@ -176,6 +176,9 @@ type Backend interface {
 	Peers(ctx context.Context, limit int) ([]PeerInfo, error)
 	// SealedMIDs lists all sealed MIDs in the local store.
 	SealedMIDs(ctx context.Context) ([]mid.MID, error)
+	// AllStoredMIDs lists every root MID in the local store,
+	// regardless of seal status, with its sealed flag.
+	AllStoredMIDs(ctx context.Context) ([]StoredMIDView, error)
 	// SealedCount returns the count of sealed MIDs.
 	SealedCount(ctx context.Context) (int, error)
 	// BlockCount returns the count of all blocks in the
@@ -449,6 +452,13 @@ type sealedMIDView struct {
 	Name string
 }
 
+// StoredMIDView is a MID in the local store with its sealed status.
+type StoredMIDView struct {
+	MID    string `json:"MID"`
+	Name   string `json:"Name"`
+	Sealed bool   `json:"Sealed"`
+}
+
 type indexData struct {
 	Title         string
 	NodeInfo      nodeInfoView
@@ -458,6 +468,7 @@ type indexData struct {
 	BlockCount    uint64
 	Uptime        int64
 	SealedList    []sealedMIDView
+	AllFiles      []StoredMIDView
 	BandwidthIn   float64
 	BandwidthOut  float64
 	TotalBytesIn  int64
@@ -505,6 +516,10 @@ func (e *Explorer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if len(sealedList) > 50 {
 		sealedList = sealedList[:50]
 	}
+
+	// Fetch ALL stored MIDs (sealed and unsealed) for the file list.
+	allFiles, _ := b.AllStoredMIDs(ctx)
+
 	peers, _ := b.Peers(ctx, e.cfg.PeerLimit)
 	totIn, totOut, rateIn, rateOut, _ := b.BandwidthStats(ctx)
 	data := indexData{
@@ -515,6 +530,7 @@ func (e *Explorer) handleIndex(w http.ResponseWriter, r *http.Request) {
 		BlockCount:    mustBlockCount(ctx, b),
 		Uptime:        int64(b.Uptime(ctx).Seconds()),
 		SealedList:    sealedList,
+		AllFiles:      allFiles,
 		BandwidthIn:   rateIn,
 		BandwidthOut:  rateOut,
 		TotalBytesIn:  totIn,
