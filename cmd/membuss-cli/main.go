@@ -13,6 +13,8 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,6 +27,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/nnlgsakib/membuss/config"
+	"github.com/nnlgsakib/membuss/core/memlink"
 	membusspb "github.com/nnlgsakib/membuss/proto"
 )
 
@@ -83,6 +86,8 @@ Run "membuss-cli init" first to set up the data directory.`,
 		newPingCmd(),
 		newDaemonCmd(),
 		newInitCmd(),
+		newMemNSCmd(),
+		newKeyRingCmd(),
 	)
 	return root
 }
@@ -146,6 +151,7 @@ func newAddCmd() *cobra.Command {
 		chunkSize uint32
 		noSeal    bool
 		wrapDir   bool
+		dirName   string
 	)
 	c := &cobra.Command{
 		Use:   "add <file-or-dir>",
@@ -158,7 +164,7 @@ func newAddCmd() *cobra.Command {
 			// result is a single DIR MID that resolves to
 			// the whole tree.
 			if fi, err := os.Stat(path); err == nil && fi.IsDir() {
-				return addDirectoryHTTP(cmd, path)
+				return addDirectoryHTTP(cmd, path, dirName)
 			}
 			if wrapDir {
 				return addFileHTTP(cmd, path, true)
@@ -188,6 +194,7 @@ func newAddCmd() *cobra.Command {
 	c.Flags().Uint32Var(&chunkSize, "chunk-size", 0, "fixed chunk size in bytes (default 256 KiB)")
 	c.Flags().BoolVar(&noSeal, "no-seal", false, "do not seal the root after ingest")
 	c.Flags().BoolVar(&wrapDir, "wrap-dir", false, "wrap the file in a single-entry DIR node (MemFS)")
+	c.Flags().StringVar(&dirName, "name", "", "custom name for the uploaded directory (defaults to directory basename)")
 	return c
 }
 
@@ -351,6 +358,7 @@ func newStatCmd() *cobra.Command {
 				fmt.Fprintf(tw, "size\t%s (%d bytes)\n", formatBytes(resp.Size), resp.Size)
 				fmt.Fprintf(tw, "blocks\t%d\n", resp.Blocks)
 				fmt.Fprintf(tw, "sealed\t%t\n", resp.Sealed)
+				fmt.Fprintf(tw, "sealers\t%d (anchors: %d)\n", resp.Sealers, resp.AnchorSealers)
 				fmt.Fprintf(tw, "codec\t0x%x\n", resp.Codec)
 				if resp.Erasure != nil {
 					fmt.Fprintf(tw, "erasure\t%d+%d (%d shards)\n", resp.Erasure.DataShards, resp.Erasure.ParityShards, len(resp.Erasure.ShardMids))
@@ -377,9 +385,9 @@ func newPeersCmd() *cobra.Command {
 					return err
 				}
 				tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-				fmt.Fprintf(tw, "PEER ID\tADDRS\n")
+				fmt.Fprintf(tw, "PEER ID\tANCHOR\tADDRS\n")
 				for _, p := range resp.Peers {
-					fmt.Fprintf(tw, "%s\t%s\n", p.PeerId, strings.Join(p.Addrs, ","))
+					fmt.Fprintf(tw, "%s\t%t\t%s\n", p.PeerId, p.IsAnchor, strings.Join(p.Addrs, ","))
 				}
 				fmt.Fprintf(tw, "\n")
 				fmt.Fprintf(tw, "total\t%d (showing %d)\n", resp.Total, len(resp.Peers))
@@ -417,9 +425,9 @@ func newDHTPeekCmd() *cobra.Command {
 					return err
 				}
 				tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-				fmt.Fprintf(tw, "PEER ID\tADDRS\n")
+				fmt.Fprintf(tw, "PEER ID\tANCHOR\tADDRS\n")
 				for _, p := range resp.Providers {
-					fmt.Fprintf(tw, "%s\t%s\n", p.PeerId, strings.Join(p.Addrs, ","))
+					fmt.Fprintf(tw, "%s\t%t\t%s\n", p.PeerId, p.IsAnchor, strings.Join(p.Addrs, ","))
 				}
 				return tw.Flush()
 			})
@@ -725,7 +733,19 @@ func addFileHTTP(cmd *cobra.Command, path string, wrapDir bool) error {
 // addDirectoryHTTP uploads a directory as multipart/form-data
 // to /api/v1/add/dir. Each part carries a X-Membuss-Path
 // header with the file's relative path.
-func addDirectoryHTTP(cmd *cobra.Command, root string) error {
+func addDirectoryHTTP(cmd *cobra.Command, root string, dirName string) error {
+	name := dirName
+	if name == "" {
+		abs, err := filepath.Abs(root)
+		if err == nil {
+			name = filepath.Base(abs)
+		} else {
+			name = filepath.Base(root)
+		}
+		if name == "." || name == "/" || name == "\\" || name == "" {
+			name = "dist"
+		}
+	}
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 	count := 0
@@ -741,7 +761,13 @@ func addDirectoryHTTP(cmd *cobra.Command, root string) error {
 			return err
 		}
 		rel = strings.ReplaceAll(rel, string(filepath.Separator), "/")
-		fw, err := mw.CreateFormFile("file", rel)
+		h := make(textproto.MIMEHeader)
+		h.Set("Content-Disposition",
+			fmt.Sprintf(`form-data; name="file"; filename="%s"`,
+				escapeQuotes(filepath.Base(rel))))
+		h.Set("Content-Type", "application/octet-stream")
+		h.Set("X-Membuss-Path", rel)
+		fw, err := mw.CreatePart(h)
 		if err != nil {
 			return err
 		}
@@ -765,7 +791,7 @@ func addDirectoryHTTP(cmd *cobra.Command, root string) error {
 	if err := mw.Close(); err != nil {
 		return err
 	}
-	req, err := http.NewRequest("POST", httpBase()+"/api/v1/add/dir", &buf)
+	req, err := http.NewRequest("POST", httpBase()+"/api/v1/add/dir?name="+url.QueryEscape(name), &buf)
 	if err != nil {
 		return err
 	}
@@ -787,7 +813,7 @@ func addDirectoryHTTP(cmd *cobra.Command, root string) error {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		return err
+		return fmt.Errorf("failed to decode response: %w", err)
 	}
 	if !env.OK {
 		return fmt.Errorf("add-dir: %s", env.Error)
@@ -795,3 +821,693 @@ func addDirectoryHTTP(cmd *cobra.Command, root string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "%s\n", env.Data.MID)
 	return nil
 }
+
+var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"")
+
+func escapeQuotes(s string) string {
+	return quoteEscaper.Replace(s)
+}
+
+// APIMemRoute represents the API's route payload mapping.
+type APIMemRoute struct {
+	Target     string            `json:"target"`
+	Weight     uint32            `json:"weight"`
+	Label      string            `json:"label"`
+	Conditions map[string]string `json:"conditions"`
+}
+
+func newKeyRingCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "keyring",
+		Short: "Manage MemNS signing key pairs",
+	}
+
+	var keyType string
+	genCmd := &cobra.Command{
+		Use:   "gen <name>",
+		Short: "Generate a new named key pair",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			name := args[0]
+			body := map[string]any{
+				"name": name,
+				"type": keyType,
+			}
+			buf := &bytes.Buffer{}
+			if err := json.NewEncoder(buf).Encode(body); err != nil {
+				return err
+			}
+			resp, err := http.Post(httpBase()+"/api/v1/keyring/gen", "application/json", buf)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("gen key failed: %s: %s", resp.Status, string(bodyBytes))
+			}
+			var env struct {
+				OK   bool `json:"ok"`
+				Data struct {
+					Name      string `json:"name"`
+					MemNSName string `json:"memns_name"`
+				} `json:"data"`
+				Error string `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+				return err
+			}
+			if !env.OK {
+				return fmt.Errorf("gen key: %s", env.Error)
+			}
+			fmt.Fprintf(c.OutOrStdout(), "Generated key %q -> %s\n", env.Data.Name, env.Data.MemNSName)
+			return nil
+		},
+	}
+	genCmd.Flags().StringVar(&keyType, "type", "ed25519", "key type: ed25519 or rsa")
+	cmd.AddCommand(genCmd)
+
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List all keys + their /memns/ names",
+		Args:  cobra.NoArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			resp, err := http.Get(httpBase() + "/api/v1/keyring/list")
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("list keys failed: %s: %s", resp.Status, string(bodyBytes))
+			}
+			var env struct {
+				OK   bool `json:"ok"`
+				Data []struct {
+					Name      string    `json:"name"`
+					MemNSName string    `json:"memns_name"`
+					CreatedAt time.Time `json:"created_at"`
+					PublicKey string    `json:"public_key"`
+				} `json:"data"`
+				Error string `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+				return err
+			}
+			if !env.OK {
+				return fmt.Errorf("list keys: %s", env.Error)
+			}
+
+			tw := tabwriter.NewWriter(c.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "NAME\tMEMNS NAME\tCREATED AT")
+			for _, k := range env.Data {
+				fmt.Fprintf(tw, "%s\t%s\t%s\n", k.Name, k.MemNSName, k.CreatedAt.Local().Format(time.RFC3339))
+			}
+			return tw.Flush()
+		},
+	}
+	cmd.AddCommand(listCmd)
+
+	exportCmd := &cobra.Command{
+		Use:   "export <name>",
+		Short: "Export private key (PEM)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			name := args[0]
+			resp, err := http.Get(httpBase() + "/api/v1/keyring/export/" + name)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("export key failed: %s: %s", resp.Status, string(bodyBytes))
+			}
+			var env struct {
+				OK   bool `json:"ok"`
+				Data struct {
+					PEM string `json:"pem"`
+				} `json:"data"`
+				Error string `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+				return err
+			}
+			if !env.OK {
+				return fmt.Errorf("export key: %s", env.Error)
+			}
+			fmt.Fprint(c.OutOrStdout(), env.Data.PEM)
+			return nil
+		},
+	}
+	cmd.AddCommand(exportCmd)
+
+	importCmd := &cobra.Command{
+		Use:   "import <name> <file>",
+		Short: "Import keypair",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(c *cobra.Command, args []string) error {
+			name := args[0]
+			file := args[1]
+			pemBytes, err := os.ReadFile(file)
+			if err != nil {
+				return err
+			}
+			body := map[string]any{
+				"name": name,
+				"pem":  string(pemBytes),
+			}
+			buf := &bytes.Buffer{}
+			if err := json.NewEncoder(buf).Encode(body); err != nil {
+				return err
+			}
+			resp, err := http.Post(httpBase()+"/api/v1/keyring/import", "application/json", buf)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("import key failed: %s: %s", resp.Status, string(bodyBytes))
+			}
+			var env struct {
+				OK    bool   `json:"ok"`
+				Error string `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+				return err
+			}
+			if !env.OK {
+				return fmt.Errorf("import key: %s", env.Error)
+			}
+			fmt.Fprintf(c.OutOrStdout(), "Imported key %q successfully\n", name)
+			return nil
+		},
+	}
+	cmd.AddCommand(importCmd)
+
+	rmCmd := &cobra.Command{
+		Use:   "rm <name>",
+		Short: "Delete key",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			name := args[0]
+			req, err := http.NewRequest("DELETE", httpBase()+"/api/v1/keyring/rm/"+name, nil)
+			if err != nil {
+				return err
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("delete key failed: %s: %s", resp.Status, string(bodyBytes))
+			}
+			var env struct {
+				OK    bool   `json:"ok"`
+				Error string `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+				return err
+			}
+			if !env.OK {
+				return fmt.Errorf("delete key: %s", env.Error)
+			}
+			fmt.Fprintf(c.OutOrStdout(), "Deleted key %q successfully\n", name)
+			return nil
+		},
+	}
+	cmd.AddCommand(rmCmd)
+
+	return cmd
+}
+
+func newMemNSCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "memns",
+		Short: "Manage MemNS record publishing and resolution",
+	}
+
+	var ttl uint64
+	var msg string
+	var routes []string
+
+	publishCmd := &cobra.Command{
+		Use:   "publish <keyname> <MID>",
+		Short: "Publish a new MemNS record",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(c *cobra.Command, args []string) error {
+			key := args[0]
+			val := args[1]
+
+			var apiRoutes []APIMemRoute
+			for _, rStr := range routes {
+				parts := strings.SplitN(rStr, "=", 2)
+				if len(parts) != 2 {
+					return fmt.Errorf("invalid route format: %s (expected label=target:weight)", rStr)
+				}
+				label := parts[0]
+				targetWeight := parts[1]
+				twParts := strings.SplitN(targetWeight, ":", 2)
+				if len(twParts) != 2 {
+					return fmt.Errorf("invalid route target/weight format: %s (expected label=target:weight)", rStr)
+				}
+				target := twParts[0]
+				var weight uint64
+				if _, err := fmt.Sscan(twParts[1], &weight); err != nil {
+					return fmt.Errorf("invalid weight in route: %s", rStr)
+				}
+				apiRoutes = append(apiRoutes, APIMemRoute{
+					Target:     target,
+					Weight:     uint32(weight),
+					Label:      label,
+					Conditions: make(map[string]string),
+				})
+			}
+
+			body := map[string]any{
+				"key":     key,
+				"value":   val,
+				"ttl":     ttl,
+				"message": msg,
+				"routes":  apiRoutes,
+			}
+			buf := &bytes.Buffer{}
+			if err := json.NewEncoder(buf).Encode(body); err != nil {
+				return err
+			}
+
+			resp, err := http.Post(httpBase()+"/api/v1/memns/publish", "application/json", buf)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != 200 {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("publish failed: %s: %s", resp.Status, string(bodyBytes))
+			}
+
+			var env struct {
+				OK   bool `json:"ok"`
+				Data struct {
+					Name     string `json:"name"`
+					Sequence uint64 `json:"sequence"`
+				} `json:"data"`
+				Error string `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+				return err
+			}
+			if !env.OK {
+				return fmt.Errorf("publish: %s", env.Error)
+			}
+
+			fmt.Fprintf(c.OutOrStdout(), "Published %s -> %s at sequence %d\n", env.Data.Name, val, env.Data.Sequence)
+			return nil
+		},
+	}
+	publishCmd.Flags().Uint64Var(&ttl, "ttl", 3600, "TTL hints in seconds")
+	publishCmd.Flags().StringVar(&msg, "message", "", "changelog message note")
+	publishCmd.Flags().StringSliceVar(&routes, "route", nil, "routing targets in format: label=target:weight")
+	cmd.AddCommand(publishCmd)
+
+	var atSeq uint64
+
+	resolveCmd := &cobra.Command{
+		Use:   "resolve <name or domain>",
+		Short: "Resolve a MemNS name or domain to MID",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			nameOrDomain := args[0]
+
+			if atSeq > 0 {
+				name := nameOrDomain
+				if strings.Contains(name, ".") {
+					resp, err := http.Get(httpBase() + "/api/v1/memlink/resolve/" + name)
+					if err != nil {
+						return err
+					}
+					defer resp.Body.Close()
+					if resp.StatusCode != 200 {
+						bodyBytes, _ := io.ReadAll(resp.Body)
+						return fmt.Errorf("resolve memlink failed: %s: %s", resp.Status, string(bodyBytes))
+					}
+					var env struct {
+						OK   bool `json:"ok"`
+						Data struct {
+							RawTxt      string `json:"raw_txt"`
+							ResolvedMID string `json:"resolved_mid"`
+						} `json:"data"`
+						Error string `json:"error"`
+					}
+					if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+						return err
+					}
+					if !env.OK {
+						return fmt.Errorf("resolve memlink: %s", env.Error)
+					}
+					rec, err := memlink.ParseTXTRecord(env.Data.RawTxt)
+					if err != nil {
+						return err
+					}
+					if rec.MemNSName == "" {
+						return fmt.Errorf("historical resolve requires a mutable memns target, but domain resolved to static MID: %s", env.Data.ResolvedMID)
+					}
+					name = rec.MemNSName
+				}
+
+				if strings.HasPrefix(name, "/memns/") {
+					name = name[7:]
+				}
+
+				resp, err := http.Get(httpBase() + "/api/v1/memns/log/" + name)
+				if err != nil {
+					return err
+				}
+				defer resp.Body.Close()
+				if resp.StatusCode != 200 {
+					bodyBytes, _ := io.ReadAll(resp.Body)
+					return fmt.Errorf("resolve log failed: %s: %s", resp.Status, string(bodyBytes))
+				}
+				var env struct {
+					OK   bool `json:"ok"`
+					Data struct {
+						Entries []struct {
+							Sequence  uint64 `json:"sequence"`
+							MID       string `json:"mid"`
+							Timestamp int64  `json:"timestamp"`
+							Message   string `json:"message"`
+						} `json:"entries"`
+					} `json:"data"`
+					Error string `json:"error"`
+				}
+				if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+					return err
+				}
+				if !env.OK {
+					return fmt.Errorf("resolve log: %s", env.Error)
+				}
+				var found bool
+				var val string
+				for _, e := range env.Data.Entries {
+					if e.Sequence == atSeq {
+						val = e.MID
+						found = true
+						break
+					}
+				}
+				if !found {
+					return fmt.Errorf("sequence %d not found in changelog history", atSeq)
+				}
+				fullName := nameOrDomain
+				if !strings.HasPrefix(fullName, "/memns/") && !strings.Contains(fullName, ".") {
+					fullName = "/memns/" + fullName
+				}
+				fmt.Fprintf(c.OutOrStdout(), "Name:     %s\n", fullName)
+				fmt.Fprintf(c.OutOrStdout(), "Value:    %s\n", val)
+				fmt.Fprintf(c.OutOrStdout(), "Sequence: %d\n", atSeq)
+				return nil
+			}
+
+			var name string
+			var isDomain bool
+			if strings.Contains(nameOrDomain, ".") {
+				isDomain = true
+				resp, err := http.Get(httpBase() + "/api/v1/memlink/resolve/" + nameOrDomain)
+				if err != nil {
+					return err
+				}
+				defer resp.Body.Close()
+				if resp.StatusCode != 200 {
+					bodyBytes, _ := io.ReadAll(resp.Body)
+					return fmt.Errorf("resolve memlink failed: %s: %s", resp.Status, string(bodyBytes))
+				}
+				var env struct {
+					OK   bool `json:"ok"`
+					Data struct {
+						RawTxt      string `json:"raw_txt"`
+						ResolvedMID string `json:"resolved_mid"`
+					} `json:"data"`
+					Error string `json:"error"`
+				}
+				if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+					return err
+				}
+				if !env.OK {
+					return fmt.Errorf("resolve memlink: %s", env.Error)
+				}
+
+				rec, err := memlink.ParseTXTRecord(env.Data.RawTxt)
+				if err == nil && rec.MemNSName != "" {
+					name = rec.MemNSName
+				} else {
+					fmt.Fprintf(c.OutOrStdout(), "Domain:   %s\n", nameOrDomain)
+					fmt.Fprintf(c.OutOrStdout(), "Value:    %s\n", env.Data.ResolvedMID)
+					return nil
+				}
+			} else {
+				name = nameOrDomain
+			}
+
+			if strings.HasPrefix(name, "/memns/") {
+				name = name[7:]
+			}
+
+			resp, err := http.Get(httpBase() + "/api/v1/memns/resolve/" + name)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != 200 {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("resolve failed: %s: %s", resp.Status, string(bodyBytes))
+			}
+
+			var env struct {
+				OK   bool `json:"ok"`
+				Data struct {
+					Value    string `json:"value"`
+					Sequence uint64 `json:"sequence"`
+					Expires  string `json:"expires"`
+					Routes   []struct {
+						Target     string            `json:"target"`
+						Weight     uint32            `json:"weight"`
+						Label      string            `json:"label"`
+						Conditions map[string]string `json:"conditions"`
+					} `json:"routes"`
+				} `json:"data"`
+				Error string `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+				return err
+			}
+			if !env.OK {
+				return fmt.Errorf("resolve: %s", env.Error)
+			}
+
+			fullName := "/memns/" + name
+			if isDomain {
+				fmt.Fprintf(c.OutOrStdout(), "Domain:   %s\n", nameOrDomain)
+			}
+			fmt.Fprintf(c.OutOrStdout(), "Name:     %s\n", fullName)
+			fmt.Fprintf(c.OutOrStdout(), "Value:    %s\n", env.Data.Value)
+			fmt.Fprintf(c.OutOrStdout(), "Sequence: %d\n", env.Data.Sequence)
+			fmt.Fprintf(c.OutOrStdout(), "Expires:  %s\n", env.Data.Expires)
+			fmt.Fprintf(c.OutOrStdout(), "TTL:      1h\n")
+
+			if len(env.Data.Routes) > 0 {
+				tw := tabwriter.NewWriter(c.OutOrStdout(), 0, 0, 2, ' ', 0)
+				fmt.Fprintln(tw, "LABEL\tTARGET\tWEIGHT")
+				for _, r := range env.Data.Routes {
+					fmt.Fprintf(tw, "%s\t%s\t%d\n", r.Label, r.Target, r.Weight)
+				}
+				_ = tw.Flush()
+			}
+			return nil
+		},
+	}
+	resolveCmd.Flags().Uint64Var(&atSeq, "at-sequence", 0, "historical sequence number to resolve")
+	cmd.AddCommand(resolveCmd)
+
+	logCmd := &cobra.Command{
+		Use:   "log <name>",
+		Short: "Show the publishing history of a MemNS name",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			name := args[0]
+			if strings.HasPrefix(name, "/memns/") {
+				name = name[7:]
+			}
+
+			resp, err := http.Get(httpBase() + "/api/v1/memns/log/" + name)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != 200 {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("log failed: %s: %s", resp.Status, string(bodyBytes))
+			}
+
+			var env struct {
+				OK   bool `json:"ok"`
+				Data struct {
+					Entries []struct {
+						Sequence  uint64 `json:"sequence"`
+						MID       string `json:"mid"`
+						Timestamp int64  `json:"timestamp"`
+						Message   string `json:"message"`
+					} `json:"entries"`
+				} `json:"data"`
+				Error string `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+				return err
+			}
+			if !env.OK {
+				return fmt.Errorf("log: %s", env.Error)
+			}
+
+			tw := tabwriter.NewWriter(c.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "SEQUENCE\tTIMESTAMP\tMID\tMESSAGE")
+			for _, e := range env.Data.Entries {
+				t := time.Unix(0, e.Timestamp).UTC().Format(time.RFC3339)
+				fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", e.Sequence, t, e.MID, e.Message)
+			}
+			return tw.Flush()
+		},
+	}
+	cmd.AddCommand(logCmd)
+
+	delegateCmd := &cobra.Command{
+		Use:   "delegate",
+		Short: "Manage delegated keys authorized to publish to your MemNS name",
+	}
+
+	addDelCmd := &cobra.Command{
+		Use:   "add <keyname> <pubkey-base64>",
+		Short: "Authorize a delegate public key",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(c *cobra.Command, args []string) error {
+			name := args[0]
+			pubkey := args[1]
+			body := map[string]any{
+				"name":     name,
+				"delegate": pubkey,
+			}
+			buf := &bytes.Buffer{}
+			if err := json.NewEncoder(buf).Encode(body); err != nil {
+				return err
+			}
+			resp, err := http.Post(httpBase()+"/api/v1/memns/delegate/add", "application/json", buf)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("delegate add failed: %s: %s", resp.Status, string(bodyBytes))
+			}
+			var env struct {
+				OK    bool   `json:"ok"`
+				Error string `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+				return err
+			}
+			if !env.OK {
+				return fmt.Errorf("delegate add: %s", env.Error)
+			}
+			fmt.Fprintf(c.OutOrStdout(), "Authorized delegate successfully\n")
+			return nil
+		},
+	}
+	delegateCmd.AddCommand(addDelCmd)
+
+	rmDelCmd := &cobra.Command{
+		Use:   "rm <keyname> <pubkey-base64>",
+		Short: "Revoke authorization of a delegate public key",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(c *cobra.Command, args []string) error {
+			name := args[0]
+			pubkey := args[1]
+			body := map[string]any{
+				"name":     name,
+				"delegate": pubkey,
+			}
+			buf := &bytes.Buffer{}
+			if err := json.NewEncoder(buf).Encode(body); err != nil {
+				return err
+			}
+			resp, err := http.Post(httpBase()+"/api/v1/memns/delegate/rm", "application/json", buf)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("delegate rm failed: %s: %s", resp.Status, string(bodyBytes))
+			}
+			var env struct {
+				OK    bool   `json:"ok"`
+				Error string `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+				return err
+			}
+			if !env.OK {
+				return fmt.Errorf("delegate rm: %s", env.Error)
+			}
+			fmt.Fprintf(c.OutOrStdout(), "Revoked delegate authorization successfully\n")
+			return nil
+		},
+	}
+	delegateCmd.AddCommand(rmDelCmd)
+
+	listDelCmd := &cobra.Command{
+		Use:   "list <keyname>",
+		Short: "List all authorized delegates",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			keyname := args[0]
+			resp, err := http.Get(httpBase() + "/api/v1/memns/delegate/list/" + keyname)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("delegate list failed: %s: %s", resp.Status, string(bodyBytes))
+			}
+			var env struct {
+				OK   bool `json:"ok"`
+				Data struct {
+					Delegates []string `json:"delegates"`
+				} `json:"data"`
+				Error string `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+				return err
+			}
+			if !env.OK {
+				return fmt.Errorf("delegate list: %s", env.Error)
+			}
+			fmt.Fprintf(c.OutOrStdout(), "Delegates for key %q:\n", keyname)
+			for _, d := range env.Data.Delegates {
+				fmt.Fprintf(c.OutOrStdout(), "  - %s\n", d)
+			}
+			return nil
+		},
+	}
+	delegateCmd.AddCommand(listDelCmd)
+
+	cmd.AddCommand(delegateCmd)
+
+	return cmd
+}
+

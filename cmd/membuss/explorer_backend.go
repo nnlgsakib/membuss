@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -17,12 +18,18 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 
+	"github.com/nnlgsakib/membuss/anchor"
+	hostpkg "github.com/nnlgsakib/membuss/net/host"
+	"github.com/nnlgsakib/membuss/core/keyring"
 	"github.com/nnlgsakib/membuss/core/memfs"
+	"github.com/nnlgsakib/membuss/core/memlink"
+	"github.com/nnlgsakib/membuss/core/memns"
 	"github.com/nnlgsakib/membuss/core/mid"
 	"github.com/nnlgsakib/membuss/core/store"
 	explorer "github.com/nnlgsakib/membuss/gateway/explorer"
 	"github.com/nnlgsakib/membuss/gateway/memgate"
 	"github.com/nnlgsakib/membuss/net/memex"
+	membusspb "github.com/nnlgsakib/membuss/proto"
 )
 
 var _ explorer.Backend = (*explorerAdapter)(nil)
@@ -38,40 +45,45 @@ type explorerAdapter struct {
 	// anchorMode is the immutable config value the
 	// daemon was started with.
 	anchorMode bool
+	keyring    *keyring.KeyRing
+	memnsRes   *memns.Resolver
+	// allRoots tracks all root MIDs known to this node
+	// (both sealed and unsealed). Populated from sealed
+	// list on startup, extended as content is added or
+	// fetched.
+	allRoots map[string]struct{}
 }
 
-func newExplorerAdapter(b *daemonBackend, anchorMode bool) *explorerAdapter {
-	return &explorerAdapter{b: b, started: time.Now(), anchorMode: anchorMode}
+func newExplorerAdapter(b *daemonBackend, anchorMode bool, keyring *keyring.KeyRing, memnsRes *memns.Resolver) *explorerAdapter {
+	a := &explorerAdapter{b: b, started: time.Now(), anchorMode: anchorMode, keyring: keyring, memnsRes: memnsRes, allRoots: make(map[string]struct{})}
+	// Populate allRoots from sealed MIDs on startup.
+	if b.store != nil {
+		if sealed, err := b.store.AllSealed(); err == nil {
+			for _, m := range sealed {
+				a.allRoots[m.String()] = struct{}{}
+			}
+		}
+	}
+	return a
 }
 
 // Stat returns a metadata snapshot.
 func (a *explorerAdapter) Stat(ctx context.Context, m mid.MID) (explorer.ContentInfo, error) {
-	b := a.b
-	if b.store == nil {
-		return explorer.ContentInfo{}, errors.New("explorer: no store")
-	}
-	has, err := b.store.Has(m)
+	st, err := a.b.Stat(ctx, m.String())
 	if err != nil {
 		return explorer.ContentInfo{}, err
 	}
-	if !has {
-		return explorer.ContentInfo{}, nil
-	}
-	sealed, _ := b.store.IsSealed(m)
-	blocks, size, err := countDAG(b.store, m)
-	if err != nil {
-		return explorer.ContentInfo{}, err
-	}
-	oi, _ := store.GetObjectInfo(b.store, m)
 	return explorer.ContentInfo{
-		MID:      m.String(),
-		Size:     size,
-		Blocks:   blocks,
-		Sealed:   sealed,
-		Present:  true,
-		Codec:    m.Codec(),
-		Name:     oi.Name,
-		MimeType: oi.MimeType,
+		MID:           m.String(),
+		Size:          st.Size,
+		Blocks:        st.Blocks,
+		Sealed:        st.Sealed,
+		Present:       st.Present,
+		Codec:         st.Codec,
+		Name:          st.Name,
+		MimeType:      st.MimeType,
+		Sealers:       st.Sealers,
+		AnchorSealers: st.AnchorSealers,
 	}, nil
 }
 
@@ -171,23 +183,24 @@ func (a *explorerAdapter) ResolveWithProgress(ctx context.Context, m mid.MID, pr
 		})
 		if serr == nil {
 			if _, ferr := sess.Fetch(ctx); ferr == nil {
-			has = true
-		} else {
-			// Providers existed but the Memex
-			// session failed. The caller
-			// (explorer.handleMID) re-checks
-			// Providers() to distinguish
-			// ResolveAttempted from
-			// ResolveNoProviders, so we
-			// return ErrNotFound here and let
-			// that classification happen.
-			return nil, explorer.ContentInfo{}, explorer.ErrNotFound
-		}
+				has = true
+			} else {
+				// The Memex session reported progress (blocks
+				// downloaded) but the final reassembly or
+				// verification step failed. Re-check the store
+				// because individual blocks may have been stored
+				// even though the session-level Fetch errored.
+				if h2, herr := b.store.Has(m); herr == nil && h2 {
+					has = true
+				}
+			}
 		}
 	}
 	if !has {
 		return nil, explorer.ContentInfo{}, explorer.ErrNotFound
 	}
+	// Track this MID as a known root so it appears in the file list.
+	a.allRoots[m.String()] = struct{}{}
 	// Reuse the memgate adapter's Resolve so the size /
 	// blocks / sealed numbers are computed exactly the
 	// same way the public gateway would compute them.
@@ -199,13 +212,16 @@ func (a *explorerAdapter) ResolveWithProgress(ctx context.Context, m mid.MID, pr
 		}
 		return nil, explorer.ContentInfo{}, err
 	}
+	st, _ := a.b.Stat(ctx, m.String())
 	return rc, explorer.ContentInfo{
-		MID:      info.MID,
-		Size:     info.Size,
-		Blocks:   info.Blocks,
-		Sealed:   info.Sealed,
-		Name:     info.Name,
-		MimeType: info.MimeType,
+		MID:           info.MID,
+		Size:          info.Size,
+		Blocks:        info.Blocks,
+		Sealed:        info.Sealed,
+		Name:          info.Name,
+		MimeType:      info.MimeType,
+		Sealers:       st.Sealers,
+		AnchorSealers: st.AnchorSealers,
 	}, nil
 }
 
@@ -216,23 +232,16 @@ var _ memgate.ContentInfo
 
 // Peers returns the local PEX peer table.
 func (a *explorerAdapter) Peers(ctx context.Context, limit int) ([]explorer.PeerInfo, error) {
-	b := a.b
-	if b.pex == nil {
-		return nil, nil
-	}
-	infos := b.pex.Peers()
-	if limit > 0 && len(infos) > limit {
-		infos = infos[:limit]
+	infos, _, err := a.b.Peers(uint32(limit))
+	if err != nil {
+		return nil, err
 	}
 	out := make([]explorer.PeerInfo, 0, len(infos))
 	for _, p := range infos {
-		addrs := make([]string, 0, len(p.Addrs))
-		for _, a := range p.Addrs {
-			addrs = append(addrs, a)
-		}
 		out = append(out, explorer.PeerInfo{
-			PeerID:    p.PeerId,
-			Addrs:     addrs,
+			PeerID:    p.PeerID,
+			Addrs:     p.Addrs,
+			IsAnchor:  p.IsAnchor,
 			Connected: false, // explorer does not have a direct "connected" view
 		})
 	}
@@ -246,6 +255,40 @@ func (a *explorerAdapter) SealedMIDs(ctx context.Context) ([]mid.MID, error) {
 		return nil, nil
 	}
 	return b.store.AllSealed()
+}
+
+// AllStoredMIDs lists every root MID in the local store,
+// regardless of seal status, with its sealed flag.
+func (a *explorerAdapter) AllStoredMIDs(ctx context.Context) ([]explorer.StoredMIDView, error) {
+	b := a.b
+	if b.store == nil {
+		return nil, nil
+	}
+	sealed, err := b.store.AllSealed()
+	if err != nil {
+		return nil, err
+	}
+	sealedSet := make(map[string]struct{}, len(sealed))
+	for _, m := range sealed {
+		sealedSet[m.String()] = struct{}{}
+	}
+	out := make([]explorer.StoredMIDView, 0, len(a.allRoots))
+	for key := range a.allRoots {
+		m, err := mid.Parse(key)
+		if err != nil {
+			continue
+		}
+		name := ""
+		if info, serr := store.GetObjectInfo(b.store, m); serr == nil && info.Name != "" {
+			name = info.Name
+		}
+		out = append(out, explorer.StoredMIDView{
+			MID:    key,
+			Name:   name,
+			Sealed: func() bool { _, ok := sealedSet[key]; return ok }(),
+		})
+	}
+	return out, nil
 }
 
 // SealedCount returns the count of sealed MIDs.
@@ -286,20 +329,37 @@ func (a *explorerAdapter) StoreBytes(ctx context.Context) (uint64, error) {
 
 // AnchorPeers returns the registered anchor peers.
 func (a *explorerAdapter) AnchorPeers(ctx context.Context) ([]explorer.AnchorRow, error) {
-	if a.b.anchor == nil {
-		return nil, nil
-	}
-	anchors := a.b.anchor.AnchorPeers()
-	out := make([]explorer.AnchorRow, 0, len(anchors))
-	for _, ai := range anchors {
-		addrs := make([]string, 0, len(ai.Addrs))
-		for _, m := range ai.Addrs {
-			addrs = append(addrs, m.String())
+	var out []explorer.AnchorRow
+	if a.b.anchor != nil {
+		for _, ai := range a.b.anchor.AnchorPeers() {
+			addrs := make([]string, 0, len(ai.Addrs))
+			for _, m := range ai.Addrs {
+				addrs = append(addrs, m.String())
+			}
+			out = append(out, explorer.AnchorRow{
+				PeerID: ai.ID.String(),
+				Addrs:  addrs,
+			})
 		}
-		out = append(out, explorer.AnchorRow{
-			PeerID: ai.ID.String(),
-			Addrs:  addrs,
-		})
+	} else if a.b.dht != nil {
+		sCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		ch, err := a.b.dht.SearchValue(sCtx, "/membuss/anchors/v1")
+		if err == nil {
+			for val := range ch {
+				ai, err := anchor.DecodeAnchorValue(val)
+				if err == nil && ai.ID != "" {
+					addrs := make([]string, 0, len(ai.Addrs))
+					for _, m := range ai.Addrs {
+						addrs = append(addrs, m.String())
+					}
+					out = append(out, explorer.AnchorRow{
+						PeerID: ai.ID.String(),
+						Addrs:  addrs,
+					})
+				}
+			}
+		}
 	}
 	return out, nil
 }
@@ -364,6 +424,15 @@ func (a *explorerAdapter) AnchorMode(ctx context.Context) bool {
 	return a.anchorMode
 }
 
+// BandwidthStats returns the real-time bandwidth totals and rates.
+func (a *explorerAdapter) BandwidthStats(ctx context.Context) (totalIn, totalOut int64, rateIn, rateOut float64, err error) {
+	if wh, ok := a.b.host.(*hostpkg.Host); ok && wh != nil {
+		totIn, totOut, rIn, rOut := wh.BandwidthTotals()
+		return totIn, totOut, rIn, rOut, nil
+	}
+	return 0, 0, 0, 0, nil
+}
+
 // joinStrings is a tiny helper to format a peer addr list.
 func joinStrings(parts []string, sep string) string {
 	if len(parts) == 0 {
@@ -407,14 +476,15 @@ func (a *explorerAdapter) Add(ctx context.Context, name string, r io.Reader) (ex
 	if err != nil {
 		return explorer.ContentInfo{}, err
 	}
+	a.allRoots[res.MID] = struct{}{}
 	return explorer.ContentInfo{
-		MID:      res.MID,
-		Size:     res.Size,
-		Blocks:   res.Blocks,
-		Sealed:   res.Sealed,
-		Name:     res.Name,
-		MimeType: res.MimeType,
-		Present:  true,
+		MID:           res.MID,
+		Size:          res.Size,
+		Blocks:        res.Blocks,
+		Sealed:        res.Sealed,
+		Name:          res.Name,
+		MimeType:      res.MimeType,
+		Present:       true,
 	}, nil
 }
 
@@ -472,6 +542,10 @@ func (a *explorerAdapter) AddDirectory(ctx context.Context, name string, files [
 	}
 
 	// Use uploader-supplied folder name, or fallback.
+	name = filepath.Clean(name)
+	if name == "." || name == "/" || name == "\\" {
+		name = ""
+	}
 	dirName := name
 	if dirName == "" {
 		dirName = "upload"
@@ -489,14 +563,16 @@ func (a *explorerAdapter) AddDirectory(ctx context.Context, name string, files [
 		Size:     res.Size,
 	})
 
+	a.allRoots[res.MID.String()] = struct{}{}
+
 	return explorer.ContentInfo{
-		MID:      res.MID.String(),
-		Size:     res.Size,
-		Blocks:   res.Block,
-		Sealed:   true,
-		Present:  true,
-		Name:     dirName,
-		MimeType: "inode/directory",
+		MID:           res.MID.String(),
+		Size:          res.Size,
+		Blocks:        res.Block,
+		Sealed:        true,
+		Present:       true,
+		Name:          name,
+		MimeType:      "inode/directory",
 	}, nil
 }
 
@@ -582,4 +658,151 @@ func (a *explorerAdapter) MemFSPathGet(ctx context.Context, m mid.MID, path stri
 		return nil, 0, "", err
 	}
 	return rc, node.TotalSize(), node.MimeType(), nil
+}
+
+// KeyringKeys lists the keyring keys.
+func (a *explorerAdapter) KeyringKeys(ctx context.Context) ([]explorer.KeyringKeyInfo, error) {
+	if a.keyring == nil {
+		return nil, errors.New("keyring not configured")
+	}
+	keys, err := a.keyring.List()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]explorer.KeyringKeyInfo, 0, len(keys))
+	for _, k := range keys {
+		kType := "ed25519"
+		if key, err := a.keyring.Get(k.Name); err == nil {
+			kType = strings.ToLower(key.PubKey.Type().String())
+		}
+		out = append(out, explorer.KeyringKeyInfo{
+			Name:      k.Name,
+			MemNSName: k.MemNSName,
+			Type:      kType,
+			CreatedAt: k.CreatedAt,
+		})
+	}
+	return out, nil
+}
+
+// ResolveMemNSRecord resolves a MemNS record.
+func (a *explorerAdapter) ResolveMemNSRecord(ctx context.Context, name string) (explorer.MemNSRecordInfo, error) {
+	if a.memnsRes == nil {
+		return explorer.MemNSRecordInfo{}, errors.New("memns resolver not configured")
+	}
+
+	cleanName := name
+	if strings.HasPrefix(cleanName, "/memns/") {
+		cleanName = cleanName[7:]
+	}
+
+	var rec *membusspb.MemNSRecord
+	var err error
+
+	// If we own the key, try loading the record locally first
+	if a.keyring != nil {
+		keys, _ := a.keyring.List()
+		for _, k := range keys {
+			kMemNS := k.MemNSName
+			if strings.HasPrefix(kMemNS, "/memns/") {
+				kMemNS = kMemNS[7:]
+			}
+			if kMemNS == cleanName {
+				rec, err = a.keyring.LoadRecord(k.Name)
+				break
+			}
+		}
+	}
+
+	// If not owned or not found locally, fetch from DHT
+	if rec == nil {
+		rec, err = memns.ResolveDHT(ctx, a.memnsRes.DHTClient(), cleanName)
+		if err != nil {
+			return explorer.MemNSRecordInfo{}, err
+		}
+	}
+
+	// Map routes
+	routes := make([]explorer.MemRouteInfo, 0, len(rec.Routes))
+	for _, r := range rec.Routes {
+		routes = append(routes, explorer.MemRouteInfo{
+			Target: string(r.Target),
+			Weight: r.Weight,
+			Label:  r.Label,
+		})
+	}
+
+	// Map delegates
+	delegates := make([]string, 0, len(rec.Delegates))
+	for _, d := range rec.Delegates {
+		delegates = append(delegates, string(d))
+	}
+
+	// Map changelog
+	changelog := make([]explorer.MemLogEntryInfo, 0)
+	if rec.Changelog != nil {
+		for _, e := range rec.Changelog.Entries {
+			changelog = append(changelog, explorer.MemLogEntryInfo{
+				Sequence:  e.Sequence,
+				Value:     string(e.Value),
+				Timestamp: time.Unix(0, e.Timestamp),
+				Message:   e.Message,
+			})
+		}
+	}
+
+	return explorer.MemNSRecordInfo{
+		Name:      "/memns/" + cleanName,
+		Value:     string(rec.Value),
+		Sequence:  rec.Sequence,
+		ExpiresAt: time.Unix(0, rec.Validity),
+		TTL:       time.Duration(rec.Ttl),
+		Routes:    routes,
+		Delegates: delegates,
+		Changelog: changelog,
+	}, nil
+}
+
+// ResolveMemLink resolves a MemLink domain and returns its resolution details.
+func (a *explorerAdapter) ResolveMemLink(ctx context.Context, domain string) (explorer.MemLinkInfo, error) {
+	if a.memnsRes == nil {
+		return explorer.MemLinkInfo{}, errors.New("memns resolver not configured")
+	}
+	dnsResAPI := a.memnsRes.DNS()
+	if dnsResAPI == nil {
+		return explorer.MemLinkInfo{}, errors.New("dns resolver not configured")
+	}
+
+	dnsRes, ok := dnsResAPI.(*memlink.DNSResolver)
+	if !ok {
+		return explorer.MemLinkInfo{}, errors.New("unexpected DNS resolver type")
+	}
+
+	rawTXT, err := dnsRes.LookupTXTRecord(domain)
+	if err != nil {
+		return explorer.MemLinkInfo{}, fmt.Errorf("lookup txt record failed: %w", err)
+	}
+
+	parsed, err := memlink.ParseTXTRecord(rawTXT)
+	if err != nil {
+		return explorer.MemLinkInfo{}, fmt.Errorf("failed to parse TXT record: %w", err)
+	}
+
+	resolved, err := dnsRes.Resolve(ctx, domain)
+	if err != nil {
+		return explorer.MemLinkInfo{}, fmt.Errorf("dns resolve failed: %w", err)
+	}
+
+	ttl := 300
+	if parsed.TTL > 0 {
+		ttl = parsed.TTL
+	}
+
+	return explorer.MemLinkInfo{
+		Domain:            domain,
+		RawTXT:            rawTXT,
+		ResolvedMemNSName: parsed.MemNSName,
+		ResolvedMID:       resolved,
+		TTLRemaining:      ttl,
+	}, nil
 }

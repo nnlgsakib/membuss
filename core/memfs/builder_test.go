@@ -169,6 +169,7 @@ func TestAddDirectoryFromFS(t *testing.T) {
 	mustWrite("a.txt", []byte("alpha"))
 	mustWrite("b/b.txt", []byte("bravo-bravo"))
 	mustWrite("b/c/c.txt", []byte("charlie-charlie-charlie"))
+	mustWrite("style.css", []byte("body { color: red; }"))
 
 	res, err := b.AddDirectoryFromFS(os.DirFS(root), ".")
 	if err != nil {
@@ -179,12 +180,14 @@ func TestAddDirectoryFromFS(t *testing.T) {
 
 	// Resolve a.txt, b/b.txt, b/c/c.txt.
 	cases := []struct {
-		path string
-		want string
+		path     string
+		want     string
+		wantMime string
 	}{
-		{"a.txt", "alpha"},
-		{"b/b.txt", "bravo-bravo"},
-		{"b/c/c.txt", "charlie-charlie-charlie"},
+		{"a.txt", "alpha", "text/plain; charset=utf-8"},
+		{"b/b.txt", "bravo-bravo", "text/plain; charset=utf-8"},
+		{"b/c/c.txt", "charlie-charlie-charlie", "text/plain; charset=utf-8"},
+		{"style.css", "body { color: red; }", "text/css; charset=utf-8"},
 	}
 	for _, tc := range cases {
 		node, err := r.ResolvePath(context.TODO(), res.MID, tc.path)
@@ -198,6 +201,9 @@ func TestAddDirectoryFromFS(t *testing.T) {
 		}
 		if string(node.Bytes()) != tc.want {
 			t.Errorf("ResolvePath(%q): got %q, want %q", tc.path, node.Bytes(), tc.want)
+		}
+		if node.MimeType() != tc.wantMime {
+			t.Errorf("ResolvePath(%q): got MIME %q, want %q", tc.path, node.MimeType(), tc.wantMime)
 		}
 	}
 }

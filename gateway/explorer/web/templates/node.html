@@ -25,5 +25,33 @@
       <dt>Sealed MIDs</dt><dd>{{.SealedCount}}</dd>
     </dl>
   </div>
+
+  <div class="card span-2" style="margin-top: 24px;">
+    <h2>KeyRing (MemNS Keys)</h2>
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Key Name</th>
+          <th>MemNS Name</th>
+          <th>Key Type</th>
+          <th>Created At</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Keys}}
+        <tr>
+          <td class="mono">{{.Name}}</td>
+          <td class="mono"><a href="/explorer/memns/{{trimPrefix .MemNSName "/memns/"}}">{{.MemNSName}}</a></td>
+          <td>{{.Type}}</td>
+          <td>{{.CreatedAt.Format "2006-01-02 15:04:05 UTC"}}</td>
+        </tr>
+        {{else}}
+        <tr>
+          <td colspan="4" class="muted" style="text-align: center;">No keys in keyring</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
 </section>
 {{end}}

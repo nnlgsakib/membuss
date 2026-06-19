@@ -155,7 +155,7 @@ func (s *memStore) get(mid string) ([]byte, bool) {
 func (b *memBackend) AddFile(ctx context.Context, name string, r io.Reader, wrapDir bool) (AddResult, error) {
 	return b.Add(ctx, name, r)
 }
-func (b *memBackend) AddDirectory(ctx context.Context, parts []DirectoryPart) (AddResult, error) {
+func (b *memBackend) AddDirectory(ctx context.Context, name string, parts []DirectoryPart) (AddResult, error) {
 	return AddResult{}, fmt.Errorf("memfs: test backend does not implement AddDirectory")
 }
 func (b *memBackend) Ls(ctx context.Context, m mid.MID) ([]LsEntry, error) {

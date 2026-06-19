@@ -12,8 +12,10 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,8 +29,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/nnlgsakib/membuss/core/keyring"
+	"github.com/nnlgsakib/membuss/core/memns"
 	"github.com/nnlgsakib/membuss/core/mid"
 	"github.com/nnlgsakib/membuss/obs/metrics"
+	membusspb "github.com/nnlgsakib/membuss/proto"
 )
 
 // Backend is the contract the Node API depends on. The
@@ -64,7 +69,7 @@ type Backend interface {
 	// AddDirectory ingests a directory as MemFS. The
 	// multipart parts are passed as (path, reader) pairs;
 	// the implementation reconstructs the tree.
-	AddDirectory(ctx context.Context, parts []DirectoryPart) (AddResult, error)
+	AddDirectory(ctx context.Context, name string, parts []DirectoryPart) (AddResult, error)
 	// Ls returns the entries of a MemFS DIR node, sorted
 	// lexicographically by name.
 	Ls(ctx context.Context, m mid.MID) ([]LsEntry, error)
@@ -127,12 +132,15 @@ type StatInfo struct {
 	// added by an older daemon.
 	Name     string
 	MimeType string
+	Sealers       int
+	AnchorSealers int
 }
 
 // PeerInfo is one row of the local peer table.
 type PeerInfo struct {
-	PeerID string
-	Addrs  []string
+	PeerID   string
+	Addrs    []string
+	IsAnchor bool
 }
 
 // GCInfo is the return value of Backend.GC.
@@ -164,6 +172,10 @@ type Config struct {
 	APIKey string
 	// Metrics, if non-nil, is exposed at GET /metrics.
 	Metrics *metrics.Metrics
+
+	// Phase 18: MemNS and KeyRing fields
+	KeyRing       *keyring.KeyRing
+	MemNSResolver *memns.Resolver
 }
 
 // NodeAPI is the local HTTP control API.
@@ -229,6 +241,20 @@ func (a *NodeAPI) buildRouter() chi.Router {
 		r.Get("/node/info", a.handleNodeInfo)
 		r.Post("/gc", a.handleGC)
 		r.Get("/healthz", a.handleHealthz)
+
+		// Phase 18: MemNS and KeyRing API routes
+		r.Post("/memns/publish", a.handleMemNSPublish)
+		r.Get("/memns/resolve/{name}", a.handleMemNSResolve)
+		r.Get("/memns/log/{name}", a.handleMemNSLog)
+		r.Get("/memlink/resolve/{domain}", a.handleMemLinkResolve)
+		r.Post("/keyring/gen", a.handleKeyRingGen)
+		r.Get("/keyring/list", a.handleKeyRingList)
+		r.Post("/keyring/import", a.handleKeyRingImport)
+		r.Get("/keyring/export/{name}", a.handleKeyRingExport)
+		r.Delete("/keyring/rm/{name}", a.handleKeyRingRm)
+		r.Post("/memns/delegate/add", a.handleMemNSDelegateAdd)
+		r.Post("/memns/delegate/rm", a.handleMemNSDelegateRm)
+		r.Get("/memns/delegate/list/{keyname}", a.handleMemNSDelegateList)
 	})
 	return r
 }
@@ -302,6 +328,7 @@ func (a *NodeAPI) handleAdd(w http.ResponseWriter, r *http.Request) {
 	// DIR node so the returned MID is addressable via the
 	// /mem/{mid}/ gateway path.
 	wrap := r.URL.Query().Get("wrap") == "dir"
+	name = sanitizePath(name)
 	res, err := a.cfg.Backend.AddFile(r.Context(), name, reader, wrap)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err)
@@ -356,6 +383,7 @@ func (a *NodeAPI) handleAddDir(w http.ResponseWriter, r *http.Request) {
 			part.Close()
 			continue
 		}
+		path = sanitizePath(path)
 		// Read the part body fully while the request is still
 		// open. The request body is closed by the defer above
 		// as soon as this handler returns, so any consumer
@@ -372,7 +400,7 @@ func (a *NodeAPI) handleAddDir(w http.ResponseWriter, r *http.Request) {
 		}
 		parts = append(parts, DirectoryPart{
 			Path: path,
-			Name: part.FileName(),
+			Name: sanitizePath(part.FileName()),
 			Data: data,
 		})
 	}
@@ -380,7 +408,8 @@ func (a *NodeAPI) handleAddDir(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, fmt.Errorf("no files in directory upload"))
 		return
 	}
-	res, err := a.cfg.Backend.AddDirectory(r.Context(), parts)
+	name := r.URL.Query().Get("name")
+	res, err := a.cfg.Backend.AddDirectory(r.Context(), name, parts)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err)
 		return
@@ -579,4 +608,497 @@ func newRequestID() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
+}
+
+// sanitizePath strips control characters, quotes, and invalid
+// characters to prevent HTML injection in downstream consumers.
+// It permits slashes (/) so directory structures are preserved.
+func sanitizePath(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '_'
+		}
+		switch r {
+		case '"', '\\', '<', '>', '|', ':', '*', '?':
+			return '_'
+		}
+		return r
+	}, s)
+}
+
+// APIMemRoute represents the API's route payload mapping.
+type APIMemRoute struct {
+	Target     string            `json:"target"`
+	Weight     uint32            `json:"weight"`
+	Label      string            `json:"label"`
+	Conditions map[string]string `json:"conditions"`
+}
+
+func (a *NodeAPI) handleMemNSPublish(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Key     string        `json:"key"`
+		Value   string        `json:"value"`
+		TTL     uint64        `json:"ttl"` // in seconds
+		Message string        `json:"message"`
+		Routes  []APIMemRoute `json:"routes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+
+	if a.cfg.KeyRing == nil || a.cfg.MemNSResolver == nil {
+		fail(w, http.StatusInternalServerError, errors.New("keyring or resolver not configured"))
+		return
+	}
+
+	key, err := a.cfg.KeyRing.Get(req.Key)
+	if err != nil {
+		fail(w, http.StatusNotFound, err)
+		return
+	}
+
+	var seq uint64 = 1
+	current, err := memns.ResolveDHT(r.Context(), a.cfg.MemNSResolver.DHTClient(), key.MemNSName)
+	if err == nil && current != nil {
+		seq = current.Sequence + 1
+	}
+
+	ttl := 24 * time.Hour
+	if req.TTL > 0 {
+		ttl = time.Duration(req.TTL) * time.Second
+	}
+
+	var pbRoutes []*membusspb.MemRoute
+	for _, rt := range req.Routes {
+		pbRoutes = append(pbRoutes, &membusspb.MemRoute{
+			Target:     []byte(rt.Target),
+			Weight:     rt.Weight,
+			Label:      rt.Label,
+			Conditions: rt.Conditions,
+		})
+	}
+
+	var prevLog *membusspb.MemLog
+	var prevDelegates [][]byte
+	var prevMeta map[string]string
+	if current != nil {
+		prevLog = current.Changelog
+		prevDelegates = current.Delegates
+		prevMeta = current.Meta
+	}
+
+	record, err := memns.BuildRecord(key, req.Value, seq, ttl, pbRoutes, req.Message)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	if prevLog != nil {
+		record.Changelog.Entries = append(prevLog.Entries, record.Changelog.Entries...)
+	}
+	if len(prevDelegates) > 0 {
+		record.Delegates = prevDelegates
+	}
+	if len(prevMeta) > 0 {
+		for k, v := range prevMeta {
+			if k != "owner_key" {
+				record.Meta[k] = v
+			}
+		}
+	}
+
+	errDHT := memns.PublishDHT(r.Context(), a.cfg.MemNSResolver.DHTClient(), key, record)
+	if a.cfg.MemNSResolver.PubSub() != nil {
+		_ = a.cfg.MemNSResolver.PubSub().PublishPub(r.Context(), key, record)
+	}
+
+	if errDHT != nil {
+		fail(w, http.StatusInternalServerError, fmt.Errorf("dht publish failed: %w", errDHT))
+		return
+	}
+
+	_ = a.cfg.KeyRing.SaveRecord(req.Key, record)
+
+	ok(w, map[string]any{
+		"name":     key.MemNSName,
+		"sequence": record.Sequence,
+	})
+}
+
+func (a *NodeAPI) handleMemNSResolve(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if a.cfg.MemNSResolver == nil {
+		fail(w, http.StatusInternalServerError, errors.New("memns resolver not configured"))
+		return
+	}
+
+	rec, err := memns.ResolveDHT(r.Context(), a.cfg.MemNSResolver.DHTClient(), name)
+	if err != nil {
+		fail(w, http.StatusNotFound, err)
+		return
+	}
+
+	routes := []map[string]any{}
+	for _, rt := range rec.Routes {
+		routes = append(routes, map[string]any{
+			"target":     string(rt.Target),
+			"weight":     rt.Weight,
+			"label":      rt.Label,
+			"conditions": rt.Conditions,
+		})
+	}
+
+	ok(w, map[string]any{
+		"value":    string(rec.Value),
+		"sequence": rec.Sequence,
+		"expires":  time.Unix(0, rec.Validity).UTC().Format(time.RFC3339),
+		"routes":   routes,
+	})
+}
+
+func (a *NodeAPI) handleMemNSLog(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if a.cfg.MemNSResolver == nil {
+		fail(w, http.StatusInternalServerError, errors.New("memns resolver not configured"))
+		return
+	}
+
+	rec, err := memns.ResolveDHT(r.Context(), a.cfg.MemNSResolver.DHTClient(), name)
+	if err != nil {
+		fail(w, http.StatusNotFound, err)
+		return
+	}
+
+	var entries []map[string]any
+	if rec.Changelog != nil {
+		for _, e := range rec.Changelog.Entries {
+			entries = append(entries, map[string]any{
+				"sequence":  e.Sequence,
+				"mid":       string(e.Value),
+				"timestamp": e.Timestamp,
+				"message":   e.Message,
+			})
+		}
+	}
+
+	ok(w, map[string]any{
+		"entries": entries,
+	})
+}
+
+func (a *NodeAPI) handleMemLinkResolve(w http.ResponseWriter, r *http.Request) {
+	domain := chi.URLParam(r, "domain")
+	if a.cfg.MemNSResolver == nil {
+		fail(w, http.StatusInternalServerError, errors.New("memns resolver not configured"))
+		return
+	}
+
+	dnsRaw := a.cfg.MemNSResolver.DNS()
+	if dnsRaw == nil {
+		fail(w, http.StatusInternalServerError, errors.New("dns resolver not configured"))
+		return
+	}
+
+	dns, okResolver := dnsRaw.(interface {
+		LookupTXTRecord(domain string) (string, error)
+	})
+	if !okResolver {
+		fail(w, http.StatusInternalServerError, errors.New("dns resolver does not support LookupTXTRecord"))
+		return
+	}
+
+	rawTxt, err := dns.LookupTXTRecord(domain)
+	if err != nil {
+		fail(w, http.StatusNotFound, err)
+		return
+	}
+
+	resolved, err := a.cfg.MemNSResolver.Resolve(r.Context(), domain)
+	if err != nil {
+		fail(w, http.StatusNotFound, err)
+		return
+	}
+
+	ok(w, map[string]any{
+		"raw_txt":      rawTxt,
+		"resolved_mid": resolved,
+	})
+}
+
+func (a *NodeAPI) handleKeyRingGen(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+
+	if a.cfg.KeyRing == nil {
+		fail(w, http.StatusInternalServerError, errors.New("keyring not configured"))
+		return
+	}
+
+	key, err := a.cfg.KeyRing.Generate(req.Name, req.Type)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	ok(w, map[string]any{
+		"name":       key.Name,
+		"memns_name": key.MemNSName,
+	})
+}
+
+func (a *NodeAPI) handleKeyRingList(w http.ResponseWriter, r *http.Request) {
+	if a.cfg.KeyRing == nil {
+		fail(w, http.StatusInternalServerError, errors.New("keyring not configured"))
+		return
+	}
+
+	list, err := a.cfg.KeyRing.List()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	ok(w, list)
+}
+
+func (a *NodeAPI) handleKeyRingImport(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+		PEM  string `json:"pem"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+
+	if a.cfg.KeyRing == nil {
+		fail(w, http.StatusInternalServerError, errors.New("keyring not configured"))
+		return
+	}
+
+	err := a.cfg.KeyRing.Import(req.Name, []byte(req.PEM))
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	ok(w, map[string]any{"ok": true})
+}
+
+func (a *NodeAPI) handleKeyRingExport(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if a.cfg.KeyRing == nil {
+		fail(w, http.StatusInternalServerError, errors.New("keyring not configured"))
+		return
+	}
+
+	pemBytes, err := a.cfg.KeyRing.Export(name)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	ok(w, map[string]any{
+		"pem": string(pemBytes),
+	})
+}
+
+func (a *NodeAPI) handleKeyRingRm(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if a.cfg.KeyRing == nil {
+		fail(w, http.StatusInternalServerError, errors.New("keyring not configured"))
+		return
+	}
+
+	err := a.cfg.KeyRing.Delete(name)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	ok(w, map[string]any{"ok": true})
+}
+
+func (a *NodeAPI) handleMemNSDelegateAdd(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name     string `json:"name"`
+		Delegate string `json:"delegate"` // base64 encoded public key
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+
+	delegateBytes, err := base64.StdEncoding.DecodeString(req.Delegate)
+	if err != nil {
+		fail(w, http.StatusBadRequest, fmt.Errorf("invalid base64 public key: %w", err))
+		return
+	}
+
+	if a.cfg.KeyRing == nil || a.cfg.MemNSResolver == nil {
+		fail(w, http.StatusInternalServerError, errors.New("keyring or resolver not configured"))
+		return
+	}
+
+	key, err := a.cfg.KeyRing.Get(req.Name)
+	if err != nil {
+		fail(w, http.StatusNotFound, err)
+		return
+	}
+
+	current, err := memns.ResolveDHT(r.Context(), a.cfg.MemNSResolver.DHTClient(), key.MemNSName)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, fmt.Errorf("failed to get latest record from DHT: %w", err))
+		return
+	}
+
+	found := false
+	for _, d := range current.Delegates {
+		if bytes.Equal(d, delegateBytes) {
+			found = true
+			break
+		}
+	}
+
+	if found {
+		ok(w, map[string]any{"ok": true, "message": "delegate already exists"})
+		return
+	}
+
+	current.Delegates = append(current.Delegates, delegateBytes)
+	current.Sequence++
+	current.Validity = time.Now().Add(24 * time.Hour).UnixNano()
+
+	canonical := memns.CanonicalBytes(current)
+	sig, err := key.PrivKey.Sign(canonical)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, fmt.Errorf("failed to sign record: %w", err))
+		return
+	}
+	current.Signature = sig
+
+	err = memns.PublishDHT(r.Context(), a.cfg.MemNSResolver.DHTClient(), key, current)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, fmt.Errorf("failed to publish to DHT: %w", err))
+		return
+	}
+
+	if a.cfg.MemNSResolver.PubSub() != nil {
+		_ = a.cfg.MemNSResolver.PubSub().PublishPub(r.Context(), key, current)
+	}
+
+	_ = a.cfg.KeyRing.SaveRecord(req.Name, current)
+
+	ok(w, map[string]any{"ok": true})
+}
+
+func (a *NodeAPI) handleMemNSDelegateRm(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name     string `json:"name"`
+		Delegate string `json:"delegate"` // base64 encoded public key
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+
+	delegateBytes, err := base64.StdEncoding.DecodeString(req.Delegate)
+	if err != nil {
+		fail(w, http.StatusBadRequest, fmt.Errorf("invalid base64 public key: %w", err))
+		return
+	}
+
+	if a.cfg.KeyRing == nil || a.cfg.MemNSResolver == nil {
+		fail(w, http.StatusInternalServerError, errors.New("keyring or resolver not configured"))
+		return
+	}
+
+	key, err := a.cfg.KeyRing.Get(req.Name)
+	if err != nil {
+		fail(w, http.StatusNotFound, err)
+		return
+	}
+
+	current, err := memns.ResolveDHT(r.Context(), a.cfg.MemNSResolver.DHTClient(), key.MemNSName)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, fmt.Errorf("failed to get latest record from DHT: %w", err))
+		return
+	}
+
+	var newDelegates [][]byte
+	found := false
+	for _, d := range current.Delegates {
+		if bytes.Equal(d, delegateBytes) {
+			found = true
+		} else {
+			newDelegates = append(newDelegates, d)
+		}
+	}
+
+	if !found {
+		fail(w, http.StatusNotFound, errors.New("delegate not found in delegates list"))
+		return
+	}
+
+	current.Delegates = newDelegates
+	current.Sequence++
+	current.Validity = time.Now().Add(24 * time.Hour).UnixNano()
+
+	canonical := memns.CanonicalBytes(current)
+	sig, err := key.PrivKey.Sign(canonical)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, fmt.Errorf("failed to sign record: %w", err))
+		return
+	}
+	current.Signature = sig
+
+	err = memns.PublishDHT(r.Context(), a.cfg.MemNSResolver.DHTClient(), key, current)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, fmt.Errorf("failed to publish to DHT: %w", err))
+		return
+	}
+
+	if a.cfg.MemNSResolver.PubSub() != nil {
+		_ = a.cfg.MemNSResolver.PubSub().PublishPub(r.Context(), key, current)
+	}
+
+	_ = a.cfg.KeyRing.SaveRecord(req.Name, current)
+
+	ok(w, map[string]any{"ok": true})
+}
+
+func (a *NodeAPI) handleMemNSDelegateList(w http.ResponseWriter, r *http.Request) {
+	keyname := chi.URLParam(r, "keyname")
+	if a.cfg.KeyRing == nil || a.cfg.MemNSResolver == nil {
+		fail(w, http.StatusInternalServerError, errors.New("keyring or resolver not configured"))
+		return
+	}
+
+	key, err := a.cfg.KeyRing.Get(keyname)
+	if err != nil {
+		fail(w, http.StatusNotFound, err)
+		return
+	}
+
+	current, err := memns.ResolveDHT(r.Context(), a.cfg.MemNSResolver.DHTClient(), key.MemNSName)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, fmt.Errorf("failed to get latest record from DHT: %w", err))
+		return
+	}
+
+	var delegates []string
+	for _, d := range current.Delegates {
+		delegates = append(delegates, base64.StdEncoding.EncodeToString(d))
+	}
+
+	ok(w, map[string]any{
+		"delegates": delegates,
+	})
 }

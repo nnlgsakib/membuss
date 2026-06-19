@@ -125,6 +125,7 @@ func New(ctx context.Context, cfg Config) (*MemDHT, error) {
 		// stored and retrieved. The kad-dht default validator
 		// only allows "/pk/..." (public-key) records.
 		kaddht.NamespacedValidator("membuss", permissiveValidator{}),
+		kaddht.NamespacedValidator("memns", permissiveValidator{}),
 	}
 	if cfg.Datastore != nil {
 		// Provider-record persistence. Without this, the
@@ -206,6 +207,17 @@ func (m *MemDHT) GetValue(ctx context.Context, key string) ([]byte, error) {
 		return nil, errors.New("dht: empty key")
 	}
 	return m.dht.GetValue(ctx, key)
+}
+
+// SearchValue retrieves multiple values previously stored under key.
+func (m *MemDHT) SearchValue(ctx context.Context, key string) (<-chan []byte, error) {
+	if m == nil || m.dht == nil {
+		return nil, errors.New("dht: nil")
+	}
+	if key == "" {
+		return nil, errors.New("dht: empty key")
+	}
+	return m.dht.SearchValue(ctx, key)
 }
 
 // Bootstrap connects to the configured bootstrap peers and

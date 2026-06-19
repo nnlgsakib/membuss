@@ -114,16 +114,18 @@ func renderConfigToDataDir() (string, error) {
 	}
 
 	scalars := map[string]string{
-		"data_dir":     os.Getenv("MEMBUSS_DATA_DIR"),
-		"gateway_addr": os.Getenv("MEMBUSS_GATEWAY_ADDR"),
-		"api_addr":     os.Getenv("MEMBUSS_API_ADDR"),
-		"grpc_addr":    os.Getenv("MEMBUSS_GRPC_ADDR"),
-		"log_level":    os.Getenv("MEMBUSS_LOG_LEVEL"),
-		"anchor_mode":  os.Getenv("MEMBUSS_ANCHOR_MODE"),
-		"auto_gc_interval": os.Getenv("MEMBUSS_AUTO_GC_INTERVAL"),
-		"gc_min_age":       os.Getenv("MEMBUSS_GC_MIN_AGE"),
-		"bloom_capacity":   os.Getenv("MEMBUSS_BLOOM_CAPACITY"),
-		"bloom_fp_rate":    os.Getenv("MEMBUSS_BLOOM_FP_RATE"),
+		"data_dir":           os.Getenv("MEMBUSS_DATA_DIR"),
+		"gateway_addr":       os.Getenv("MEMBUSS_GATEWAY_ADDR"),
+		"api_addr":           os.Getenv("MEMBUSS_API_ADDR"),
+		"grpc_addr":          os.Getenv("MEMBUSS_GRPC_ADDR"),
+		"log_level":          os.Getenv("MEMBUSS_LOG_LEVEL"),
+		"anchor_mode":        os.Getenv("MEMBUSS_ANCHOR_MODE"),
+		"auto_gc_interval":   os.Getenv("MEMBUSS_AUTO_GC_INTERVAL"),
+		"gc_min_age":         os.Getenv("MEMBUSS_GC_MIN_AGE"),
+		"bloom_capacity":     os.Getenv("MEMBUSS_BLOOM_CAPACITY"),
+		"bloom_fp_rate":      os.Getenv("MEMBUSS_BLOOM_FP_RATE"),
+		"dht_mode":           os.Getenv("MEMBUSS_DHT_MODE"),
+		"enable_geolocation": os.Getenv("MEMBUSS_ENABLE_GEOLOCATION"),
 	}
 
 	out := string(data)

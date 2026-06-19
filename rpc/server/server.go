@@ -77,17 +77,19 @@ type SealResult struct {
 
 // StatInfo is the return value of Backend.Stat.
 type StatInfo struct {
-	Present  bool
-	Size     uint64
-	Blocks   uint64
-	Sealed   bool
-	Codec    uint64
-	Erasure  *ErasureInfo
+	Present       bool
+	Size          uint64
+	Blocks        uint64
+	Sealed        bool
+	Codec         uint64
+	Erasure       *ErasureInfo
 	// Name and MimeType are the per-MID ObjectInfo
 	// captured at Add time, or empty for content
 	// added by an older daemon.
-	Name     string
-	MimeType string
+	Name          string
+	MimeType      string
+	Sealers       int
+	AnchorSealers int
 }
 
 // ErasureInfo mirrors the ErasureInfo proto, kept separate so
@@ -99,10 +101,11 @@ type ErasureInfo struct {
 	ShardMIDs    []string
 }
 
-// NodePeerInfo mirrors the NodePeerInfo proto.
+// NodePeerInfo describes a connected peer.
 type NodePeerInfo struct {
-	PeerID string
-	Addrs  []string
+	PeerID   string
+	Addrs    []string
+	IsAnchor bool
 }
 
 // GCInfo mirrors the GCResponse proto.
@@ -282,13 +285,15 @@ func (s *Server) Stat(ctx context.Context, req *membusspb.StatRequest) (*membuss
 		return nil, status.Errorf(codes.Internal, "stat: %v", err)
 	}
 	resp := &membusspb.StatResponse{
-		Present:  info.Present,
-		Size:     info.Size,
-		Blocks:   info.Blocks,
-		Sealed:   info.Sealed,
-		Codec:    info.Codec,
-		Name:     info.Name,
-		MimeType: info.MimeType,
+		Present:       info.Present,
+		Size:          info.Size,
+		Blocks:        info.Blocks,
+		Sealed:        info.Sealed,
+		Codec:         info.Codec,
+		Name:          info.Name,
+		MimeType:      info.MimeType,
+		Sealers:       int32(info.Sealers),
+		AnchorSealers: int32(info.AnchorSealers),
 	}
 	if info.Erasure != nil {
 		resp.Erasure = &membusspb.ErasureInfo{
@@ -352,7 +357,11 @@ func (s *Server) AnchorStatus(ctx context.Context, req *membusspb.AnchorStatusRe
 }
 
 func peerInfoToProto(p NodePeerInfo) *membusspb.NodePeerInfo {
-	return &membusspb.NodePeerInfo{PeerId: p.PeerID, Addrs: append([]string(nil), p.Addrs...)}
+	return &membusspb.NodePeerInfo{
+		PeerId:   p.PeerID,
+		Addrs:    append([]string(nil), p.Addrs...),
+		IsAnchor: p.IsAnchor,
+	}
 }
 
 // Helper used by the daemon Backend: turn a generic error into

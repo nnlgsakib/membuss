@@ -153,6 +153,24 @@ func (b *memBackend) SealedMIDs(ctx context.Context) ([]mid.MID, error) {
 	return out, nil
 }
 
+func (b *memBackend) AllStoredMIDs(ctx context.Context) ([]StoredMIDView, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]StoredMIDView, 0, len(b.content))
+	for k := range b.content {
+		m, err := mid.Parse(k)
+		if err != nil {
+			continue
+		}
+		out = append(out, StoredMIDView{
+			MID:    m.String(),
+			Name:   "",
+			Sealed: b.sealed[k],
+		})
+	}
+	return out, nil
+}
+
 func (b *memBackend) SealedCount(ctx context.Context) (int, error) {
 	mids, err := b.SealedMIDs(ctx)
 	if err != nil {
@@ -199,6 +217,9 @@ func (b *memBackend) LocalAddrs(ctx context.Context) []string {
 func (b *memBackend) NodeVersion(ctx context.Context) (string, string) { return "0.1.0", "test" }
 func (b *memBackend) Uptime(ctx context.Context) time.Duration         { return time.Since(b.started) }
 func (b *memBackend) AnchorMode(ctx context.Context) bool              { return b.anchorMode }
+func (b *memBackend) BandwidthStats(ctx context.Context) (totalIn, totalOut int64, rateIn, rateOut float64, err error) {
+	return 0, 0, 0, 0, nil
+}
 
 func (b *memBackend) Add(ctx context.Context, name string, r io.Reader) (ContentInfo, error) {
 	data, err := io.ReadAll(r)
@@ -474,7 +495,8 @@ func TestPeers(t *testing.T) {
 }
 
 func TestAnchors(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv, b := newTestServer(t)
+	b.setAnchorMode(true)
 	resp, body := get(t, srv, "/anchors")
 	if resp.StatusCode != 200 {
 		t.Errorf("status: %d", resp.StatusCode)
@@ -570,6 +592,20 @@ func (b *memBackend) MemFSList(ctx context.Context, m mid.MID) ([]MemFSEntry, er
 
 func (b *memBackend) MemFSPathGet(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error) {
 	return nil, 0, "", fmt.Errorf("memfs: test backend stub")
+}
+
+// --- Phase 18: MemNS stubs on memBackend ---
+
+func (b *memBackend) KeyringKeys(ctx context.Context) ([]KeyringKeyInfo, error) {
+	return nil, nil
+}
+
+func (b *memBackend) ResolveMemNSRecord(ctx context.Context, name string) (MemNSRecordInfo, error) {
+	return MemNSRecordInfo{}, fmt.Errorf("memns: test backend stub")
+}
+
+func (b *memBackend) ResolveMemLink(ctx context.Context, domain string) (MemLinkInfo, error) {
+	return MemLinkInfo{}, fmt.Errorf("memlink: test backend stub")
 }
 
 func TestUpload(t *testing.T) {

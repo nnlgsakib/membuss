@@ -1,11 +1,10 @@
-# Membuss - single-node docker compose.
+# Membuss - full bootstrap node docker compose.
 #
-# This file starts one daemon container with all four ports
-# (libp2p tcp + udp, gRPC, gateway, node-api) published to the
-# host, a named volume for the on-disk state, and an env-var
-# override surface that maps onto the same YAML fields that
-# config.Load reads. A custom config can always be mounted over
-# /etc/membuss/config.yaml if a setting isn't exposed below.
+# This file starts a maximum-capability node with every
+# subsystem enabled: anchor engine, relay service, DHT
+# server, WebSocket transport, geolocation, mDNS, bloom
+# filters, and metrics. Use it to run a bootstrap peer
+# that other nodes can connect to.
 #
 # Usage:
 #   docker compose build
@@ -18,8 +17,6 @@
 
 services:
   membuss:
-    # Build from the local Dockerfile. To pin a published image
-    # instead, replace `build:` with `image: ghcr.io/.../membuss:tag`.
     build:
       context: .
       dockerfile: Dockerfile
@@ -27,71 +24,27 @@ services:
 
     container_name: membuss
 
-    # Run as a stable non-root uid. The named volume below is
-    # initialized by docker with the same uid so writes succeed.
-    user: "65532:65532"
-
-    # Restart policy: keep the node up across daemon restarts, but
-    # bail out if it keeps failing (the supervisor will throttle
-    # restart loops).
     restart: unless-stopped
 
-    # Hostname is what libp2p advertises in the peer table; it
-    # has no effect on routing.
-    hostname: membuss-node-1
+    hostname: membuss-bootstrap-1
 
-    # The container expects every default port to be published so
-    # the gateway, API, and gRPC are reachable from the host. The
-    # libp2p ports are also exposed - remove them if you only want
-    # to serve content and not accept inbound peer connections.
     ports:
       - "4001:4001/tcp"     # libp2p TCP
       - "4001:4001/udp"     # libp2p QUIC
+      - "4002:4002/tcp"     # libp2p WebSocket
       - "5001:5001/tcp"     # Node API (local control plane)
       - "8080:8080/tcp"     # Mem-Gate public HTTP gateway
       - "50051:50051/tcp"   # gRPC (membuss-cli)
 
-    # Persistent state. The named volume is managed by docker so
-    # `docker compose down -v` wipes it on demand.
     volumes:
       - membuss-data:/var/lib/membuss
+      - ./deploy/membuss-bootstrap.yaml:/etc/membuss/config.yaml:ro
 
-    # A read-only config file can be mounted here to override the
-    # container's default. Leave commented out to use the baked-in
-    # /etc/membuss/config.yaml.
-    # - ./my-membuss.yaml:/etc/membuss/config.yaml:ro
-
-    # Env-var to YAML override surface. Anything you set here
-    # shadows the matching field in /etc/membuss/config.yaml.
-    # The entrypoint script (see deploy/entrypoint.sh) reads
-    # these, prints the resulting config, and execs membuss.
     environment:
-      # --- Networking ---
-      MEMBUSS_LISTEN_ADDRS: "/ip4/0.0.0.0/tcp/4001,/ip4/0.0.0.0/udp/4001/quic-v1"
-      MEMBUSS_GATEWAY_ADDR: "0.0.0.0:8080"
-      MEMBUSS_API_ADDR:     "0.0.0.0:5001"
-      MEMBUSS_GRPC_ADDR:    "0.0.0.0:50051"
-
-      # --- Data ---
       MEMBUSS_DATA_DIR: "/var/lib/membuss"
+      MEMBUSS_MDNS: "true"
+      MEMBUSS_NO_ANCHOR: "false"
 
-      # --- Peers ---
-      # Comma-separated list of full multiaddrs, including the
-      # trailing /p2p/<peerID>. Example:
-      #   MEMBUSS_BOOTSTRAP_PEERS: "/ip4/1.2.3.4/tcp/4001/p2p/Qm...,/ip4/5.6.7.8/tcp/4001/p2p/Qm..."
-      MEMBUSS_BOOTSTRAP_PEERS: ""
-
-      # --- Behaviour ---
-      MEMBUSS_LOG_LEVEL:    "info"
-      MEMBUSS_ANCHOR_MODE:  "false"
-      MEMBUSS_NO_ANCHOR:    "true"
-
-      # --- Bloom filter (Phase 13) ---
-      MEMBUSS_BLOOM_CAPACITY: "10000000"
-      MEMBUSS_BLOOM_FP_RATE:  "0.001"
-
-    # Healthcheck mirrors the one in the Dockerfile. `docker ps`
-    # shows the resulting status column.
     healthcheck:
       test: ["CMD", "/usr/local/bin/membuss-cli", "--addr", "127.0.0.1:50051", "ping"]
       interval: 30s
@@ -101,8 +54,4 @@ services:
 
 volumes:
   membuss-data:
-    # A named docker volume. Use `docker volume inspect membuss_membuss-data`
-    # to see where it is stored on the host. Drivers other than the
-    # default `local` (e.g. nfs, gce-pd) can be specified here for
-    # multi-host deployments.
     name: membuss-data

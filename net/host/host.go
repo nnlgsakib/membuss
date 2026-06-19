@@ -1,4 +1,4 @@
-﻿// Package host constructs a libp2p host for a Membuss node.
+// Package host constructs a libp2p host for a Membuss node.
 //
 // The host is the central libp2p object: it owns the network
 // identity (PeerID), the transport stack, the connection
@@ -34,6 +34,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/metrics"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
@@ -41,6 +42,7 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/security/noise"
 	libp2pquic "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
+	libp2pws "github.com/libp2p/go-libp2p/p2p/transport/websocket"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
 )
 
@@ -146,6 +148,9 @@ type Host struct {
 	// the mDNS service dials. The daemon uses this to feed
 	// the discovered peer into the DHT bootstrap list.
 	onPeerFound func(peer.AddrInfo)
+
+	// bwc tracks real-time traffic statistics.
+	bwc *metrics.BandwidthCounter
 }
 
 // NewHost constructs a libp2p host according to cfg. The host
@@ -191,6 +196,7 @@ func NewHost(cfg Config) (*Host, error) {
 		listen = []string{
 			"/ip4/0.0.0.0/tcp/4001",
 			"/ip4/0.0.0.0/udp/4001/quic-v1",
+			"/ip4/0.0.0.0/tcp/4002/ws",
 		}
 	}
 
@@ -204,13 +210,16 @@ func NewHost(cfg Config) (*Host, error) {
 		return nil, err
 	}
 
+	bwc := metrics.NewBandwidthCounter()
 	opts := []libp2p.Option{
 		libp2p.Identity(priv),
 		libp2p.ListenAddrStrings(listen...),
+		libp2p.BandwidthReporter(bwc),
 		// Pass the transport CONSTRUCTORS; libp2p wires the
 		// resource manager / connection manager itself.
 		libp2p.Transport(tcp.NewTCPTransport),
 		libp2p.Transport(libp2pquic.NewTransport),
+		libp2p.Transport(libp2pws.New),
 		libp2p.Security(noise.ID, noise.New),
 		libp2p.Muxer(yamux.ID, yamux.DefaultTransport),
 	}
@@ -224,6 +233,7 @@ func NewHost(cfg Config) (*Host, error) {
 		return nil, fmt.Errorf("host: build libp2p host: %w", err)
 	}
 	wh := wrapHost(h, false)
+	wh.bwc = bwc
 	if cfg.MDNS {
 		if cfg.OnPeerFound != nil {
 			wh.onPeerFound = cfg.OnPeerFound
@@ -518,4 +528,13 @@ func newInProcessHost(cfg Config) (host.Host, error) {
 		return nil, fmt.Errorf("host: build in-process libp2p host: %w", err)
 	}
 	return h, nil
+}
+
+// BandwidthTotals returns the real-time bandwidth totals and rates.
+func (h *Host) BandwidthTotals() (totalIn, totalOut int64, rateIn, rateOut float64) {
+	if h == nil || h.bwc == nil {
+		return 0, 0, 0, 0
+	}
+	stats := h.bwc.GetBandwidthTotals()
+	return stats.TotalIn, stats.TotalOut, stats.RateIn, stats.RateOut
 }

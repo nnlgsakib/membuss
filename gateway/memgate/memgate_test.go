@@ -589,7 +589,7 @@ func (b *memfsBackend) MemFSPathGet(ctx context.Context, m mid.MID, path string)
 	if err != nil {
 		return nil, 0, "", err
 	}
-	return rc, node.TotalSize(), "text/plain; charset=utf-8", nil
+	return rc, node.TotalSize(), node.MimeType(), nil
 }
 
 func (b *memfsBackend) MemFSList(ctx context.Context, m mid.MID) ([]MemFSEntry, error) {
@@ -693,7 +693,9 @@ func TestMemFS_PathGet(t *testing.T) {
 	defer bs.Close()
 	b := memfs.NewBuilder(bs)
 	root, err := b.AddDirectoryFromFS(fstest.MapFS{
-		"hello.txt": &fstest.MapFile{Data: []byte("Hello, world!")},
+		"hello.txt":          &fstest.MapFile{Data: []byte("Hello, world!")},
+		"assets/style.css":   &fstest.MapFile{Data: []byte("body { color: blue; }")},
+		"assets/index.js":    &fstest.MapFile{Data: []byte("console.log(1)")},
 	}, ".")
 	if err != nil {
 		t.Fatalf("add dir: %v", err)
@@ -701,16 +703,35 @@ func TestMemFS_PathGet(t *testing.T) {
 	be := &memfsBackend{memBackend: newMemBackend(), resolver: memfs.NewResolver(bs)}
 	srv := httptest.NewServer(newTestGate(t, be).Router())
 	defer srv.Close()
-	resp, err := http.Get(srv.URL + "/mem/" + root.MID.String() + "/hello.txt")
-	if err != nil {
-		t.Fatal(err)
+
+	cases := []struct {
+		urlPath  string
+		wantBody string
+		wantCT   string
+	}{
+		{"/hello.txt", "Hello, world!", "text/plain; charset=utf-8"},
+		{"/assets/style.css", "body { color: blue; }", "text/css; charset=utf-8"},
+		{"/assets/index.js", "console.log(1)", "application/javascript; charset=utf-8"},
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("status: %d", resp.StatusCode)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	if string(body) != "Hello, world!" {
-		t.Errorf("body: %q", string(body))
+
+	for _, tc := range cases {
+		resp, err := http.Get(srv.URL + "/mem/" + root.MID.String() + tc.urlPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			t.Fatalf("status: %d for path %s, body: %q", resp.StatusCode, tc.urlPath, string(body))
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(body) != tc.wantBody {
+			t.Errorf("body for %s: got %q, want %q", tc.urlPath, string(body), tc.wantBody)
+		}
+		ct := resp.Header.Get("Content-Type")
+		if ct != tc.wantCT {
+			t.Errorf("content-type for %s: got %q, want %q", tc.urlPath, ct, tc.wantCT)
+		}
 	}
 }

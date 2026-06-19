@@ -759,6 +759,8 @@ type StatResponse struct {
 	// Phase 19: human-friendly metadata stored at Add time.
 	Name          string `protobuf:"bytes,7,opt,name=name,proto3" json:"name,omitempty"`
 	MimeType      string `protobuf:"bytes,8,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
+	Sealers       int32  `protobuf:"varint,9,opt,name=sealers,proto3" json:"sealers,omitempty"`
+	AnchorSealers int32  `protobuf:"varint,10,opt,name=anchor_sealers,json=anchorSealers,proto3" json:"anchor_sealers,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -849,6 +851,20 @@ func (x *StatResponse) GetMimeType() string {
 	return ""
 }
 
+func (x *StatResponse) GetSealers() int32 {
+	if x != nil {
+		return x.Sealers
+	}
+	return 0
+}
+
+func (x *StatResponse) GetAnchorSealers() int32 {
+	if x != nil {
+		return x.AnchorSealers
+	}
+	return 0
+}
+
 type ErasureInfo struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	DataShards    uint32                 `protobuf:"varint,1,opt,name=data_shards,json=dataShards,proto3" json:"data_shards,omitempty"`
@@ -916,6 +932,7 @@ type NodePeerInfo struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	PeerId        string                 `protobuf:"bytes,1,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`
 	Addrs         []string               `protobuf:"bytes,2,rep,name=addrs,proto3" json:"addrs,omitempty"`
+	IsAnchor      bool                   `protobuf:"varint,3,opt,name=is_anchor,json=isAnchor,proto3" json:"is_anchor,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -962,6 +979,13 @@ func (x *NodePeerInfo) GetAddrs() []string {
 		return x.Addrs
 	}
 	return nil
+}
+
+func (x *NodePeerInfo) GetIsAnchor() bool {
+	if x != nil {
+		return x.IsAnchor
+	}
+	return false
 }
 
 type PeersRequest struct {
@@ -2393,7 +2417,7 @@ const file_membuss_proto_rawDesc = "" +
 	"\x0eUnsealResponse\x12\x18\n" +
 	"\aremoved\x18\x01 \x01(\x04R\aremoved\"\x1f\n" +
 	"\vStatRequest\x12\x10\n" +
-	"\x03mid\x18\x01 \x01(\tR\x03mid\"\xe6\x01\n" +
+	"\x03mid\x18\x01 \x01(\tR\x03mid\"\xa7\x02\n" +
 	"\fStatResponse\x12\x18\n" +
 	"\apresent\x18\x01 \x01(\bR\apresent\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x16\n" +
@@ -2402,16 +2426,20 @@ const file_membuss_proto_rawDesc = "" +
 	"\x05codec\x18\x05 \x01(\x04R\x05codec\x121\n" +
 	"\aerasure\x18\x06 \x01(\v2\x17.membuss.v1.ErasureInfoR\aerasure\x12\x12\n" +
 	"\x04name\x18\a \x01(\tR\x04name\x12\x1b\n" +
-	"\tmime_type\x18\b \x01(\tR\bmimeType\"r\n" +
+	"\tmime_type\x18\b \x01(\tR\bmimeType\x12\x18\n" +
+	"\asealers\x18\t \x01(\x05R\asealers\x12%\n" +
+	"\x0eanchor_sealers\x18\n" +
+	" \x01(\x05R\ranchorSealers\"r\n" +
 	"\vErasureInfo\x12\x1f\n" +
 	"\vdata_shards\x18\x01 \x01(\rR\n" +
 	"dataShards\x12#\n" +
 	"\rparity_shards\x18\x02 \x01(\rR\fparityShards\x12\x1d\n" +
 	"\n" +
-	"shard_mids\x18\x03 \x03(\tR\tshardMids\"=\n" +
+	"shard_mids\x18\x03 \x03(\tR\tshardMids\"Z\n" +
 	"\fNodePeerInfo\x12\x17\n" +
 	"\apeer_id\x18\x01 \x01(\tR\x06peerId\x12\x14\n" +
-	"\x05addrs\x18\x02 \x03(\tR\x05addrs\"$\n" +
+	"\x05addrs\x18\x02 \x03(\tR\x05addrs\x12\x1b\n" +
+	"\tis_anchor\x18\x03 \x01(\bR\bisAnchor\"$\n" +
 	"\fPeersRequest\x12\x14\n" +
 	"\x05limit\x18\x01 \x01(\rR\x05limit\"U\n" +
 	"\rPeersResponse\x12.\n" +
