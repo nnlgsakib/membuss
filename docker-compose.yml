@@ -33,6 +33,7 @@ services:
 
     environment:
       MEMBUSS_DATA_DIR: "/var/lib/membuss"
+      MEMBUSS_GATEWAY_ADDR: "0.0.0.0:8081"
       MEMBUSS_MDNS: "true"
       MEMBUSS_NO_ANCHOR: "false"
 
