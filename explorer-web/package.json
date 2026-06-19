@@ -29,5 +29,9 @@
 		"tailwindcss": "^4.3.0",
 		"typescript": "^6.0.3",
 		"vite": "^8.0.16"
+	},
+	"dependencies": {
+		"@iconify-json/ph": "^1.2.2",
+		"@iconify/svelte": "^5.2.2"
 	}
 }
