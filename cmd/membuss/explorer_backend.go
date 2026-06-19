@@ -19,6 +19,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"github.com/nnlgsakib/membuss/anchor"
+	hostpkg "github.com/nnlgsakib/membuss/net/host"
 	"github.com/nnlgsakib/membuss/core/keyring"
 	"github.com/nnlgsakib/membuss/core/memfs"
 	"github.com/nnlgsakib/membuss/core/memlink"
@@ -372,6 +373,15 @@ func (a *explorerAdapter) Uptime(ctx context.Context) time.Duration {
 // anchor mode enabled.
 func (a *explorerAdapter) AnchorMode(ctx context.Context) bool {
 	return a.anchorMode
+}
+
+// BandwidthStats returns the real-time bandwidth totals and rates.
+func (a *explorerAdapter) BandwidthStats(ctx context.Context) (totalIn, totalOut int64, rateIn, rateOut float64, err error) {
+	if wh, ok := a.b.host.(*hostpkg.Host); ok && wh != nil {
+		totIn, totOut, rIn, rOut := wh.BandwidthTotals()
+		return totIn, totOut, rIn, rOut, nil
+	}
+	return 0, 0, 0, 0, nil
 }
 
 // joinStrings is a tiny helper to format a peer addr list.

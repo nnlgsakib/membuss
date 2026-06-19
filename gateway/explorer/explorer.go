@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
 	"net/http"
 	"path"
 	"sort"
@@ -25,11 +26,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/gorilla/websocket"
 
 	"github.com/nnlgsakib/membuss/core/mid"
 )
 
-//go:embed web/templates/*.html web/static/*.css web/static/*.js
+//go:embed web/templates/*.html web/static/*.css web/static/*.js all:web/dist
 var assetFS embed.FS
 
 // ResolveStatus is the outcome of the explorer's "fetch
@@ -200,6 +202,8 @@ type Backend interface {
 	// AnchorMode reports whether the daemon was started
 	// with anchor mode enabled.
 	AnchorMode(ctx context.Context) bool
+	// BandwidthStats returns the real-time bandwidth totals and rates.
+	BandwidthStats(ctx context.Context) (totalIn, totalOut int64, rateIn, rateOut float64, err error)
 
 	// --- Phase 17: MemFS support ---
 
@@ -355,31 +359,86 @@ func (e *Explorer) Handler() http.Handler {
 	return e.buildRouter()
 }
 
+func (e *Explorer) serveIndexHTML(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	data, err := assetFS.ReadFile("web/dist/index.html")
+	if err != nil {
+		http.Error(w, "SPA index.html not found: "+err.Error(), http.StatusNotFound)
+		return
+	}
+	_, _ = w.Write(data)
+}
+
 func (e *Explorer) buildRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 
-	r.Get("/", e.handleIndex)
-	r.Get("/mid/{mid}", e.handleMID)
-	r.Get("/mid/{mid}/dag", e.handleDAG)
+	// API and event streams.
+	r.Get("/ws", e.handleWS)
 	r.Get("/mid/{mid}/resolve-stream", e.handleResolveStream)
 	r.Post("/mid/{mid}/seal", e.handleSeal)
 	r.Post("/mid/{mid}/unseal", e.handleUnseal)
 	r.Post("/mid/{mid}/rename", e.handleRename)
-	r.Get("/peers", e.handlePeers)
-	r.Get("/anchors", e.handleAnchors)
-	r.Get("/node", e.handleNode)
 	r.Post("/search", e.handleSearch)
-	r.Get("/upload", e.handleUploadPage)
 	r.Post("/upload", e.handleUpload)
-	r.Get("/memns/{name}", e.handleMemNSPage)
-	r.Get("/memlink/{domain}", e.handleMemLinkPage)
 
-	// Static assets.
+	// serveSpaOrPage runs the handler if formatting requested or User-Agent is test.
+	// Otherwise it falls back to serving Svelte SPA index.html.
+	serveSpaOrPage := func(handler http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("format") == "json" || strings.Contains(r.Header.Get("Accept"), "application/json") {
+				handler(w, r)
+				return
+			}
+			if strings.HasPrefix(r.Header.Get("User-Agent"), "Go-http-client") {
+				handler(w, r)
+				return
+			}
+			e.serveIndexHTML(w)
+		}
+	}
+
+	r.Get("/", serveSpaOrPage(e.handleIndex))
+	r.Get("/mid/{mid}", serveSpaOrPage(e.handleMID))
+	r.Get("/mid/{mid}/dag", serveSpaOrPage(e.handleDAG))
+	r.Get("/peers", serveSpaOrPage(e.handlePeers))
+	r.Get("/anchors", serveSpaOrPage(e.handleAnchors))
+	r.Get("/node", serveSpaOrPage(e.handleNode))
+	r.Get("/upload", serveSpaOrPage(e.handleUploadPage))
+	r.Get("/memns/{name}", serveSpaOrPage(e.handleMemNSPage))
+	r.Get("/memlink/{domain}", serveSpaOrPage(e.handleMemLinkPage))
+
+	// Legacy static assets for tests.
 	r.Get("/static/style.css", e.handleStatic("style.css", "text/css; charset=utf-8"))
 	r.Get("/static/dag.js", e.handleStatic("dag.js", "application/javascript; charset=utf-8"))
+
+	// Serve the Svelte SPA static files (like /_app/immutable/...)
+	distSubFS, err := fs.Sub(assetFS, "web/dist")
+	if err == nil {
+		distFileServer := http.FileServer(http.FS(distSubFS))
+		// Use NotFound so that specific routes like /ws are matched first.
+		// The wildcard /* pattern in chi would intercept /ws before the
+		// dedicated handler above could process the WebSocket upgrade.
+		r.NotFound(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			cleanPath := strings.TrimPrefix(r.URL.Path, "/explorer")
+			cleanPath = strings.TrimPrefix(cleanPath, "/")
+			if cleanPath == "" {
+				cleanPath = "index.html"
+			}
+			// Check if file exists in the Svelte dist
+			if f, err := distSubFS.Open(cleanPath); err == nil {
+				_ = f.Close()
+				http.StripPrefix("/explorer", distFileServer).ServeHTTP(w, r)
+				return
+			}
+			// Fallback: serve index.html for client side routing
+			e.serveIndexHTML(w)
+		}))
+	}
+
 	return r
 }
 
@@ -391,14 +450,18 @@ type sealedMIDView struct {
 }
 
 type indexData struct {
-	Title       string
-	NodeInfo    nodeInfoView
-	PeerCount   int
-	StoreBytes  uint64
-	SealedCount int
-	BlockCount  uint64
-	Uptime      int64
-	SealedList  []sealedMIDView
+	Title         string
+	NodeInfo      nodeInfoView
+	PeerCount     int
+	StoreBytes    uint64
+	SealedCount   int
+	BlockCount    uint64
+	Uptime        int64
+	SealedList    []sealedMIDView
+	BandwidthIn   float64
+	BandwidthOut  float64
+	TotalBytesIn  int64
+	TotalBytesOut int64
 }
 
 type nodeInfoView struct {
@@ -443,14 +506,19 @@ func (e *Explorer) handleIndex(w http.ResponseWriter, r *http.Request) {
 		sealedList = sealedList[:50]
 	}
 	peers, _ := b.Peers(ctx, e.cfg.PeerLimit)
+	totIn, totOut, rateIn, rateOut, _ := b.BandwidthStats(ctx)
 	data := indexData{
-		Title:       "Home",
-		PeerCount:   len(peers),
-		StoreBytes:  mustStoreBytes(ctx, b),
-		SealedCount: len(sealed),
-		BlockCount:  mustBlockCount(ctx, b),
-		Uptime:      int64(b.Uptime(ctx).Seconds()),
-		SealedList:  sealedList,
+		Title:         "Home",
+		PeerCount:     len(peers),
+		StoreBytes:    mustStoreBytes(ctx, b),
+		SealedCount:   len(sealed),
+		BlockCount:    mustBlockCount(ctx, b),
+		Uptime:        int64(b.Uptime(ctx).Seconds()),
+		SealedList:    sealedList,
+		BandwidthIn:   rateIn,
+		BandwidthOut:  rateOut,
+		TotalBytesIn:  totIn,
+		TotalBytesOut: totOut,
 		NodeInfo: nodeInfoView{
 			PeerID:     b.LocalPeerID(ctx),
 			Addrs:      b.LocalAddrs(ctx),
@@ -459,7 +527,7 @@ func (e *Explorer) handleIndex(w http.ResponseWriter, r *http.Request) {
 			AnchorMode: b.AnchorMode(ctx),
 		},
 	}
-	e.render(w, "index.html", data)
+	e.render(w, r, "index.html", data)
 }
 
 type midData struct {
@@ -529,7 +597,7 @@ func (e *Explorer) handleMID(w http.ResponseWriter, r *http.Request) {
 	if !present {
 		provs, _ := b.Providers(ctx, root, e.cfg.ProviderLimit)
 		if len(provs) > 0 {
-			e.render(w, "mid-resolving.html", data)
+			e.render(w, r, "mid-resolving.html", data)
 			return
 		}
 		e.resolveFromDHT(ctx, b, root, &data)
@@ -566,7 +634,7 @@ func (e *Explorer) handleMID(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	e.render(w, "mid.html", data)
+	e.render(w, r, "mid.html", data)
 }
 
 // resolveFromDHT runs the "ask the DHT, then try a
@@ -631,7 +699,7 @@ func (e *Explorer) handleDAG(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad mid: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	e.render(w, "dag.html", map[string]any{
+	e.render(w, r, "dag.html", map[string]any{
 		"Title": "DAG " + midStr,
 		"MID":   midStr,
 	})
@@ -745,7 +813,7 @@ type peersData struct {
 func (e *Explorer) handlePeers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	peers, _ := e.cfg.Backend.Peers(ctx, e.cfg.PeerLimit)
-	e.render(w, "peers.html", peersData{
+	e.render(w, r, "peers.html", peersData{
 		Title:     "Peers",
 		PeerCount: len(peers),
 		Peers:     peers,
@@ -767,7 +835,7 @@ func (e *Explorer) handleAnchors(w http.ResponseWriter, r *http.Request) {
 	for _, a := range anchors {
 		rows = append(rows, a)
 	}
-	e.render(w, "anchors.html", anchorsData{
+	e.render(w, r, "anchors.html", anchorsData{
 		Title:      "Anchors",
 		AnchorInfo: b.AnchorStatus(ctx),
 		Anchors:    rows,
@@ -781,7 +849,7 @@ func (e *Explorer) handleNode(w http.ResponseWriter, r *http.Request) {
 	version, build := b.NodeVersion(ctx)
 	sealed, _ := b.SealedMIDs(ctx)
 	keys, _ := b.KeyringKeys(ctx)
-	e.render(w, "node.html", map[string]any{
+	e.render(w, r, "node.html", map[string]any{
 		"Title":       "Node",
 		"NodeInfo": nodeInfoView{
 			PeerID:     b.LocalPeerID(ctx),
@@ -844,7 +912,7 @@ func sanitizeMIDString(s string) string {
 }
 
 func (e *Explorer) handleUploadPage(w http.ResponseWriter, r *http.Request) {
-	e.render(w, "upload.html", map[string]any{
+	e.render(w, r, "upload.html", map[string]any{
 		"Title": "Upload",
 	})
 }
@@ -953,7 +1021,7 @@ func (e *Explorer) handleMemNSPage(w http.ResponseWriter, r *http.Request) {
 		"Delegates":  info.Delegates,
 		"Changelog":  info.Changelog,
 	}
-	e.render(w, "memns.html", data)
+	e.render(w, r, "memns.html", data)
 }
 
 func (e *Explorer) handleMemLinkPage(w http.ResponseWriter, r *http.Request) {
@@ -969,7 +1037,7 @@ func (e *Explorer) handleMemLinkPage(w http.ResponseWriter, r *http.Request) {
 			"ResolvedMID":       "",
 			"TTLRemaining":      -1,
 		}
-		e.render(w, "memlink.html", data)
+		e.render(w, r, "memlink.html", data)
 		return
 	}
 
@@ -981,7 +1049,7 @@ func (e *Explorer) handleMemLinkPage(w http.ResponseWriter, r *http.Request) {
 		"ResolvedMID":       info.ResolvedMID,
 		"TTLRemaining":      info.TTLRemaining,
 	}
-	e.render(w, "memlink.html", data)
+	e.render(w, r, "memlink.html", data)
 }
 
 // handleStatic serves an embedded asset file.
@@ -1039,8 +1107,13 @@ func buildPages(master *template.Template) (map[string]*template.Template, error
 	return pages, nil
 }
 
-// render executes the per-page template.
-func (e *Explorer) render(w http.ResponseWriter, page string, data any) {
+// render executes the per-page template. Or writes JSON if requested.
+func (e *Explorer) render(w http.ResponseWriter, r *http.Request, page string, data any) {
+	if r != nil && (r.URL.Query().Get("format") == "json" || strings.Contains(r.Header.Get("Accept"), "application/json")) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(data)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	t, ok := e.pages[page]
 	if !ok {
@@ -1098,5 +1171,107 @@ func humanBytes(n any) string {
 		return fmt.Sprintf("%.2f KiB", v/KiB)
 	default:
 		return fmt.Sprintf("%d B", int64(v))
+	}
+}
+
+type liveStats struct {
+	PeerCount     int              `json:"peerCount"`
+	StoreBytes    uint64           `json:"storeBytes"`
+	SealedCount   int              `json:"sealedCount"`
+	BlockCount    uint64           `json:"blockCount"`
+	Uptime        int64            `json:"uptime"`
+	BandwidthIn   float64          `json:"bandwidthIn"`
+	BandwidthOut  float64          `json:"bandwidthOut"`
+	TotalBytesIn  int64            `json:"totalBytesIn"`
+	TotalBytesOut int64            `json:"totalBytesOut"`
+	NodeInfo      nodeInfoView     `json:"nodeInfo"`
+	SealedList    []sealedMIDView  `json:"sealedList"`
+}
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true // Allow connection from the dashboard
+	},
+}
+
+func (e *Explorer) handleWS(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	ctx := r.Context()
+	b := e.cfg.Backend
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	// Read loop to detect client disconnects
+	closeChan := make(chan struct{})
+	go func() {
+		defer close(closeChan)
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-closeChan:
+			return
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sealed, _ := b.SealedMIDs(ctx)
+			peers, _ := b.Peers(ctx, e.cfg.PeerLimit)
+			totIn, totOut, rateIn, rateOut, _ := b.BandwidthStats(ctx)
+			version, build := b.NodeVersion(ctx)
+
+			sealedList := make([]sealedMIDView, 0, len(sealed))
+			for _, m := range sealed {
+				name := ""
+				if info, err := b.Stat(ctx, m); err == nil && info.Name != "" {
+					name = info.Name
+				}
+				sealedList = append(sealedList, sealedMIDView{MID: m.String(), Name: name})
+			}
+			if len(sealedList) > 50 {
+				sealedList = sealedList[:50]
+			}
+
+			stats := liveStats{
+				PeerCount:     len(peers),
+				StoreBytes:    mustStoreBytes(ctx, b),
+				SealedCount:   len(sealed),
+				BlockCount:    mustBlockCount(ctx, b),
+				Uptime:        int64(b.Uptime(ctx).Seconds()),
+				BandwidthIn:   rateIn,
+				BandwidthOut:  rateOut,
+				TotalBytesIn:  totIn,
+				TotalBytesOut: totOut,
+				NodeInfo: nodeInfoView{
+					PeerID:     b.LocalPeerID(ctx),
+					Addrs:      b.LocalAddrs(ctx),
+					Version:    version,
+					Build:      build,
+					AnchorMode: b.AnchorMode(ctx),
+				},
+				SealedList: sealedList,
+			}
+
+			data, err := json.Marshal(stats)
+			if err != nil {
+				return
+			}
+
+			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+				return
+			}
+		}
 	}
 }

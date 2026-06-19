@@ -199,6 +199,9 @@ func (b *memBackend) LocalAddrs(ctx context.Context) []string {
 func (b *memBackend) NodeVersion(ctx context.Context) (string, string) { return "0.1.0", "test" }
 func (b *memBackend) Uptime(ctx context.Context) time.Duration         { return time.Since(b.started) }
 func (b *memBackend) AnchorMode(ctx context.Context) bool              { return b.anchorMode }
+func (b *memBackend) BandwidthStats(ctx context.Context) (totalIn, totalOut int64, rateIn, rateOut float64, err error) {
+	return 0, 0, 0, 0, nil
+}
 
 func (b *memBackend) Add(ctx context.Context, name string, r io.Reader) (ContentInfo, error) {
 	data, err := io.ReadAll(r)
