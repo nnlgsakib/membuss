@@ -23,9 +23,16 @@ services:
     image: membuss:local
 
     container_name: membuss
-    network_mode: host
 
     restart: unless-stopped
+
+    ports:
+      - "4001:4001/tcp"     # libp2p TCP
+      - "4001:4001/udp"     # libp2p QUIC
+      - "4002:4002/tcp"     # libp2p WebSocket
+      - "5001:5001/tcp"     # Node API (local control plane)
+      - "8081:8080/tcp"     # Mem-Gate public HTTP gateway
+      - "50051:50051/tcp"   # gRPC (membuss-cli)
 
     volumes:
       - membuss-data:/var/lib/membuss
@@ -33,7 +40,6 @@ services:
 
     environment:
       MEMBUSS_DATA_DIR: "/var/lib/membuss"
-      MEMBUSS_GATEWAY_ADDR: "0.0.0.0:8081"
       MEMBUSS_MDNS: "true"
       MEMBUSS_NO_ANCHOR: "false"
 
