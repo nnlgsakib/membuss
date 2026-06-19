@@ -448,7 +448,24 @@ func main() {
 	}
 	fmt.Fprintf(os.Stdout, "  grpc_addr:      %s\n", cfg.GRPCAddr)
 	// 9) Mem-Gate: public HTTP gateway + CDN edge.
-	gateSrv, err := startGateway(cfg.GatewayAddr, newMemgateAdapter(backend), newExplorerAdapter(backend, cfg.AnchorMode, kr, memnsRes), cfg.GatewayRateLimitPerMin, cfg.GatewayTLS, memnsRes, cfg.DataDir)
+	var geo *explorerPkg.GeoResolver
+	if cfg.EnableGeolocation {
+		geoDB := cfg.GeolocationDB
+		if geoDB == "" {
+			// Check well-known Docker path first, then data dir.
+			for _, p := range []string{
+				filepath.Join("/etc/membuss", "GeoLite2-City.mmdb"),
+				filepath.Join(cfg.DataDir, "GeoLite2-City.mmdb"),
+			} {
+				if _, err := os.Stat(p); err == nil {
+					geoDB = p
+					break
+				}
+			}
+		}
+		geo = explorerPkg.NewGeoResolver(geoDB)
+	}
+	gateSrv, err := startGateway(cfg.GatewayAddr, newMemgateAdapter(backend), newExplorerAdapter(backend, cfg.AnchorMode, kr, memnsRes), geo, cfg.GatewayRateLimitPerMin, cfg.GatewayTLS, memnsRes, cfg.DataDir)
 	if err != nil {
 		logger.Error("gateway", "err", err.Error())
 		os.Exit(1)
@@ -484,6 +501,9 @@ func main() {
 	grpcSrv.GracefulStop()
 	if err := mx.StopWait(shutdownCtx); err != nil {
 		logger.Warn("memex stop", "err", err.Error())
+	}
+	if geo != nil {
+		geo.Close()
 	}
 	logger.Info("shutdown complete")
 }
@@ -601,11 +621,11 @@ func (s *serverGRPC) GracefulStop() { s.gsrv.GracefulStop() }
 // rateLimitPerMin is the per-IP request budget enforced on
 // every public request. tls enables HTTPS when its
 // CertFile/KeyFile are set.
-func startGateway(addr string, b memgate.Backend, exp *explorerAdapter, rateLimitPerMin int, tlsCfg config.TLSConfig, memnsRes *memns.Resolver, dataDir string) (*httpServer, error) {
+func startGateway(addr string, b memgate.Backend, exp *explorerAdapter, geo *explorerPkg.GeoResolver, rateLimitPerMin int, tlsCfg config.TLSConfig, memnsRes *memns.Resolver, dataDir string) (*httpServer, error) {
 	mg, err := memgate.New(memgate.Config{
 		Backend:         b,
 		MaxCacheBytes:   64 << 20, // 64 MiB LRU
-		ExplorerHandler: buildExplorer(exp),
+		ExplorerHandler: buildExplorer(exp, geo),
 		RateLimitPerMin: rateLimitPerMin,
 		MemNSResolver:   memnsRes,
 	})
@@ -739,11 +759,11 @@ func (h *httpServer) Addr() string {
 // buildExplorer constructs the explorer http.Handler.
 // It returns nil when exp is nil so the gateway can be
 // constructed without an explorer for tests.
-func buildExplorer(exp *explorerAdapter) http.Handler {
+func buildExplorer(exp *explorerAdapter, geo *explorerPkg.GeoResolver) http.Handler {
 	if exp == nil {
 		return nil
 	}
-	h, err := explorerPkg.New(explorerPkg.Config{Backend: exp})
+	h, err := explorerPkg.New(explorerPkg.Config{Backend: exp, GeoResolver: geo})
 	if err != nil {
 		slog.Warn("explorer", "err", err.Error())
 		return nil

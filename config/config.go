@@ -143,6 +143,18 @@ type Config struct {
 	// release cycle so operators can drain
 	// pre-upgrade stores.
 	MIDVersion string `yaml:"mid_version"`
+
+	// --- Phase: geolocation ---
+
+	// EnableGeolocation enables server-side IP geolocation
+	// for peer addresses. When true, the explorer enriches
+	// each peer with approximate Country, City, Lat, Lon
+	// using a local MaxMind GeoLite2-City database.
+	EnableGeolocation bool `yaml:"enable_geolocation"`
+	// GeolocationDB is an optional path to a custom
+	// GeoLite2-City.mmdb file. When empty the resolver
+	// looks for GeoLite2-City.mmdb in DataDir.
+	GeolocationDB string `yaml:"geolocation_db"`
 }
 
 // TLSConfig is a pair of PEM file paths enabling HTTPS on an HTTP
@@ -211,6 +223,7 @@ func Default() *Config {
 		MIDVersion:                    "v1",
 		DHTMode:                       "server",
 		DHTOptimisticProvide:          true,
+		EnableGeolocation:             false,
 	}
 }
 

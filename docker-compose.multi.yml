@@ -22,6 +22,7 @@ services:
       MEMBUSS_ANCHOR_MODE: "true"
       MEMBUSS_MDNS: "true"
       MEMBUSS_DHT_MODE: server
+      MEMBUSS_ENABLE_GEOLOCATION: "true"
     volumes:
       - membuss-data-1:/data/membuss
     ports:
@@ -48,6 +49,7 @@ services:
       MEMBUSS_GC_MIN_AGE: 24h
       MEMBUSS_MDNS: "true"
       MEMBUSS_DHT_MODE: server
+      MEMBUSS_ENABLE_GEOLOCATION: "true"
     volumes:
       - membuss-data-2:/data/membuss
     ports:
@@ -76,6 +78,7 @@ services:
       MEMBUSS_GC_MIN_AGE: 24h
       MEMBUSS_MDNS: "true"
       MEMBUSS_DHT_MODE: server
+      MEMBUSS_ENABLE_GEOLOCATION: "true"
     volumes:
       - membuss-data-3:/data/membuss
     ports:

@@ -37,3 +37,12 @@ anchor_mode: false
 
 # Structured log level. env-override target.
 log_level: info
+
+# DHT operating mode. "server" for full DHT participation,
+# "client" for light queries only, "auto" to let AutoNAT decide.
+dht_mode: server
+
+# When true, the explorer enriches peer addresses with
+# approximate geolocation (country, city, lat/lon) using
+# a local MaxMind GeoLite2-City database.
+enable_geolocation: false

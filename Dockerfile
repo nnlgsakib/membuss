@@ -64,10 +64,12 @@ LABEL org.opencontainers.image.title="membuss" \
 COPY --from=builder /out/membuss     /usr/local/bin/membuss
 COPY --from=builder /out/membuss-cli /usr/local/bin/membuss-cli
 
-# Ship a container-friendly default config. The entrypoint
-# shim is a static Go binary (distroless has no shell, so a
-# .sh ENTRYPOINT is silently rejected by the kernel).
+# Ship a container-friendly default config and the GeoLite2
+# geolocation database. The entrypoint shim renders the
+# env-var-driven config, and the daemon uses the MMDB for
+# peer geolocation when enable_geolocation is true.
 COPY deploy/membuss.yaml /etc/membuss/config.yaml
+COPY deploy/GeoLite2-City.mmdb /etc/membuss/GeoLite2-City.mmdb
 COPY --from=builder /out/membuss-entrypoint /usr/local/bin/membuss-entrypoint
 
 # Data directory. The named volume (`membuss-data`) declared in

@@ -107,6 +107,11 @@ type PeerInfo struct {
 	Addrs     []string
 	IsAnchor  bool
 	Connected bool
+	// Geolocation fields — populated when EnableGeolocation is true.
+	Country string
+	City    string
+	Lat     float64
+	Lon     float64
 }
 
 // AnchorRow is one registered anchor peer.
@@ -307,6 +312,9 @@ type Config struct {
 	// lower on page-loaded UIs where users notice a
 	// stalled render.
 	ResolveTimeout time.Duration
+	// GeoResolver performs IP geolocation. May be nil
+	// when geolocation is disabled.
+	GeoResolver *GeoResolver
 }
 
 // Explorer is the built-in web UI.
@@ -314,6 +322,7 @@ type Explorer struct {
 	cfg Config
 	tpl *template.Template
 	pages map[string]*template.Template
+	geo  *GeoResolver
 }
 
 // New parses the embedded templates and returns an Explorer
@@ -348,7 +357,7 @@ func New(cfg Config) (*Explorer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("explorer: build pages: %w", err)
 	}
-	return &Explorer{cfg: cfg, tpl: tpl, pages: pages}, nil
+	return &Explorer{cfg: cfg, tpl: tpl, pages: pages, geo: cfg.GeoResolver}, nil
 }
 
 // Router returns the chi router. Exposed so tests can drive
@@ -829,6 +838,18 @@ type peersData struct {
 func (e *Explorer) handlePeers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	peers, _ := e.cfg.Backend.Peers(ctx, e.cfg.PeerLimit)
+	// Enrich peers with geolocation data when resolver is available.
+	if e.geo != nil {
+		for i := range peers {
+			if ip := firstPublicIP(peers[i].Addrs); ip != "" {
+				geo := e.geo.Lookup(ip)
+				peers[i].Country = geo.Country
+				peers[i].City = geo.City
+				peers[i].Lat = geo.Lat
+				peers[i].Lon = geo.Lon
+			}
+		}
+	}
 	e.render(w, r, "peers.html", peersData{
 		Title:     "Peers",
 		PeerCount: len(peers),
@@ -1290,4 +1311,28 @@ func (e *Explorer) handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// firstPublicIP extracts the first IPv4 or IPv6 address from
+// a list of multiaddr strings. Returns "" when no IP is found.
+func firstPublicIP(addrs []string) string {
+	for _, a := range addrs {
+		// Extract /ip4/... or /ip6/... prefix.
+		for _, proto := range []string{"/ip4/", "/ip6/"} {
+			idx := strings.Index(a, proto)
+			if idx < 0 {
+				continue
+			}
+			rest := a[idx+len(proto):]
+			end := strings.IndexAny(rest, "/:")
+			if end < 0 {
+				end = len(rest)
+			}
+			ip := rest[:end]
+			if ip != "127.0.0.1" && ip != "::1" && ip != "0.0.0.0" {
+				return ip
+			}
+		}
+	}
+	return ""
 }
