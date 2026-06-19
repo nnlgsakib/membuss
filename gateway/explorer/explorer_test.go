@@ -608,6 +608,10 @@ func (b *memBackend) ResolveMemLink(ctx context.Context, domain string) (MemLink
 	return MemLinkInfo{}, fmt.Errorf("memlink: test backend stub")
 }
 
+func (b *memBackend) ConnectPeer(ctx context.Context, multiaddr string) error {
+	return fmt.Errorf("connect: test backend stub")
+}
+
 func TestUpload(t *testing.T) {
 	srv, _ := newTestServer(t)
 

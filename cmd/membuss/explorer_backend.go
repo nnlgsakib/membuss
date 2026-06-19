@@ -806,3 +806,15 @@ func (a *explorerAdapter) ResolveMemLink(ctx context.Context, domain string) (ex
 		TTLRemaining:      ttl,
 	}, nil
 }
+
+// ConnectPeer parses a multiaddr and dials the peer.
+func (a *explorerAdapter) ConnectPeer(ctx context.Context, multiaddr string) error {
+	ai, err := peer.AddrInfoFromString(multiaddr)
+	if err != nil {
+		return fmt.Errorf("parse multiaddr: %w", err)
+	}
+	if a.b.host == nil {
+		return errors.New("host not ready")
+	}
+	return a.b.host.Connect(ctx, *ai)
+}

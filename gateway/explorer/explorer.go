@@ -228,6 +228,9 @@ type Backend interface {
 	KeyringKeys(ctx context.Context) ([]KeyringKeyInfo, error)
 	ResolveMemNSRecord(ctx context.Context, name string) (MemNSRecordInfo, error)
 	ResolveMemLink(ctx context.Context, domain string) (MemLinkInfo, error)
+	// ConnectPeer parses a multiaddr and dials the peer.
+	// Returns nil on success or an error if the dial fails.
+	ConnectPeer(ctx context.Context, multiaddr string) error
 }
 
 // KeyringKeyInfo represents metadata about a key in the keyring.
@@ -396,6 +399,7 @@ func (e *Explorer) buildRouter() http.Handler {
 	r.Post("/mid/{mid}/rename", e.handleRename)
 	r.Post("/search", e.handleSearch)
 	r.Post("/upload", e.handleUpload)
+	r.Post("/peers/connect", e.handleConnectPeer)
 
 	// serveSpaOrPage runs the handler if formatting requested or User-Agent is test.
 	// Otherwise it falls back to serving Svelte SPA index.html.
@@ -855,6 +859,25 @@ func (e *Explorer) handlePeers(w http.ResponseWriter, r *http.Request) {
 		PeerCount: len(peers),
 		Peers:     peers,
 	})
+}
+
+func (e *Explorer) handleConnectPeer(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Multiaddr string `json:"multiaddr"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Multiaddr == "" {
+		http.Error(w, `{"ok":false,"error":"multiaddr required"}`, http.StatusBadRequest)
+		return
+	}
+	if err := e.cfg.Backend.ConnectPeer(r.Context(), req.Multiaddr); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusFailedDependency)
+		errJSON, _ := json.Marshal(err.Error())
+		fmt.Fprintf(w, `{"ok":false,"error":%s}`, errJSON)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprint(w, `{"ok":true}`)
 }
 
 type anchorsData struct {

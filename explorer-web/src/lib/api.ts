@@ -1,20 +1,18 @@
 import { base } from '$app/paths';
 
-export async function apiFetch(path: string) {
+export async function apiFetch(path: string, init?: RequestInit) {
 	const sep = path.includes('?') ? '&' : '?';
 	const url = `${base}${path}${sep}format=json`;
-	let res = await fetch(url, {
-		headers: {
-			'Accept': 'application/json'
-		}
-	});
+	const headers: Record<string, string> = {
+		'Accept': 'application/json',
+		...Object.fromEntries(new Headers(init?.headers).entries())
+	};
+	let res = await fetch(url, { ...init, headers });
 	// Respect Retry-After on 429 instead of throwing immediately
 	if (res.status === 429) {
 		const retryAfter = parseInt(res.headers.get('Retry-After') || '2', 10);
 		await new Promise(r => setTimeout(r, Math.min(retryAfter, 5) * 1000));
-		res = await fetch(url, {
-			headers: { 'Accept': 'application/json' }
-		});
+		res = await fetch(url, { ...init, headers: { 'Accept': 'application/json', ...Object.fromEntries(new Headers(init?.headers).entries()) } });
 	}
 	if (!res.ok) {
 		throw new Error(await res.text() || `HTTP ${res.status}`);

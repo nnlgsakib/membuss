@@ -44,6 +44,9 @@
 	}
 
 	let displayPeers = $state<DisplayPeer[]>([]);
+	let connectAddr = $state('');
+	let connectStatus = $state<'idle' | 'loading' | 'ok' | 'error'>('idle');
+	let connectError = $state('');
 
 	function initMap() {
 		if (map || !mapEl) return;
@@ -158,6 +161,30 @@
 		});
 	}
 
+	async function connectToPeer() {
+		if (!connectAddr.trim()) return;
+		connectStatus = 'loading';
+		connectError = '';
+		try {
+			const data = await apiFetch('/peers/connect', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ multiaddr: connectAddr.trim() })
+			});
+			if (data.ok) {
+				connectStatus = 'ok';
+				connectAddr = '';
+				loadPeers();
+			} else {
+				connectStatus = 'error';
+				connectError = data.error || 'Connection failed';
+			}
+		} catch (e) {
+			connectStatus = 'error';
+			connectError = e instanceof Error ? e.message : 'Request failed';
+		}
+	}
+
 	onMount(() => {
 		loadPeers();
 		const interval = setInterval(() => {
@@ -182,6 +209,33 @@
 			Geographic coordinates and status parameters of active routing connections
 		</p>
 	</div>
+
+	<!-- Connect to Peer -->
+	<div class="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col sm:flex-row gap-3">
+		<input
+			type="text"
+			bind:value={connectAddr}
+			placeholder="Paste peer multiaddr, e.g. /ip4/1.2.3.4/tcp/4001/p2p/12D3KooW..."
+			class="flex-1 bg-slate-950/60 border border-slate-850 text-xs px-3.5 py-2 rounded-lg focus:outline-none focus:border-emerald-500 font-mono"
+			onkeydown={(e) => { if (e.key === 'Enter') connectToPeer(); }}
+		/>
+		<button
+			onclick={connectToPeer}
+			disabled={connectStatus === 'loading' || !connectAddr.trim()}
+			class="px-4 py-2 text-xs font-semibold rounded-lg transition-colors
+				{connectStatus === 'loading'
+					? 'bg-slate-800 text-slate-500 cursor-wait'
+					: 'bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer'}"
+		>
+			{connectStatus === 'loading' ? 'Connecting...' : 'Connect'}
+		</button>
+	</div>
+	{#if connectStatus === 'ok'}
+		<div class="text-xs text-emerald-400 font-mono -mt-4">Peer connected successfully</div>
+	{/if}
+	{#if connectStatus === 'error'}
+		<div class="text-xs text-red-400 font-mono -mt-4">Failed: {connectError}</div>
+	{/if}
 
 	{#if loading && !data}
 		<div class="space-y-6 animate-pulse">
