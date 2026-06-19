@@ -189,7 +189,9 @@ func Default() *Config {
 			"/ip4/0.0.0.0/tcp/4002/ws",
 		},
 		AnnounceAddrs:     []string{},
-		BootstrapPeers:    []string{},
+		BootstrapPeers: []string{
+			"/ip4/45.10.162.79/udp/4001/quic-v1/p2p/12D3KooWMNbuDSWaMw7evxzsp9CtaphofzxcEbHisWQQUmg7zfUx",
+		},
 		DataDir:           "./data",
 		GatewayAddr:       "127.0.0.1:8080",
 		APIAddr:           "127.0.0.1:5001",

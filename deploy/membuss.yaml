@@ -18,7 +18,8 @@ listen_addrs:
 # libp2p peer IDs (as multiaddr /p2p/<id> entries) the DHT tries
 # to connect to on startup. Leave empty for a single-node run, or
 # set via MEMBUSS_BOOTSTRAP_PEERS in compose / k8s.
-bootstrap_peers: []
+bootstrap_peers:
+  - /ip4/45.10.162.79/udp/4001/quic-v1/p2p/12D3KooWMNbuDSWaMw7evxzsp9CtaphofzxcEbHisWQQUmg7zfUx
 
 # BadgerDB + bloom snapshot live here. The container image declares
 # /var/lib/membuss as a VOLUME so a named volume (membuss-data) or

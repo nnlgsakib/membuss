@@ -42,8 +42,8 @@ services:
       MEMBUSS_DATA_DIR: "/var/lib/membuss"
       MEMBUSS_MDNS: "true"
       MEMBUSS_NO_ANCHOR: "false"
-      # MEMBUSS_ANNOUNCE_ADDRS: "/ip4/192.168.1.103/tcp/4001,/ip4/192.168.1.103/udp/4001/quic-v1"
-      # MEMBUSS_BOOTSTRAP_PEERS: "/dns4/0.tcp.in.ngrok.io/tcp/19720/p2p/12D3KooWF1kPJPHeBBWpcCZnaaHkMveJX9mbd1o9xuWcYcqHq74d"
+      # MEMBUSS_ANNOUNCE_ADDRS: ""
+      MEMBUSS_BOOTSTRAP_PEERS: "/ip4/45.10.162.79/udp/4001/quic-v1/p2p/12D3KooWMNbuDSWaMw7evxzsp9CtaphofzxcEbHisWQQUmg7zfUx"
       MEMBUSS_REPROVIDE_INTERVAL: "10m"
 
     healthcheck:
