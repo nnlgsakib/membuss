@@ -9,6 +9,6 @@
 	});
 </script>
 
-<div class="flex items-center justify-center py-20 text-zinc-500 font-mono text-xs">
+	<div class="flex items-center justify-center py-20 text-slate-500 font-mono text-xs">
 	Redirecting to content detail dashboard...
 </div>
