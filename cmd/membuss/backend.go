@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/host"
@@ -581,3 +582,22 @@ func provideRecursive(ctx context.Context, dht *dht.MemDHT, s store.Store, root 
 		return nil
 	})
 }
+
+// isDAGComplete checks if all blocks in the Merkle DAG rooted at root are
+// present in the store.
+func isDAGComplete(s store.Store, root mid.MID) (bool, error) {
+	if s == nil || root.IsZero() {
+		return false, nil
+	}
+	err := store.Walk(s, root, func(m mid.MID, leaf bool) error {
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) || strings.Contains(err.Error(), "block not found") {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+

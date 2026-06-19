@@ -163,6 +163,11 @@ func (a *explorerAdapter) ResolveWithProgress(ctx context.Context, m mid.MID, pr
 	if err != nil {
 		return nil, explorer.ContentInfo{}, err
 	}
+	if has {
+		if complete, cerr := isDAGComplete(b.store, m); cerr != nil || !complete {
+			has = false
+		}
+	}
 	if !has && b.dht != nil && b.memex != nil {
 		provCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		provs, perr := b.dht.FindProviders(provCtx, m)

@@ -126,6 +126,7 @@ func renderConfigToDataDir() (string, error) {
 		"bloom_fp_rate":      os.Getenv("MEMBUSS_BLOOM_FP_RATE"),
 		"dht_mode":           os.Getenv("MEMBUSS_DHT_MODE"),
 		"enable_geolocation": os.Getenv("MEMBUSS_ENABLE_GEOLOCATION"),
+		"reprovide_interval": os.Getenv("MEMBUSS_REPROVIDE_INTERVAL"),
 	}
 
 	out := string(data)

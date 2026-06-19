@@ -46,6 +46,11 @@ func (a *memgateAdapter) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser,
 	if err != nil {
 		return nil, memgate.ContentInfo{}, err
 	}
+	if has {
+		if complete, cerr := isDAGComplete(b.store, m); cerr != nil || !complete {
+			has = false
+		}
+	}
 	if !has && b.memex != nil && b.dht != nil {
 		provCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		provs, perr := b.dht.FindProviders(provCtx, m)
