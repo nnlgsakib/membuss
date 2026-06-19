@@ -3,6 +3,7 @@
 	import { apiFetch, formatBytes } from '$lib/api';
 	import { base } from '$app/paths';
 	import { goto } from '$app/navigation';
+	import Icon from '@iconify/svelte';
 
 	interface SealedMID {
 		MID: string;
@@ -340,21 +341,21 @@
 
 <div class="flex flex-col gap-6">
 	<!-- Page Header -->
-	<div class="border-b border-zinc-800 pb-4">
-		<h1 class="text-2xl font-black text-zinc-50">Local File System</h1>
-		<p class="text-xs text-zinc-500 mt-1">Manage files, seal/pin redundancy parameters, and fetch Merkle DAGs from the network</p>
+	<div class="border-b border-slate-800/80 pb-4">
+		<h1 class="text-2xl font-bold text-slate-100">Local File System</h1>
+		<p class="text-xs text-slate-500 mt-1">Manage files, seal/pin redundancy parameters, and fetch Merkle DAGs from the network</p>
 	</div>
 
 	<!-- Top split actions layout -->
 	<div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
 		
 		<!-- Action Panel 1: Upload (merged uploader) -->
-		<div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 lg:col-span-7 flex flex-col gap-4 relative overflow-hidden">
-			<div class="flex border-b border-zinc-850">
+		<div class="bg-slate-900 border border-slate-800/80 rounded-xl p-5 lg:col-span-7 flex flex-col gap-4 relative overflow-hidden">
+			<div class="flex border-b border-slate-700/50">
 				<button 
 					onclick={() => activeUploadTab = 'file'}
 					class={`pb-2 px-3 text-xs font-mono font-bold tracking-wider uppercase border-b-2 -mb-[2px] transition-all ${
-						activeUploadTab === 'file' ? 'border-cyan-500 text-cyan-400' : 'border-transparent text-zinc-500'
+						activeUploadTab === 'file' ? 'border-cyan-500 text-cyan-400' : 'border-transparent text-slate-500'
 					}`}
 				>
 					File Upload
@@ -362,7 +363,7 @@
 				<button 
 					onclick={() => activeUploadTab = 'folder'}
 					class={`pb-2 px-3 text-xs font-mono font-bold tracking-wider uppercase border-b-2 -mb-[2px] transition-all ${
-						activeUploadTab === 'folder' ? 'border-cyan-500 text-cyan-400' : 'border-transparent text-zinc-500'
+						activeUploadTab === 'folder' ? 'border-cyan-500 text-cyan-400' : 'border-transparent text-slate-500'
 					}`}
 				>
 					Directory Upload
@@ -371,20 +372,20 @@
 
 			<form onsubmit={triggerUploadForm} class="flex flex-col gap-4 flex-grow justify-between">
 				{#if activeUploadTab === 'file'}
-					<div class="relative border border-zinc-850 hover:border-zinc-800/80 rounded-lg p-5 flex flex-col items-center text-center gap-2 select-none cursor-pointer bg-zinc-950/15 py-7">
-						<span class="text-3xl">📄</span>
-						<span class="text-xs font-bold text-zinc-350">
+					<div class="group relative border border-slate-700/50 hover:border-slate-700/50 rounded-lg p-5 flex flex-col items-center text-center gap-2 select-none cursor-pointer bg-slate-950/30 py-7">
+						<Icon icon="ph:upload-simple" class="text-4xl text-slate-500 group-hover:scale-110 transition-transform" />
+						<span class="text-xs font-bold text-slate-300">
 							{selectedFile ? selectedFile.name : 'Select or drop a file'}
 						</span>
 						{#if selectedFile}
-							<span class="text-[10px] text-zinc-500 font-mono">({formatBytes(selectedFile.size)})</span>
+							<span class="text-[10px] text-slate-500 font-mono">({formatBytes(selectedFile.size)})</span>
 						{/if}
 						<input type="file" required onchange={handleFileChange} class="absolute inset-0 opacity-0 cursor-pointer w-full h-full" />
 					</div>
 				{:else}
-					<div class="relative border border-zinc-850 hover:border-zinc-800/80 rounded-lg p-5 flex flex-col items-center text-center gap-2 select-none cursor-pointer bg-zinc-950/15 py-4">
-						<span class="text-3xl">📁</span>
-						<span class="text-xs font-bold text-zinc-350">
+					<div class="group relative border border-slate-700/50 hover:border-slate-700/50 rounded-lg p-5 flex flex-col items-center text-center gap-2 select-none cursor-pointer bg-slate-950/30 py-4">
+						<Icon icon="ph:folder-open" class="text-4xl text-slate-500 group-hover:scale-110 transition-transform" />
+						<span class="text-xs font-bold text-slate-300">
 							{selectedFiles && selectedFiles.length > 0 ? `${selectedFiles.length} files selected` : 'Select a directory to import'}
 						</span>
 						<input type="file" required webkitdirectory directory multiple onchange={handleFolderChange} class="absolute inset-0 opacity-0 cursor-pointer w-full h-full" />
@@ -393,14 +394,14 @@
 						type="text" 
 						bind:value={folderName} 
 						placeholder="Custom root directory name (optional)" 
-						class="w-full bg-zinc-950/60 border border-zinc-850 text-xs px-3.5 py-2.5 rounded-lg focus:outline-none focus:border-cyan-500" 
+						class="w-full bg-slate-950/60 border border-slate-700/50 text-xs px-3.5 py-2.5 rounded-lg focus:outline-none focus:border-cyan-500" 
 					/>
 				{/if}
 
 				<button 
 					type="submit" 
 					disabled={(activeUploadTab === 'file' ? !selectedFile : !selectedFiles) || uploadActive}
-					class="w-full py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-600 hover:to-blue-700 disabled:from-zinc-800 disabled:to-zinc-800 text-zinc-950 disabled:text-zinc-500 text-xs font-bold rounded-lg transition-colors shadow-[0_0_15px_rgba(6,182,212,0.15)] disabled:shadow-none"
+					class="w-full py-2.5 bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-800 text-slate-950 disabled:text-slate-500 text-xs font-bold rounded-lg transition-all duration-200 active:scale-[0.98]"
 				>
 					{uploadActive ? 'Processing Ingest...' : 'Ingest to Network'}
 				</button>
@@ -408,11 +409,11 @@
 		</div>
 
 		<!-- Action Panel 2: Fetch CID/MID from Swarm DHT -->
-		<div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 lg:col-span-5 flex flex-col gap-4">
-			<h3 class="font-bold text-xs text-zinc-400 font-mono uppercase tracking-wider border-b border-zinc-850 pb-2">
+		<div class="bg-slate-900 border border-slate-800/80 rounded-xl p-5 lg:col-span-5 flex flex-col gap-4">
+			<h3 class="font-bold text-xs text-slate-400 font-mono uppercase tracking-wider border-b border-slate-700/50 pb-2">
 				Swarm Ingest (Fetch CID)
 			</h3>
-			<p class="text-[11px] text-zinc-500 leading-relaxed font-sans">
+			<p class="text-[11px] text-slate-500 leading-relaxed font-sans">
 				Import content by entering its Content Identifier (MID). Membuss will query Kademlia routing tables and resolve blocks via P2P Memex stream sessions.
 			</p>
 			
@@ -422,11 +423,11 @@
 					bind:value={fetchMIDInput}
 					required
 					placeholder="Enter mem1z... multihash address"
-					class="w-full bg-zinc-950/60 border border-zinc-850 text-xs px-3.5 py-2.5 rounded-lg focus:outline-none focus:border-cyan-500/80 focus:ring-1 focus:ring-cyan-500/20 font-mono"
+					class="w-full bg-slate-950/60 border border-slate-700/50 text-xs px-3.5 py-2.5 rounded-lg focus:outline-none focus:border-cyan-500/80 focus:ring-1 focus:ring-cyan-500/20 font-mono"
 				/>
 				<button 
 					type="submit"
-					class="w-full py-2.5 bg-zinc-800 hover:bg-zinc-700 border border-zinc-750 text-zinc-200 text-xs font-bold rounded-lg transition-colors"
+					class="w-full py-2.5 bg-slate-800 hover:bg-slate-600 border border-slate-700/50 text-slate-200 text-xs font-bold rounded-lg transition-all duration-200 active:scale-[0.98]"
 				>
 					Resolve & Fetch Content
 				</button>
@@ -436,28 +437,28 @@
 
 	<!-- Active resolving background tasks list -->
 	{#if resolvingMIDs.length > 0}
-		<section class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 flex flex-col gap-4">
-			<h3 class="font-bold text-xs text-zinc-400 font-mono uppercase tracking-wider border-b border-zinc-850 pb-1">
+		<section class="bg-slate-900 border border-slate-800/80 rounded-xl p-5 flex flex-col gap-4">
+			<h3 class="font-bold text-xs text-slate-400 font-mono uppercase tracking-wider border-b border-slate-700/50 pb-1">
 				Active DHT Resolving Queue
 			</h3>
 			<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
 				{#each resolvingMIDs as res}
-					<div class="bg-zinc-950/60 border border-zinc-850 rounded-lg p-3 flex flex-col gap-2 font-mono text-[10px] relative">
+					<div class="bg-slate-950/60 border border-slate-700/50 rounded-lg p-3 flex flex-col gap-2 font-mono text-[10px] relative">
 						<button 
 							onclick={() => removeResolving(res.mid)}
-							class="absolute top-2 right-3 text-zinc-650 hover:text-zinc-350 text-xs"
+							class="absolute top-2 right-3 text-slate-600 hover:text-slate-300 text-xs"
 						>
 							✕
 						</button>
 						<div class="flex flex-col">
-							<span class="text-zinc-550 uppercase text-[8px]">Fetching Target</span>
-							<span class="text-zinc-200 font-bold break-all select-all">{res.mid}</span>
+							<span class="text-slate-500 uppercase text-[8px]">Fetching Target</span>
+							<span class="text-slate-200 font-bold break-all select-all">{res.mid}</span>
 						</div>
-						<div class="flex items-center justify-between border-t border-zinc-900/60 pt-2 text-[9px] text-zinc-500">
+						<div class="flex items-center justify-between border-t border-slate-800/40 pt-2 text-[9px] text-slate-500">
 							<span>{res.statusText}</span>
 							<span class="font-bold text-cyan-400">{res.percent}%</span>
 						</div>
-						<div class="w-full h-1 bg-zinc-900 rounded-full overflow-hidden">
+						<div class="w-full h-1 bg-slate-900 rounded-full overflow-hidden">
 							<div class="h-full bg-cyan-400 transition-all duration-300" style={`width: ${res.percent}%`}></div>
 						</div>
 					</div>
@@ -467,14 +468,14 @@
 	{/if}
 
 	<!-- File List Toolbar (Search + Filters) -->
-	<section class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 flex flex-col gap-5">
-		<div class="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 border-b border-zinc-850 pb-4">
+	<section class="bg-slate-900 border border-slate-800/80 rounded-xl p-5 flex flex-col gap-5">
+		<div class="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 border-b border-slate-700/50 pb-4">
 			<!-- Tab filters -->
-			<div class="flex items-center gap-1.5 p-1 bg-zinc-950/80 border border-zinc-850/60 rounded-lg">
+			<div class="flex items-center gap-1.5 p-1 bg-slate-950/80 border border-slate-700/50 rounded-lg">
 				<button 
 					onclick={() => filterStatus = 'all'} 
 					class={`px-3 py-1.5 rounded-md text-[10px] font-bold font-mono tracking-wider uppercase transition-colors ${
-						filterStatus === 'all' ? 'bg-zinc-850 text-cyan-400 border border-zinc-800' : 'text-zinc-500 hover:text-zinc-350'
+						filterStatus === 'all' ? 'bg-slate-800/60 text-cyan-400 border border-slate-800/80' : 'text-slate-500 hover:text-slate-300'
 					}`}
 				>
 					All Files
@@ -482,7 +483,7 @@
 				<button 
 					onclick={() => filterStatus = 'sealed'} 
 					class={`px-3 py-1.5 rounded-md text-[10px] font-bold font-mono tracking-wider uppercase transition-colors ${
-						filterStatus === 'sealed' ? 'bg-zinc-850 text-cyan-400 border border-zinc-800' : 'text-zinc-500 hover:text-zinc-350'
+						filterStatus === 'sealed' ? 'bg-slate-800/60 text-cyan-400 border border-slate-800/80' : 'text-slate-500 hover:text-slate-300'
 					}`}
 				>
 					Pinned / Sealed
@@ -490,7 +491,7 @@
 				<button 
 					onclick={() => filterStatus = 'unsealed'} 
 					class={`px-3 py-1.5 rounded-md text-[10px] font-bold font-mono tracking-wider uppercase transition-colors ${
-						filterStatus === 'unsealed' ? 'bg-zinc-850 text-cyan-400 border border-zinc-800' : 'text-zinc-500 hover:text-zinc-350'
+						filterStatus === 'unsealed' ? 'bg-slate-800/60 text-cyan-400 border border-slate-800/80' : 'text-slate-500 hover:text-slate-300'
 					}`}
 				>
 					Unpinned
@@ -503,10 +504,10 @@
 					type="text"
 					bind:value={searchQuery}
 					placeholder="Filter by name or MID..."
-					class="w-full bg-zinc-950/60 border border-zinc-850 text-xs px-3.5 py-2 rounded-lg focus:outline-none focus:border-cyan-500"
+					class="w-full bg-slate-950/60 border border-slate-700/50 text-xs px-3.5 py-2 rounded-lg focus:outline-none focus:border-cyan-500"
 				/>
 				{#if searchQuery}
-					<button onclick={() => searchQuery = ''} class="absolute right-3 top-2 text-zinc-500 hover:text-zinc-300 text-xs font-bold">✕</button>
+					<button onclick={() => searchQuery = ''} class="absolute right-3 top-2 text-slate-500 hover:text-slate-300 text-xs font-bold">✕</button>
 				{/if}
 			</div>
 		</div>
@@ -514,15 +515,15 @@
 		<!-- File List Table -->
 		{#if loading}
 			<div class="space-y-3 animate-pulse py-4">
-				<div class="h-8 bg-zinc-850 rounded w-full"></div>
-				<div class="h-8 bg-zinc-850 rounded w-full"></div>
-				<div class="h-8 bg-zinc-850 rounded w-full"></div>
+				<div class="h-8 bg-slate-800/60 rounded w-full"></div>
+				<div class="h-8 bg-slate-800/60 rounded w-full"></div>
+				<div class="h-8 bg-slate-800/60 rounded w-full"></div>
 			</div>
 		{:else if filteredFiles && filteredFiles.length > 0}
 			<div class="overflow-x-auto">
 				<table class="w-full text-left border-collapse text-xs">
 					<thead>
-						<tr class="border-b border-zinc-800/60 text-zinc-500 font-mono text-[10px] uppercase bg-zinc-950/20">
+						<tr class="border-b border-slate-800/80 text-slate-500 font-mono text-[10px] uppercase bg-slate-950/20">
 							<th class="py-2.5 px-4 font-semibold">Name</th>
 							<th class="py-2.5 px-4 font-semibold w-1/3">Content Address (MID)</th>
 							<th class="py-2.5 px-4 font-semibold w-24">Size</th>
@@ -530,16 +531,20 @@
 							<th class="py-2.5 px-4 font-semibold text-right">Actions</th>
 						</tr>
 					</thead>
-					<tbody class="divide-y divide-zinc-850/40">
+					<tbody class="divide-y divide-slate-800/60">
 						{#each filteredFiles as file (file.mid)}
-							<tr class="hover:bg-zinc-850/20 transition-colors group">
+							<tr class="hover:bg-slate-700/30 transition-colors group">
 								<!-- Icon + Name -->
 								<td class="py-3 px-4">
 									<div class="flex items-center gap-2">
-										<span class="text-sm select-none">{file.type === 'dir' ? '📁' : '📄'}</span>
+										{#if file.type === 'dir'}
+											<Icon icon="ph:folder" class="w-4 h-4 text-slate-400" />
+										{:else}
+											<Icon icon="ph:file-text" class="w-4 h-4 text-slate-400" />
+										{/if}
 										<a 
 											href={`${base}/mid/${file.mid}`} 
-											class="font-bold text-zinc-200 hover:text-cyan-400 hover:underline break-all truncate max-w-[200px]"
+											class="font-bold text-slate-200 hover:text-cyan-400 hover:underline break-all truncate max-w-[200px]"
 											title={file.name}
 										>
 											{file.name}
@@ -548,25 +553,25 @@
 								</td>
 
 								<!-- MID -->
-								<td class="py-3 px-4 font-mono text-zinc-500">
+								<td class="py-3 px-4 font-mono text-slate-500">
 									<a href={`${base}/mid/${file.mid}`} class="hover:text-cyan-400 hover:underline">
 										{file.mid}
 									</a>
 								</td>
 
 								<!-- Size -->
-								<td class="py-3 px-4 font-mono text-zinc-400">
+								<td class="py-3 px-4 font-mono text-slate-400">
 									{file.type === 'dir' ? '—' : formatBytes(file.size)}
 								</td>
 
 								<!-- Status Badges -->
 								<td class="py-3 px-4 text-center">
 									{#if file.sealed}
-										<span class="px-2 py-0.5 rounded text-[9px] font-bold font-mono bg-emerald-950/40 text-emerald-400 border border-emerald-800/30">
+										<span class="px-2 py-0.5 rounded text-[9px] font-bold font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
 											PINNED
 										</span>
 									{:else}
-										<span class="px-2 py-0.5 rounded text-[9px] font-bold font-mono bg-zinc-800 text-zinc-500 border border-zinc-750">
+										<span class="px-2 py-0.5 rounded text-[9px] font-bold font-mono bg-slate-800 text-slate-500 border border-slate-700/50">
 											UNPINNED
 										</span>
 									{/if}
@@ -596,7 +601,7 @@
 										<!-- View details -->
 										<a 
 											href={`${base}/mid/${file.mid}`} 
-											class="text-zinc-400 hover:text-zinc-200 font-bold hover:underline"
+											class="text-slate-400 hover:text-slate-200 font-bold hover:underline"
 										>
 											Inspect
 										</a>
@@ -609,9 +614,9 @@
 			</div>
 		{:else}
 			<div class="py-16 text-center flex flex-col items-center justify-center gap-3">
-				<span class="text-3xl text-zinc-650">🗂️</span>
-				<div class="text-sm font-semibold text-zinc-450">No Files Match Current Filters</div>
-				<p class="text-xs text-zinc-550 max-w-xs leading-relaxed">
+				<Icon icon="ph:files" class="text-4xl text-slate-600" />
+				<div class="text-sm font-semibold text-slate-400">No Files Match Current Filters</div>
+				<p class="text-xs text-slate-500 max-w-xs leading-relaxed">
 					Refine your search parameters or check other tabs to locate your Content IDs.
 				</p>
 			</div>
@@ -622,10 +627,10 @@
 <!-- Upload Progress Widget Overlay -->
 {#if uploadActive}
 	<div class="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-		<div class="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-md shadow-2xl overflow-hidden flex flex-col">
+		<div class="bg-slate-900 border border-slate-800/80 rounded-xl w-full max-w-md shadow-2xl overflow-hidden flex flex-col">
 			<!-- Header -->
-			<div class="px-5 py-4 bg-zinc-950/40 border-b border-zinc-800/80 flex items-center justify-between">
-				<div class="flex items-center gap-2 text-xs font-bold font-mono text-zinc-300">
+			<div class="px-5 py-4 bg-slate-950/40 border-b border-slate-800/80 flex items-center justify-between">
+				<div class="flex items-center gap-2 text-xs font-bold font-mono text-slate-300">
 					{#if uploadPhase === 'uploading'}
 						<div class="w-3 h-3 border border-cyan-500/35 border-t-cyan-400 rounded-full animate-spin"></div>
 					{:else if uploadPhase === 'sealing'}
@@ -634,7 +639,7 @@
 					<span>{uploadStatusText}</span>
 				</div>
 				{#if uploadPhase === 'uploading'}
-					<button onclick={cancelUpload} class="text-[10px] text-zinc-550 hover:text-red-400 border border-zinc-800 px-2 py-0.5 rounded bg-zinc-950/40 font-mono">
+					<button onclick={cancelUpload} class="text-[10px] text-slate-500 hover:text-red-400 border border-slate-800/80 px-2 py-0.5 rounded bg-slate-950/40 font-mono">
 						Cancel
 					</button>
 				{/if}
@@ -647,13 +652,13 @@
 					<span class="text-3xl font-black text-cyan-400 leading-none">
 						{uploadPercent}%
 					</span>
-					<span class="text-[10px] text-zinc-550">
+					<span class="text-[10px] text-slate-500">
 						{formatBytes(loadedBytes)} / {formatBytes(totalBytes)}
 					</span>
 				</div>
 
 				<!-- Bar -->
-				<div class="w-full h-1.5 rounded-full bg-zinc-950 border border-zinc-850 overflow-hidden">
+				<div class="w-full h-1.5 rounded-full bg-slate-950 border border-slate-700/50 overflow-hidden">
 					<div 
 						class="h-full bg-gradient-to-r from-cyan-500 to-blue-500 transition-all duration-300"
 						style={`width: ${uploadPercent}%`}
@@ -662,14 +667,14 @@
 
 				<!-- Files list section -->
 				<div class="flex flex-col gap-1.5 mt-2">
-					<span class="text-[9px] text-zinc-500 uppercase tracking-wide">
+					<span class="text-[9px] text-slate-500 uppercase tracking-wide">
 						Uploading {uploadFileList.length} items
 					</span>
-					<div class="bg-zinc-950/80 border border-zinc-850 rounded-lg max-h-24 overflow-y-auto divide-y divide-zinc-900/40 p-2 text-[9px] text-zinc-500">
+					<div class="bg-slate-950/80 border border-slate-700/50 rounded-lg max-h-24 overflow-y-auto divide-y divide-slate-800/40 p-2 text-[9px] text-slate-500">
 						{#each uploadFileList as file}
 							<div class="py-1 px-1 flex justify-between gap-4">
-								<span class="truncate text-zinc-400 select-all">{file.name}</span>
-								<span class="shrink-0 text-zinc-650">{formatBytes(file.size)}</span>
+								<span class="truncate text-slate-400 select-all">{file.name}</span>
+								<span class="shrink-0 text-slate-600">{formatBytes(file.size)}</span>
 							</div>
 						{/each}
 					</div>
