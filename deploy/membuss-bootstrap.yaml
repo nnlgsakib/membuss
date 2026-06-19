@@ -1,0 +1,63 @@
+# Full bootstrap node configuration.
+#
+# Every subsystem is enabled: anchor engine, relay service,
+# DHT server mode, WebSocket transport, geolocation, mDNS,
+# bloom filters, and metrics. This is the "kitchen sink"
+# config for running a maximum-capability node that can serve
+# as a bootstrap peer for the network.
+
+# --- Networking ---
+listen_addrs:
+  - /ip4/0.0.0.0/tcp/4001
+  - /ip4/0.0.0.0/udp/4001/quic-v1
+  - /ip4/0.0.0.0/tcp/4002/ws
+
+bootstrap_peers: []
+
+# --- Storage ---
+data_dir: /var/lib/membuss
+
+# --- HTTP listeners ---
+gateway_addr: 0.0.0.0:8080
+api_addr:     0.0.0.0:5001
+
+# --- gRPC ---
+grpc_addr: 0.0.0.0:50051
+
+# --- Anchor engine ---
+# Full-sync mode: mirrors all announced content so it stays
+# available when original providers go offline.
+anchor_mode: true
+
+# --- Logging ---
+log_level: info
+
+# --- DHT ---
+# Server mode: full DHT participation, answers queries from
+# other peers, stores provider records.
+dht_mode: server
+dht_optimistic_provide: true
+
+# --- Relay service (circuit v2) ---
+# Accepts and forwards relay traffic for NATed peers.
+# A bootstrap node should always be a relay.
+relay_service: true
+relay_max_conns: 256
+relay_max_reservations: 256
+relay_bandwidth_mb: 64
+
+# --- NAT traversal ---
+nat_wait_seconds: 10
+
+# --- Bloom filter ---
+bloom_capacity: 10000000
+bloom_fp_rate: 0.001
+
+# --- Geolocation ---
+enable_geolocation: true
+
+# --- Metrics ---
+metrics_enabled: true
+
+# --- MID format ---
+mid_version: v1
