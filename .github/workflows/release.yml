@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-frontend:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: explorer-web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: explorer-web
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: explorer-web
+
+      - name: Upload frontend build
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: gateway/explorer/web/dist
+          retention-days: 1
+
+  build-binaries:
+    name: Build Go Binaries
+    needs: build-frontend
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            ext: ""
+            archive: tar.gz
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+            archive: zip
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download frontend build
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: gateway/explorer/web/dist
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Build daemon
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -trimpath -ldflags "-s -w -X github.com/nnlgsakib/membuss/rpc/server.Build=${{ github.ref_name }}" -o bin/membuss${{ matrix.ext }} ./cmd/membuss
+
+      - name: Build CLI
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -trimpath -ldflags "-s -w" -o bin/membuss-cli${{ matrix.ext }} ./cmd/membuss-cli
+
+      - name: Package binaries (zip)
+        if: matrix.archive == 'zip'
+        run: |
+          cd bin
+          zip -r ../membuss-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}.zip membuss${{ matrix.ext }} membuss-cli${{ matrix.ext }}
+
+      - name: Package binaries (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          cd bin
+          tar -czf ../membuss-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz membuss${{ matrix.ext }} membuss-cli${{ matrix.ext }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            membuss-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
+          retention-days: 1
+
+  release:
+    name: Create Release
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            membuss-${{ github.ref_name }}-*.zip
+            membuss-${{ github.ref_name }}-*.tar.gz
+          draft: false
+          prerelease: false
+          generate_release_notes: true
