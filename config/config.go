@@ -21,6 +21,10 @@ type Config struct {
 	// ListenAddrs are the libp2p multiaddrs the host binds to.
 	ListenAddrs []string `yaml:"listen_addrs"`
 
+	// AnnounceAddrs are the multiaddrs this node will advertise to the P2P
+	// network instead of (or in addition to) its local listen addresses.
+	AnnounceAddrs []string `yaml:"announce_addrs"`
+
 	// BootstrapPeers are the libp2p peer IDs (as multiaddrs) the DHT
 	// attempts to connect to on startup. May be empty for a fresh
 	// testnet or single-node run.
@@ -184,6 +188,7 @@ func Default() *Config {
 			"/ip4/0.0.0.0/udp/4001/quic-v1",
 			"/ip4/0.0.0.0/tcp/4002/ws",
 		},
+		AnnounceAddrs:     []string{},
 		BootstrapPeers:    []string{},
 		DataDir:           "./data",
 		GatewayAddr:       "127.0.0.1:8080",

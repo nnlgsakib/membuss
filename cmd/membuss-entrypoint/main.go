@@ -139,6 +139,9 @@ func renderConfigToDataDir() (string, error) {
 	if v := os.Getenv("MEMBUSS_LISTEN_ADDRS"); v != "" {
 		out = replaceList(out, "listen_addrs", splitCSV(v))
 	}
+	if v := os.Getenv("MEMBUSS_ANNOUNCE_ADDRS"); v != "" {
+		out = replaceList(out, "announce_addrs", splitCSV(v))
+	}
 	if v := os.Getenv("MEMBUSS_BOOTSTRAP_PEERS"); v != "" {
 		out = replaceList(out, "bootstrap_peers", splitCSV(v))
 	}

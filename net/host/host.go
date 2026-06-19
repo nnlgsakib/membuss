@@ -44,6 +44,7 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	libp2pws "github.com/libp2p/go-libp2p/p2p/transport/websocket"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
+	ma "github.com/multiformats/go-multiaddr"
 )
 
 // IdentityFilename is the on-disk filename for the Ed25519
@@ -60,6 +61,9 @@ type Config struct {
 	// ListenAddrs is the set of libp2p multiaddrs the host
 	// binds to. The defaults are TCP and QUIC on 0.0.0.0:4001.
 	ListenAddrs []string
+
+	// AnnounceAddrs is the set of multiaddrs the host advertises.
+	AnnounceAddrs []string
 
 	// DataDir is the directory holding the persistent node
 	// identity. Required unless InProcess is true.
@@ -226,6 +230,20 @@ func NewHost(cfg Config) (*Host, error) {
 	opts = append(opts, natOpts...)
 	if cfg.UserAgent != "" {
 		opts = append(opts, libp2p.UserAgent(cfg.UserAgent))
+	}
+
+	if len(cfg.AnnounceAddrs) > 0 {
+		announceAddrs := make([]ma.Multiaddr, 0, len(cfg.AnnounceAddrs))
+		for _, a := range cfg.AnnounceAddrs {
+			maddr, err := ma.NewMultiaddr(a)
+			if err != nil {
+				return nil, fmt.Errorf("host: invalid announce_addr %q: %w", a, err)
+			}
+			announceAddrs = append(announceAddrs, maddr)
+		}
+		opts = append(opts, libp2p.AddrsFactory(func([]ma.Multiaddr) []ma.Multiaddr {
+			return announceAddrs
+		}))
 	}
 
 	h, err := libp2p.New(opts...)

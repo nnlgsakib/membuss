@@ -210,6 +210,7 @@ func main() {
 
 	hostCfg := host.Config{
 		ListenAddrs:        cfg.ListenAddrs,
+		AnnounceAddrs:      cfg.AnnounceAddrs,
 		DataDir:            cfg.DataDir,
 		UserAgent:          "membuss/" + *build,
 		StaticRelays:       bootstrapPeers,
