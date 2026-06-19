@@ -42,6 +42,7 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/security/noise"
 	libp2pquic "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
+	libp2pws "github.com/libp2p/go-libp2p/p2p/transport/websocket"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
 )
 
@@ -195,6 +196,7 @@ func NewHost(cfg Config) (*Host, error) {
 		listen = []string{
 			"/ip4/0.0.0.0/tcp/4001",
 			"/ip4/0.0.0.0/udp/4001/quic-v1",
+			"/ip4/0.0.0.0/tcp/4002/ws",
 		}
 	}
 
@@ -217,6 +219,7 @@ func NewHost(cfg Config) (*Host, error) {
 		// resource manager / connection manager itself.
 		libp2p.Transport(tcp.NewTCPTransport),
 		libp2p.Transport(libp2pquic.NewTransport),
+		libp2p.Transport(libp2pws.New),
 		libp2p.Security(noise.ID, noise.New),
 		libp2p.Muxer(yamux.ID, yamux.DefaultTransport),
 	}

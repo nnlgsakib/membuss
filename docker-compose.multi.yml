@@ -14,7 +14,7 @@ services:
     entrypoint: ["/usr/local/bin/membuss-entrypoint"]
     command: ["/usr/local/bin/membuss", "-datadir", "/data/membuss"]
     environment:
-      MEMBUSS_LISTEN_ADDRS: /ip4/0.0.0.0/tcp/4001,/ip4/0.0.0.0/udp/5001/quic-v1
+      MEMBUSS_LISTEN_ADDRS: /ip4/0.0.0.0/tcp/4001,/ip4/0.0.0.0/udp/5001/quic-v1,/ip4/0.0.0.0/tcp/4002/ws
       MEMBUSS_GATEWAY_ADDR: "0.0.0.0:8080"
       MEMBUSS_API_ADDR: "0.0.0.0:5001"
       MEMBUSS_GRPC_ADDR: "0.0.0.0:50051"
@@ -27,6 +27,7 @@ services:
       - membuss-data-1:/data/membuss
     ports:
       - "14001:4001"
+      - "14101:4002"
       - "15001:5001"
       - "18080:8080"
       - "15051:50051"
@@ -39,7 +40,7 @@ services:
     entrypoint: ["/usr/local/bin/membuss-entrypoint"]
     command: ["/usr/local/bin/membuss", "-datadir", "/data/membuss"]
     environment:
-      MEMBUSS_LISTEN_ADDRS: /ip4/0.0.0.0/tcp/4001,/ip4/0.0.0.0/udp/5001/quic-v1
+      MEMBUSS_LISTEN_ADDRS: /ip4/0.0.0.0/tcp/4001,/ip4/0.0.0.0/udp/5001/quic-v1,/ip4/0.0.0.0/tcp/4002/ws
       MEMBUSS_GATEWAY_ADDR: "0.0.0.0:8080"
       MEMBUSS_API_ADDR: "0.0.0.0:5001"
       MEMBUSS_GRPC_ADDR: "0.0.0.0:50051"
@@ -54,6 +55,7 @@ services:
       - membuss-data-2:/data/membuss
     ports:
       - "14002:4001"
+      - "14102:4002"
       - "15002:5001"
       - "18081:8080"
       - "15052:50051"
@@ -68,7 +70,7 @@ services:
     entrypoint: ["/usr/local/bin/membuss-entrypoint"]
     command: ["/usr/local/bin/membuss", "-datadir", "/data/membuss"]
     environment:
-      MEMBUSS_LISTEN_ADDRS: /ip4/0.0.0.0/tcp/4001,/ip4/0.0.0.0/udp/5001/quic-v1
+      MEMBUSS_LISTEN_ADDRS: /ip4/0.0.0.0/tcp/4001,/ip4/0.0.0.0/udp/5001/quic-v1,/ip4/0.0.0.0/tcp/4002/ws
       MEMBUSS_GATEWAY_ADDR: "0.0.0.0:8080"
       MEMBUSS_API_ADDR: "0.0.0.0:5001"
       MEMBUSS_GRPC_ADDR: "0.0.0.0:50051"
@@ -83,6 +85,7 @@ services:
       - membuss-data-3:/data/membuss
     ports:
       - "14003:4001"
+      - "14103:4002"
       - "15003:5001"
       - "18082:8080"
       - "15053:50051"

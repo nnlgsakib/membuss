@@ -182,6 +182,7 @@ func Default() *Config {
 		ListenAddrs: []string{
 			"/ip4/0.0.0.0/tcp/4001",
 			"/ip4/0.0.0.0/udp/4001/quic-v1",
+			"/ip4/0.0.0.0/tcp/4002/ws",
 		},
 		BootstrapPeers:    []string{},
 		DataDir:           "./data",

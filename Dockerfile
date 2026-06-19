@@ -80,7 +80,7 @@ VOLUME ["/var/lib/membuss"]
 # libp2p: 4001 tcp + 4001 udp/quic
 # gRPC:    50051
 # HTTP:    8080 (gateway), 5001 (node api)
-EXPOSE 4001 4001/udp 5001 8080 50051
+EXPOSE 4001 4001/udp 4002 5001 8080 50051
 
 # The distroless image already runs as uid 65532 (nonroot).
 # The data volume must be writable by that uid; docker-compose
