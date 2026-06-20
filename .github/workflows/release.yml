@@ -187,6 +187,15 @@ jobs:
       - name: Install Wails
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      - name: Verify NSIS install
+        shell: bash
+        run: |
+          ls "/c/Program Files (x86)/NSIS/makensis.exe" || (echo "makensis not found at expected path" && exit 1)
+          "/c/Program Files (x86)/NSIS/makensis.exe" /VERSION || true
+
       - name: Add NSIS to PATH
         run: echo "C:\Program Files (x86)\NSIS" >> $env:GITHUB_PATH
 
