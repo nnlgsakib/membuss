@@ -74,7 +74,6 @@ func (cp *ContentPublisher) Stop() {
 }
 
 func (cp *ContentPublisher) loop(ctx context.Context) {
-	defer close(cp.doneCh)
 	t := time.NewTicker(5 * time.Minute)
 	defer t.Stop()
 	for {

@@ -28,6 +28,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -105,6 +106,17 @@ func main() {
 	}
 	logger := logging.New(os.Stdout, cfg.LogLevel)
 	slog.SetDefault(logger)
+
+	// Check and download the GeoIP database before initializing the main engine
+	var geoDB string
+	if cfg.EnableGeolocation {
+		var err error
+		geoDB, err = ensureGeoIPDatabase(cfg, logger)
+		if err != nil {
+			logger.Warn("geo: database setup failed, running without geolocation", "err", err.Error())
+		}
+	}
+
 	banner(cfg, *cfgPath, *inMemory, *noAnchor)
 
 	// Optional Prometheus instrumentation. Disabled via
@@ -450,20 +462,7 @@ func main() {
 	fmt.Fprintf(os.Stdout, "  grpc_addr:      %s\n", cfg.GRPCAddr)
 	// 9) Mem-Gate: public HTTP gateway + CDN edge.
 	var geo *explorerPkg.GeoResolver
-	if cfg.EnableGeolocation {
-		geoDB := cfg.GeolocationDB
-		if geoDB == "" {
-			// Check well-known Docker path first, then data dir.
-			for _, p := range []string{
-				filepath.Join("/etc/membuss", "GeoLite2-City.mmdb"),
-				filepath.Join(cfg.DataDir, "GeoLite2-City.mmdb"),
-			} {
-				if _, err := os.Stat(p); err == nil {
-					geoDB = p
-					break
-				}
-			}
-		}
+	if cfg.EnableGeolocation && geoDB != "" {
 		geo = explorerPkg.NewGeoResolver(geoDB)
 	}
 	gateSrv, err := startGateway(cfg.GatewayAddr, newMemgateAdapter(backend), newExplorerAdapter(backend, cfg.AnchorMode, kr, memnsRes), geo, cfg.GatewayRateLimitPerMin, cfg.GatewayTLS, memnsRes, cfg.DataDir)
@@ -793,4 +792,118 @@ func (h *httpServer) ShutdownCtx(ctx context.Context) error {
 		return nil
 	}
 	return h.srv.Shutdown(ctx)
+}
+
+// ensureGeoIPDatabase checks if the GeoLite2-City.mmdb database exists at
+// any of the checked paths, and if missing, attempts to download it from the
+// public mirror to the data directory.
+func ensureGeoIPDatabase(cfg *config.Config, logger *slog.Logger) (string, error) {
+	if !cfg.EnableGeolocation {
+		return "", nil
+	}
+
+	// 1. Check existing locations
+	var pathsToCheck []string
+	if cfg.GeolocationDB != "" {
+		pathsToCheck = append(pathsToCheck, cfg.GeolocationDB)
+	}
+	// Add platform-specific system paths
+	if pd := os.Getenv("ProgramData"); pd != "" {
+		pathsToCheck = append(pathsToCheck, filepath.Join(pd, "Membuss", "GeoLite2-City.mmdb"))
+	} else {
+		pathsToCheck = append(pathsToCheck, filepath.Join("/etc/membuss", "GeoLite2-City.mmdb"))
+	}
+	pathsToCheck = append(pathsToCheck, filepath.Join(cfg.DataDir, "GeoLite2-City.mmdb"))
+
+	for _, p := range pathsToCheck {
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+	}
+
+	// 2. Database is missing, download it
+	destPath := filepath.Join(cfg.DataDir, "GeoLite2-City.mmdb")
+	logger.Info("geo: database missing, downloading...", "dest", destPath)
+
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		return "", fmt.Errorf("create data dir: %w", err)
+	}
+
+	// Download to a temporary file in the same directory to allow atomic rename
+	tmpPath := destPath + ".tmp"
+	out, err := os.Create(tmpPath)
+	if err != nil {
+		return "", fmt.Errorf("create temp file: %w", err)
+	}
+	defer func() {
+		out.Close()
+		os.Remove(tmpPath) // safe to call if renamed or already closed
+	}()
+
+	url := "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb"
+	
+	// Create client with timeout
+	client := &http.Client{
+		Timeout: 5 * time.Minute,
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), "GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	// Read with progress logging
+	totalBytes := resp.ContentLength
+	var downloaded int64
+	buffer := make([]byte, 32*1024)
+	lastLog := time.Now()
+
+	for {
+		n, readErr := resp.Body.Read(buffer)
+		if n > 0 {
+			if _, writeErr := out.Write(buffer[:n]); writeErr != nil {
+				return "", fmt.Errorf("write temp file: %w", writeErr)
+			}
+			downloaded += int64(n)
+
+			// Log progress at most once every 3 seconds
+			if time.Since(lastLog) > 3*time.Second {
+				if totalBytes > 0 {
+					pct := (float64(downloaded) / float64(totalBytes)) * 100
+					logger.Info("geo: downloading database", "progress", fmt.Sprintf("%.1f%%", pct), "downloaded_bytes", downloaded, "total_bytes", totalBytes)
+				} else {
+					logger.Info("geo: downloading database", "downloaded_bytes", downloaded)
+				}
+				lastLog = time.Now()
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return "", fmt.Errorf("read response body: %w", readErr)
+		}
+	}
+
+	// Close file explicitly before renaming
+	if err := out.Close(); err != nil {
+		return "", fmt.Errorf("close temp file: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		return "", fmt.Errorf("rename temp file: %w", err)
+	}
+
+	logger.Info("geo: database downloaded successfully", "path", destPath)
+	return destPath, nil
 }
