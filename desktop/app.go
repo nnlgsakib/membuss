@@ -403,8 +403,8 @@ func (a *App) UpgradeBinaries() error {
 	// 1. Stop the node and force-kill system-wide to ensure files are not locked
 	wailsRuntime.LogInfo(a.ctx, "stopping node and force killing processes before upgrading...")
 	_ = a.daemonManager.Stop()
-	_ = killProcess("membuss")
-	_ = killProcess("membuss-cli")
+	_ = killProcess("membuss*")
+	_ = killProcess("membuss-cli*")
 	time.Sleep(1 * time.Second)
 
 	// 2. Remove old binaries
@@ -472,8 +472,8 @@ func (a *App) IsNodeRunningSystemWide() bool {
 func (a *App) ForceKillNode() error {
 	wailsRuntime.LogInfo(a.ctx, "force killing node daemon processes...")
 	_ = a.daemonManager.Stop()
-	_ = killProcess("membuss")
-	_ = killProcess("membuss-cli")
+	_ = killProcess("membuss*")
+	_ = killProcess("membuss-cli*")
 	time.Sleep(500 * time.Millisecond)
 	return nil
 }
@@ -529,12 +529,12 @@ func isProcessRunning(name string) bool {
 func killProcess(name string) error {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		if !strings.HasSuffix(name, ".exe") {
+		if !strings.HasSuffix(name, ".exe") && !strings.Contains(name, "*") {
 			name += ".exe"
 		}
 		cmd = exec.Command("taskkill", "/F", "/IM", name)
 	} else {
-		cmd = exec.Command("pkill", "-9", "-x", name)
+		cmd = exec.Command("pkill", "-9", "-f", name)
 	}
 	hideConsoleWindow(cmd)
 	return cmd.Run()

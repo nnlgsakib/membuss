@@ -471,6 +471,9 @@ func SaveYamlConfig(dataDir string, cfg map[string]any) error {
 	
 	// Set default data_dir in config.yaml to target directory
 	cfg["data_dir"] = filepath.ToSlash(dataDir)
+	if geo, ok := cfg["geolocation_db"].(string); ok {
+		cfg["geolocation_db"] = filepath.ToSlash(geo)
+	}
 
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
