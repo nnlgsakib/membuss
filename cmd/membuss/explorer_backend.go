@@ -28,6 +28,7 @@ import (
 	"github.com/nnlgsakib/membuss/core/store"
 	explorer "github.com/nnlgsakib/membuss/gateway/explorer"
 	"github.com/nnlgsakib/membuss/gateway/memgate"
+	"github.com/nnlgsakib/membuss/core/version"
 	"github.com/nnlgsakib/membuss/net/memex"
 	membusspb "github.com/nnlgsakib/membuss/proto"
 )
@@ -407,15 +408,14 @@ func (a *explorerAdapter) LocalAddrs(ctx context.Context) []string {
 // NodeVersion returns the version + build string for the
 // local node. Build is the value passed via --build.
 func (a *explorerAdapter) NodeVersion(ctx context.Context) (string, string) {
-	build := ""
-	if a.b.herald != nil {
-		// The herald holds no build string, but the gRPC
-		// server does. We expose a free-form "dev" label
-		// here; the daemon can plumb a real value through
-		// later if needed.
-		_ = peer.ID("") // silence unused import when a.b.anchor is nil
+	commit := version.GitCommit
+	if len(commit) > 7 {
+		commit = commit[:7]
 	}
-	return "0.1.0", build
+	if commit == "" {
+		commit = "dev"
+	}
+	return version.Version, commit
 }
 
 // Uptime returns the time since the daemon started.

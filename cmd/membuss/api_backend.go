@@ -21,6 +21,7 @@ import (
 	"github.com/nnlgsakib/membuss/core/memfs"
 	"github.com/nnlgsakib/membuss/core/mid"
 	"github.com/nnlgsakib/membuss/core/store"
+	"github.com/nnlgsakib/membuss/core/version"
 )
 
 // apiAdapter wraps daemonBackend to satisfy api.Backend.
@@ -174,8 +175,8 @@ func (a *apiAdapter) NodeInfo() api.NodeInfo {
 	return api.NodeInfo{
 		PeerID:  peerIDString(b.host),
 		Addrs:   addrs,
-		Version: "",
-		Build:   "",
+		Version: version.Version,
+		Build:   version.String(),
 	}
 }
 

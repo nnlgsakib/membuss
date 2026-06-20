@@ -44,9 +44,14 @@ COMPOSE       ?= docker compose
         docker-build docker-run docker-stop docker-logs docker-push \
         docker-compose-up docker-compose-down docker-compose-logs
 
+# Dynamic versioning linker flags
+GIT_COMMIT := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo unknown)
+LDFLAGS    := -ldflags "-X github.com/nnlgsakib/membuss/core/version.GitCommit=$(GIT_COMMIT) -X github.com/nnlgsakib/membuss/core/version.BuildTime=$(BUILD_TIME)"
+
 build:
-	$(GO) build -o $(DAEMON_BIN)  ./cmd/membuss
-	$(GO) build -o $(CLI_BIN)     ./cmd/membuss-cli
+	$(GO) build $(LDFLAGS) -o $(DAEMON_BIN)  ./cmd/membuss
+	$(GO) build $(LDFLAGS) -o $(CLI_BIN)     ./cmd/membuss-cli
 
 proto:
 ifeq ($(OS),Windows_NT)
@@ -82,7 +87,10 @@ clean:
 # multi-stage Dockerfile in the repo root. The build-arg BUILDDATE
 # is propagated to the image label so CI builds can be traced.
 docker-build:
-	$(DOCKER) build -t $(IMAGE) --build-arg BUILDDATE="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" .
+	$(DOCKER) build -t $(IMAGE) \
+		--build-arg BUILDDATE="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+		--build-arg GIT_COMMIT="$(GIT_COMMIT)" \
+		--build-arg BUILD_TIME="$(BUILD_TIME)" .
 
 # docker-run brings up a one-off container with the same port and
 # volume layout that docker-compose.yml describes, but without

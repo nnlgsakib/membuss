@@ -28,6 +28,7 @@ import (
 
 	"github.com/nnlgsakib/membuss/config"
 	"github.com/nnlgsakib/membuss/core/memlink"
+	"github.com/nnlgsakib/membuss/core/version"
 	membusspb "github.com/nnlgsakib/membuss/proto"
 )
 
@@ -88,6 +89,7 @@ Run "membuss-cli init" first to set up the data directory.`,
 		newInitCmd(),
 		newMemNSCmd(),
 		newKeyRingCmd(),
+		newVersionCmd(),
 	)
 	return root
 }
@@ -524,6 +526,32 @@ func newPingCmd() *cobra.Command {
 				}
 				return tw.Flush()
 			})
+		},
+	}
+}
+
+func newVersionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print client and server version information",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Fprintln(cmd.OutOrStdout(), "Client:")
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", version.String())
+
+			fmt.Fprintln(cmd.OutOrStdout(), "Server:")
+			err := withConn(func(_ membusspb.MembussNodeClient, nc membusspb.NodeClient) error {
+				ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Second)
+				defer cancel()
+				resp, err := nc.Ping(ctx, &membusspb.PingRequest{Message: ""})
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "  membuss daemon version: %s\n", resp.Build)
+				return nil
+			})
+			if err != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "  error contacting daemon: %v\n", err)
+			}
 		},
 	}
 }

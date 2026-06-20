@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/nnlgsakib/membuss/core/version"
 	membusspb "github.com/nnlgsakib/membuss/proto"
 
 	"google.golang.org/grpc"
@@ -151,7 +152,11 @@ func (s *Server) Register(g *grpc.Server) {
 
 // Ping is a connectivity probe.
 func (s *Server) Ping(ctx context.Context, req *membusspb.PingRequest) (*membusspb.PingResponse, error) {
-	return &membusspb.PingResponse{Message: req.GetMessage(), Build: Build}, nil
+	b := Build
+	if b == "dev" || b == "" {
+		b = version.String()
+	}
+	return &membusspb.PingResponse{Message: req.GetMessage(), Build: b}, nil
 }
 
 // --- MembussNode service ---

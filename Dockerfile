@@ -38,9 +38,11 @@ COPY . .
 # the binary for reproducible builds. -ldflags "-s -w" drops
 # the symbol table and DWARF debug info.
 ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+ARG GIT_COMMIT=unknown
+ARG BUILD_TIME=unknown
 RUN mkdir -p /out \
-    && go build -trimpath -ldflags "-s -w" -o /out/membuss            ./cmd/membuss \
-    && go build -trimpath -ldflags "-s -w" -o /out/membuss-cli        ./cmd/membuss-cli \
+    && go build -trimpath -ldflags "-s -w -X github.com/nnlgsakib/membuss/core/version.GitCommit=${GIT_COMMIT} -X github.com/nnlgsakib/membuss/core/version.BuildTime=${BUILD_TIME}" -o /out/membuss            ./cmd/membuss \
+    && go build -trimpath -ldflags "-s -w -X github.com/nnlgsakib/membuss/core/version.GitCommit=${GIT_COMMIT} -X github.com/nnlgsakib/membuss/core/version.BuildTime=${BUILD_TIME}" -o /out/membuss-cli        ./cmd/membuss-cli \
     && go build -trimpath -ldflags "-s -w" -o /out/membuss-entrypoint ./cmd/membuss-entrypoint \
     && strip /out/membuss /out/membuss-cli /out/membuss-entrypoint
 
