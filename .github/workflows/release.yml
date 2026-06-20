@@ -187,21 +187,26 @@ jobs:
       - name: Install Wails
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
+      - name: Add NSIS to PATH
+        run: echo "C:\Program Files (x86)\NSIS" >> $env:GITHUB_PATH
+
       - name: Build desktop app (NSIS installer)
         working-directory: desktop
         env:
           CGO_ENABLED: 0
-        run: |
-          wails build --platform windows/amd64 --nsis
+        run: wails build --platform windows/amd64 --nsis
+
+      - name: List build output
+        shell: bash
+        run: ls -la desktop/build/bin/
 
       - name: Rename installer
         shell: bash
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          INSTALLER=$(ls desktop/build/bin/*installer.exe 2>/dev/null | head -1)
+          INSTALLER=$(ls desktop/build/bin/Membuss-*-installer.exe 2>/dev/null | head -1)
           if [ -z "$INSTALLER" ]; then
-            echo "ERROR: No installer found. Contents of desktop/build/bin/:"
-            ls -la desktop/build/bin/ 2>/dev/null || echo "Directory does not exist"
+            echo "ERROR: No installer found"
             exit 1
           fi
           cp "$INSTALLER" "Membuss-${TAG}-windows-amd64-installer.exe"
