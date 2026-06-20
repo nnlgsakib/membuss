@@ -133,6 +133,7 @@ func (dm *DaemonManager) Start(dataDir string) error {
 
 	// Spawn the daemon
 	cmd := exec.Command(binaryPath, "-datadir", dataDir, "-config", configPath)
+	hideConsoleWindow(cmd)
 	
 	// Create a log file inside the data directory
 	logDir := filepath.Join(dataDir, "logs")
