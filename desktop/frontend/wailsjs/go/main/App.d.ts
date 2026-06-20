@@ -4,7 +4,11 @@ import {main} from '../models';
 
 export function CheckExplorer():Promise<boolean>;
 
+export function CheckForUpdate():Promise<main.UpdateCheckResult>;
+
 export function CheckNodeStatus():Promise<Record<string, any>>;
+
+export function ForceKillNode():Promise<void>;
 
 export function GetConfig():Promise<main.DesktopConfig>;
 
@@ -15,6 +19,8 @@ export function GetNodeConfig():Promise<Record<string, any>>;
 export function GetNodeConfigRaw():Promise<string>;
 
 export function InstallBinaries(arg1:string):Promise<void>;
+
+export function IsNodeRunningSystemWide():Promise<boolean>;
 
 export function ResetSetup():Promise<void>;
 
@@ -29,6 +35,8 @@ export function SelectDirectory():Promise<string>;
 export function StartNode():Promise<void>;
 
 export function StopNode():Promise<void>;
+
+export function UpgradeBinaries():Promise<void>;
 
 export function VerifyInstallation():Promise<Record<string, any>>;
 

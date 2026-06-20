@@ -6,8 +6,16 @@ export function CheckExplorer() {
   return window['go']['main']['App']['CheckExplorer']();
 }
 
+export function CheckForUpdate() {
+  return window['go']['main']['App']['CheckForUpdate']();
+}
+
 export function CheckNodeStatus() {
   return window['go']['main']['App']['CheckNodeStatus']();
+}
+
+export function ForceKillNode() {
+  return window['go']['main']['App']['ForceKillNode']();
 }
 
 export function GetConfig() {
@@ -28,6 +36,10 @@ export function GetNodeConfigRaw() {
 
 export function InstallBinaries(arg1) {
   return window['go']['main']['App']['InstallBinaries'](arg1);
+}
+
+export function IsNodeRunningSystemWide() {
+  return window['go']['main']['App']['IsNodeRunningSystemWide']();
 }
 
 export function ResetSetup() {
@@ -56,6 +68,10 @@ export function StartNode() {
 
 export function StopNode() {
   return window['go']['main']['App']['StopNode']();
+}
+
+export function UpgradeBinaries() {
+  return window['go']['main']['App']['UpgradeBinaries']();
 }
 
 export function VerifyInstallation() {
