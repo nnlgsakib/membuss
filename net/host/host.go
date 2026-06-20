@@ -155,6 +155,9 @@ type Host struct {
 
 	// bwc tracks real-time traffic statistics.
 	bwc *metrics.BandwidthCounter
+
+	dialMu        sync.RWMutex
+	dialListeners []DialResultListener
 }
 
 // NewHost constructs a libp2p host according to cfg. The host
@@ -492,6 +495,28 @@ func (h *Host) Close() error {
 		return h.Host.Close()
 	}
 	return nil
+}// DialResultListener is called when a dial outcome is determined.
+type DialResultListener func(peer.ID, error)
+
+func (h *Host) AddDialListener(l DialResultListener) {
+	h.dialMu.Lock()
+	defer h.dialMu.Unlock()
+	h.dialListeners = append(h.dialListeners, l)
+}
+
+func (h *Host) NotifyDialResult(pid peer.ID, err error) {
+	h.dialMu.RLock()
+	listeners := h.dialListeners
+	h.dialMu.RUnlock()
+	for _, l := range listeners {
+		l(pid, err)
+	}
+}
+
+func (h *Host) Connect(ctx context.Context, pi peer.AddrInfo) error {
+	err := h.Host.Connect(ctx, pi)
+	h.NotifyDialResult(pi.ID, err)
+	return err
 }
 
 // loadOrCreateIdentity loads the Ed25519 private key from

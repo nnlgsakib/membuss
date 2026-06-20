@@ -1,4 +1,4 @@
-﻿// Package pex implements Mem-PEX, the Membuss peer exchange
+// Package pex implements Mem-PEX, the Membuss peer exchange
 // gossip protocol.
 //
 // Each node maintains a peer table capped at maxPeers. Every
@@ -104,6 +104,7 @@ type entry struct {
 	// kept separately from direct addrs so the filter can
 	// strip them on outgoing gossip for PUBLIC entries.
 	relayAddrs []multiaddr.Multiaddr
+	dialFailures int
 }
 
 // Config configures a PEX instance.
@@ -119,6 +120,10 @@ type Config struct {
 	// determinism. Defaults to a goroutine-safe source seeded
 	// from the system time.
 	Rand *rand.Rand
+}
+
+type dialObservable interface {
+	AddDialListener(func(peer.ID, error))
 }
 
 // New constructs a PEX. Call Start to begin gossiping.
@@ -146,6 +151,11 @@ func New(cfg Config) (*PEX, error) {
 	if cfg.PersistPath != "" {
 		p.load()
 	}
+	if do, ok := cfg.Host.(dialObservable); ok {
+		do.AddDialListener(func(pid peer.ID, err error) {
+			p.MarkDialResult(pid, err == nil)
+		})
+	}
 	return p, nil
 }
 
@@ -154,13 +164,28 @@ func New(cfg Config) (*PEX, error) {
 // called.
 func (p *PEX) Start(ctx context.Context) {
 	p.host.SetStreamHandler(ProtocolID, p.handleStream)
+	p.mu.Lock()
+	for _, pid := range p.host.Network().Peers() {
+		if p.host.Network().Connectedness(pid) == network.Connected {
+			addrs := p.host.Peerstore().Addrs(pid)
+			p.upsertLocked(peer.AddrInfo{ID: pid, Addrs: addrs}, nil, p.now().Unix(), false)
+			if e, exists := p.peers[pid]; exists {
+				e.dialFailures = 0
+				e.info.LastDialSuccess = true
+			}
+		}
+	}
+	p.mu.Unlock()
+	p.host.Network().Notify((*pexNotifiee)(p))
 	go p.gossipLoop(ctx)
+	go p.checkLoop(ctx)
 }
 
 // Stop unregisters the stream handler, persists the peer table,
 // and waits for the gossip loop to exit.
 func (p *PEX) Stop() {
 	p.host.RemoveStreamHandler(ProtocolID)
+	p.host.Network().StopNotify((*pexNotifiee)(p))
 	p.save()
 	select {
 	case <-p.loopStop:
@@ -214,6 +239,15 @@ func (p *PEX) MarkDialResult(pid peer.ID, ok bool) {
 		return
 	}
 	e.info.LastDialSuccess = ok
+	if ok {
+		e.dialFailures = 0
+		e.info.LastSeen = p.now().Unix()
+	} else {
+		e.dialFailures++
+		if e.dialFailures >= 2 {
+			delete(p.peers, pid)
+		}
+	}
 }
 
 // Peers returns a snapshot of the current peer table sorted by
@@ -223,7 +257,9 @@ func (p *PEX) Peers() []*membusspb.PeerInfo {
 	defer p.mu.Unlock()
 	out := make([]*membusspb.PeerInfo, 0, len(p.peers))
 	for _, e := range p.peers {
-		out = append(out, cloneInfo(e.info))
+		if e.info.LastDialSuccess {
+			out = append(out, cloneInfo(e.info))
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].PeerId < out[j].PeerId })
 	return out
@@ -294,10 +330,11 @@ func (p *PEX) upsertLocked(ai peer.AddrInfo, relayAddrs []multiaddr.Multiaddr, s
 		addrInfo:   ai,
 		relayAddrs: append([]multiaddr.Multiaddr(nil), relayAddrs...),
 		info: &membusspb.PeerInfo{
-			PeerId:      ai.ID.String(),
-			Addrs:       addrs,
-			LastSeen:    seen,
-			RelayAddrs:  addrsToStrings(relayAddrs),
+			PeerId:          ai.ID.String(),
+			Addrs:           addrs,
+			LastSeen:        seen,
+			RelayAddrs:      addrsToStrings(relayAddrs),
+			LastDialSuccess: true,
 		},
 	}
 }
@@ -359,6 +396,9 @@ func (p *PEX) filterForGossip(selfID peer.ID) []*membusspb.PeerInfo {
 			continue
 		}
 		if e.info.LastSeen < cutoff {
+			continue
+		}
+		if !e.info.LastDialSuccess {
 			continue
 		}
 		switch e.info.Reachability {
@@ -728,5 +768,126 @@ func (p *PEX) load() {
 			cur.relayAddrs = relay
 		}
 		p.mu.Unlock()
+	}
+}
+
+type pexNotifiee PEX
+
+func (pn *pexNotifiee) Listen(network.Network, multiaddr.Multiaddr) {}
+func (pn *pexNotifiee) ListenClose(network.Network, multiaddr.Multiaddr) {}
+
+func (pn *pexNotifiee) Connected(n network.Network, c network.Conn) {
+	p := (*PEX)(pn)
+	pid := c.RemotePeer()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.upsertLocked(peer.AddrInfo{
+		ID:    pid,
+		Addrs: []multiaddr.Multiaddr{c.RemoteMultiaddr()},
+	}, nil, p.now().Unix(), false)
+	if e, exists := p.peers[pid]; exists {
+		e.dialFailures = 0
+		e.info.LastDialSuccess = true
+	}
+}
+
+func (pn *pexNotifiee) Disconnected(n network.Network, c network.Conn) {
+	p := (*PEX)(pn)
+	pid := c.RemotePeer()
+	if n.Connectedness(pid) == network.Connected {
+		return
+	}
+	p.mu.Lock()
+	e, exists := p.peers[pid]
+	if !exists {
+		p.mu.Unlock()
+		return
+	}
+	ai := e.addrInfo
+	relayAddrs := append([]multiaddr.Multiaddr(nil), e.relayAddrs...)
+	reach := e.info.Reachability
+	p.mu.Unlock()
+
+	p.reconnectAsync(pid, ai, relayAddrs, reach)
+}
+
+func (p *PEX) reconnectAsync(pid peer.ID, ai peer.AddrInfo, relay []multiaddr.Multiaddr, reach membusspb.Reachability) {
+	var target peer.AddrInfo
+	switch reach {
+	case membusspb.Reachability_RELAY_ONLY:
+		if len(relay) == 0 {
+			p.MarkDialResult(pid, false)
+			return
+		}
+		target = peer.AddrInfo{ID: pid, Addrs: relay}
+	case membusspb.Reachability_PRIVATE:
+		p.MarkDialResult(pid, false)
+		return
+	case membusspb.Reachability_PUBLIC, membusspb.Reachability_UNKNOWN:
+		if len(ai.Addrs) == 0 {
+			p.MarkDialResult(pid, false)
+			return
+		}
+		target = ai
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+		defer cancel()
+		err := p.host.Connect(ctx, target)
+		p.MarkDialResult(pid, err == nil)
+	}()
+}
+
+func (p *PEX) checkLoop(ctx context.Context) {
+	t := time.NewTicker(gossipInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-p.loopStop:
+			return
+		case <-t.C:
+			p.checkPeers(ctx)
+		}
+	}
+}
+
+func (p *PEX) checkPeers(ctx context.Context) {
+	p.mu.Lock()
+	type checkTarget struct {
+		pid        peer.ID
+		addrInfo   peer.AddrInfo
+		relayAddrs []multiaddr.Multiaddr
+		reach      membusspb.Reachability
+	}
+	var targets []checkTarget
+	for pid, e := range p.peers {
+		targets = append(targets, checkTarget{
+			pid:        pid,
+			addrInfo:   e.addrInfo,
+			relayAddrs: append([]multiaddr.Multiaddr(nil), e.relayAddrs...),
+			reach:      e.info.Reachability,
+		})
+	}
+	p.mu.Unlock()
+
+	for _, target := range targets {
+		if ctx.Err() != nil {
+			return
+		}
+		connected := p.host.Network().Connectedness(target.pid) == network.Connected
+		if connected {
+			p.mu.Lock()
+			if e, exists := p.peers[target.pid]; exists {
+				e.dialFailures = 0
+				e.info.LastDialSuccess = true
+				e.info.LastSeen = p.now().Unix()
+			}
+			p.mu.Unlock()
+		} else {
+			p.reconnectAsync(target.pid, target.addrInfo, target.relayAddrs, target.reach)
+		}
 	}
 }

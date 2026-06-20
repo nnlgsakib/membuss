@@ -1,4 +1,4 @@
-﻿package pex
+package pex
 
 import (
 	"context"
@@ -165,4 +165,67 @@ func tableHas(p *PEX, id peer.ID) bool {
 		}
 	}
 	return false
+}
+
+func TestPEX_OfflineDetectionAndEviction(t *testing.T) {
+	h1 := newTestHost(t)
+	t.Cleanup(func() { _ = h1.Close() })
+
+	p1, err := New(Config{Host: h1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Generate a fake peer ID and address
+	priv, _, _ := crypto.GenerateEd25519Key(rand.Reader)
+	fakeID, _ := peer.IDFromPrivateKey(priv)
+	fakeAddr, _ := multiaddr.NewMultiaddr("/ip4/127.0.0.1/tcp/9999")
+	ai := peer.AddrInfo{ID: fakeID, Addrs: []multiaddr.Multiaddr{fakeAddr}}
+
+	// Add the fake peer. Since it's new, it defaults to LastDialSuccess = true
+	p1.AddPeer(ai)
+
+	// Verify it's returned by Peers() and FilterForGossip()
+	if !tableHas(p1, fakeID) {
+		t.Fatalf("peer should be present initially")
+	}
+
+	gossipPeers := p1.FilterForGossip()
+	found := false
+	for _, gp := range gossipPeers {
+		if gp.PeerId == fakeID.String() {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("peer should be shared in gossip initially")
+	}
+
+	// Mark dial as failed once
+	p1.MarkDialResult(fakeID, false)
+
+	// Since LastDialSuccess is now false, it should NOT be returned by Peers()
+	if tableHas(p1, fakeID) {
+		t.Fatalf("offline peer should be filtered out from Peers()")
+	}
+
+	// It should also NOT be shared in gossip
+	gossipPeers = p1.FilterForGossip()
+	for _, gp := range gossipPeers {
+		if gp.PeerId == fakeID.String() {
+			t.Fatalf("offline peer should not be shared in gossip")
+		}
+	}
+
+	// Mark dial as failed a second time
+	p1.MarkDialResult(fakeID, false)
+
+	// Now it should be completely evicted from the internal table
+	p1.mu.Lock()
+	_, exists := p1.peers[fakeID]
+	p1.mu.Unlock()
+	if exists {
+		t.Fatalf("offline peer should be completely evicted from internal table after 2 failed dials")
+	}
 }

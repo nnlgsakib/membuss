@@ -291,6 +291,12 @@ func (s *Session) enqueueChildren(ctx context.Context, midStr string, addEnqueue
 // runs a read loop and a write loop concurrently.
 func (s *Session) runProvider(ctx context.Context, provider peer.AddrInfo, pending <-chan mid.MID, markResolved func(mid.MID)) error {
 	stream, err := s.cfg.Engine.openStream(ctx, provider.ID)
+	type dialNotifier interface {
+		NotifyDialResult(peer.ID, error)
+	}
+	if dn, ok := s.cfg.Engine.host.(dialNotifier); ok {
+		dn.NotifyDialResult(provider.ID, err)
+	}
 	if err != nil {
 		return fmt.Errorf("memex session: open %s: %w", provider.ID, err)
 	}
