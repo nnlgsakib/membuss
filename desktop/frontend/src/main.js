@@ -104,7 +104,7 @@ function showGlobalError(msg) {
     document.querySelector('#app').innerHTML = `
       <div class="wizard-container">
         <div class="wizard-card">
-          <img src="./src/assets/icon.png" alt="Membuss" class="brand-icon" />
+          <img src="/icon.png" alt="Membuss" class="brand-icon" />
           <h1 class="wizard-title">Initializing Portal...</h1>
           <p class="wizard-subtitle" style="margin-bottom: 0;">Checking node installation and directories...</p>
         </div>
@@ -183,7 +183,7 @@ function renderWelcomeStep() {
   document.querySelector('#app').innerHTML = `
     <div class="wizard-container">
       <div class="wizard-card">
-        <img src="./src/assets/icon.png" alt="Membuss" class="brand-icon" />
+        <img src="/icon.png" alt="Membuss" class="brand-icon" />
         <h1 class="wizard-title">Membuss Desktop Portal</h1>
         <p class="wizard-subtitle">
           Welcome to Membuss — a decentralized, content-addressed distributed storage and delivery network. 
@@ -200,7 +200,7 @@ function renderPathSelectionStep() {
   document.querySelector('#app').innerHTML = `
     <div class="wizard-container">
       <div class="wizard-card">
-        <img src="./src/assets/icon.png" alt="Membuss" class="brand-icon" />
+        <img src="/icon.png" alt="Membuss" class="brand-icon" />
         <h1 class="wizard-title">Select Data Directory</h1>
         <p class="wizard-subtitle">
           Choose a directory in your filesystem where the Membuss node will store its binaries, 
@@ -252,7 +252,7 @@ function renderDownloadStep() {
   document.querySelector('#app').innerHTML = `
     <div class="wizard-container">
       <div class="wizard-card" id="download-card">
-        <img src="./src/assets/icon.png" alt="Membuss" class="brand-icon" />
+        <img src="/icon.png" alt="Membuss" class="brand-icon" />
         <h1 class="wizard-title" id="download-title">Installing Membuss Core</h1>
         <p class="wizard-subtitle" id="download-subtitle">
           Downloading and extracting the daemon binaries into your data directory.
@@ -333,7 +333,7 @@ async function renderWizardConfigStep() {
   document.querySelector('#app').innerHTML = `
     <div class="wizard-container">
       <div class="wizard-card" style="max-width: 640px;">
-        <img src="./src/assets/icon.png" alt="Membuss" class="brand-icon" />
+        <img src="/icon.png" alt="Membuss" class="brand-icon" />
         <h1 class="wizard-title">Node Configuration</h1>
         <p class="wizard-subtitle">Set up your local node interface values. Default settings are ready to run.</p>
         
@@ -438,7 +438,7 @@ function renderDashboardLayout() {
       <!-- Sidebar -->
       <div class="sidebar">
         <div class="sidebar-brand">
-          <img src="./src/assets/icon.png" alt="Membuss" class="brand-symbol" />
+          <img src="/icon.png" alt="Membuss" class="brand-symbol" />
           <span class="brand-name">Membuss Desktop</span>
         </div>
         
