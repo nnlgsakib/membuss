@@ -156,6 +156,20 @@ func (a *App) SaveNodeConfigRaw(content string) error {
 	if a.config.DataDir == "" {
 		return errors.New("no data directory configured")
 	}
+
+	// Normalize Windows backslashes to forward slashes in path fields to prevent escape sequence parse errors in YAML
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "geolocation_db:") ||
+			strings.HasPrefix(trimmed, "data_dir:") ||
+			strings.HasPrefix(trimmed, "cert_file:") ||
+			strings.HasPrefix(trimmed, "key_file:") {
+			lines[i] = strings.ReplaceAll(line, "\\", "/")
+		}
+	}
+	content = strings.Join(lines, "\n")
+
 	path := filepath.Join(a.config.DataDir, "config.yaml")
 	return os.WriteFile(path, []byte(content), 0644)
 }
