@@ -151,6 +151,14 @@ func (a *App) SaveNodeConfigRaw(content string) error {
 	return os.WriteFile(path, []byte(content), 0644)
 }
 
+// WriteDefaultConfig generates a complete config.yaml with all default fields.
+func (a *App) WriteDefaultConfig() error {
+	if a.config.DataDir == "" {
+		return errors.New("no data directory configured")
+	}
+	return WriteDefaultConfig(a.config.DataDir)
+}
+
 // StartNode launches the daemon.
 func (a *App) StartNode() error {
 	if a.config.DataDir == "" {
@@ -279,17 +287,15 @@ func (a *App) domReady(ctx context.Context) {
 }
 
 // beforeClose is triggered when the window is closed.
-// If KeepAlive is true and setup is complete, we hide the window instead of quitting.
+// If the daemon is running, emit an event to the frontend to confirm close.
 func (a *App) beforeClose(ctx context.Context) bool {
-	if a.config.KeepAlive && a.config.SetupComplete {
-		// Hide window to keep daemon running in background
-		if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
-			wailsRuntime.WindowHide(ctx)
-			return true // Prevent app termination
-		}
+	if a.config.KeepAlive && a.config.SetupComplete && a.daemonManager.IsRunning() {
+		// Emit event to frontend to handle close confirmation
+		wailsRuntime.EventsEmit(ctx, "request-close")
+		return true // Block close, let frontend handle it
 	}
-	
-	// If not keeping alive, stop the daemon on close
+
+	// If not keeping alive or node not running, stop daemon and allow close
 	_ = a.daemonManager.Stop()
 	return false // Allow app termination
 }

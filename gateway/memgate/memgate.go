@@ -195,7 +195,15 @@ func (m *MemGate) buildRouter() chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/explorer") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			middleware.Logger(next).ServeHTTP(w, r)
+		})
+	})
 	r.Use(middleware.Recoverer)
 	// Rate limit BEFORE route dispatch so a flood cannot pin
 	// a single request handler. /healthz is intentionally not
