@@ -85,7 +85,7 @@
 			});
 			const marker = L.marker([p.lat, p.lon], { icon })
 				.bindPopup(
-					`<div style="font-family:monospace;font-size:12px;padding:4px">
+					`<div style="font-family:monospace;font-size:12px;padding:4px;max-width:260px;word-break:break-all">
 						<div style="font-weight:bold">${p.peerId}</div>
 						<div style="color:#94a3b8">${p.location}</div>
 						<div style="color:#94a3b8">${p.transport}</div>
@@ -361,6 +361,7 @@
 		border: 1px solid #1e293b !important;
 		border-radius: 0.5rem !important;
 		box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5) !important;
+		max-width: 300px !important;
 	}
 	:global(.leaflet-popup-tip) {
 		background: rgba(15, 23, 42, 0.95) !important;

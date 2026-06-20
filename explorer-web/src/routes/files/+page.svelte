@@ -9,13 +9,15 @@
 		MID: string;
 		Name: string;
 		Sealed: boolean;
+		Size: number;
+		MimeType: string;
 	}
 
 	interface IndexData {
 		AllFiles: StoredMID[];
 	}
 
-	// Local file cache derived from SealedList + query sizes
+	// Local file cache derived from the index response
 	interface LocalFile {
 		mid: string;
 		name: string;
@@ -76,38 +78,20 @@
 	// Share Copy Toast
 	let copiedId = $state<string | null>(null);
 
-	// Load file list by fetching node stats & querying file types
+	// Load file list from the index endpoint (all metadata included)
 	async function loadFiles() {
 		try {
 			const indexRes: IndexData = await apiFetch('/');
 			const allFiles = indexRes.AllFiles || [];
 			
-			// Map AllFiles to LocalFile objects
-			const mapped: LocalFile[] = [];
-			for (const item of allFiles) {
-				let size = 0;
-				let type: 'file' | 'dir' = 'file';
-				let mime = 'application/octet-stream';
-				
-				// Stat each MID to get actual size and type parameters
-				try {
-					const stat = await apiFetch(`/mid/${item.MID}`);
-					size = stat.Size || 0;
-					type = stat.MemFSType === 'dir' ? 'dir' : 'file';
-					mime = stat.MimeType || 'application/octet-stream';
-				} catch (e) {
-					console.error('Failed to stat file', item.MID, e);
-				}
-
-				mapped.push({
-					mid: item.MID,
-					name: item.Name || 'Unnamed Record',
-					sealed: item.Sealed,
-					size,
-					mime,
-					type
-				});
-			}
+			const mapped: LocalFile[] = allFiles.map((item) => ({
+				mid: item.MID,
+				name: item.Name || 'Unnamed Record',
+				sealed: item.Sealed,
+				size: item.Size || 0,
+				mime: item.MimeType || 'application/octet-stream',
+				type: 'file'
+			}));
 
 			fileList = mapped;
 			loading = false;
