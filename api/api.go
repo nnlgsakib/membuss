@@ -217,7 +217,15 @@ func (a *NodeAPI) buildRouter() chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/node/info" || r.URL.Path == "/healthz" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			middleware.Logger(next).ServeHTTP(w, r)
+		})
+	})
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(a.cfg.ReadTimeout))
 

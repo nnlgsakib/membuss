@@ -1,17 +1,38 @@
-name: Release
+# Release Workflow — Installers + Commit-based Release Notes
 
-on:
-  push:
-    tags:
-      - 'v*'
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-permissions:
-  contents: write
+**Goal:** Update the GitHub Actions release workflow to build Windows/Linux desktop installers, and generate release notes listing all commits between the previous and current tags.
 
-jobs:
+**Architecture:** The existing `release.yml` is rewritten with four parallel build jobs (daemon binaries, desktop Windows, desktop Linux) plus a preceding notes-generation job and a final release job that collects all artifacts. Release notes are generated via `git log` between tags.
+
+**Tech Stack:** GitHub Actions, Wails CLI, NSIS, appimagetool, Go, Node.js
+
+---
+
+## File Map
+
+| File | Responsibility |
+|------|---------------|
+| `.github/workflows/release.yml` | Full release workflow — notes generation, binary builds, desktop builds, release creation |
+
+---
+
+### Task 1: Generate release notes from git log
+
+**Files:**
+- Modify: `.github/workflows/release.yml`
+
+- [ ] **Step 1: Add the `generate-notes` job**
+
+Add this job at the top of the workflow (before `build-binaries`). It determines the previous tag, runs `git log --oneline` between the two tags, and writes a markdown file:
+
+```yaml
   generate-notes:
     name: Generate Release Notes
     runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.meta.outputs.tag_name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -41,15 +62,14 @@ jobs:
           echo "## What's Changed" >> release-notes.md
           echo "" >> release-notes.md
 
-          FIRST_COMMIT=$(git rev-list --max-parents=0 HEAD | head -1)
-          if [ "$PREV" != "$FIRST_COMMIT" ]; then
+          if [ "$PREV" != "$(git rev-list --max-parents=0 HEAD | head -1)" ]; then
             echo "Commits since $PREV:" >> release-notes.md
             echo "" >> release-notes.md
-            git log --oneline "$PREV..$TAG" >> release-notes.md
+            git log --oneline --no-merges "$PREV..$TAG" >> release-notes.md
           else
             echo "Initial release." >> release-notes.md
             echo "" >> release-notes.md
-            git log --oneline >> release-notes.md
+            git log --oneline --no-merges >> release-notes.md
           fi
 
           echo "" >> release-notes.md
@@ -62,107 +82,57 @@ jobs:
           name: release-notes
           path: release-notes.md
           retention-days: 1
+```
 
-  build-frontend:
-    name: Build Frontend
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+- [ ] **Step 2: Verify YAML syntax**
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: 'npm'
-          cache-dependency-path: explorer-web/package-lock.json
+Run: `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/release.yml'))"`
+Expected: no output (valid YAML)
 
-      - name: Install dependencies
-        run: npm ci
-        working-directory: explorer-web
+- [ ] **Step 3: Commit**
 
-      - name: Build frontend
-        run: npm run build
-        working-directory: explorer-web
+```bash
+git add .github/workflows/release.yml
+git commit -m "ci: add release notes generation from git log between tags"
+```
 
-      - name: Upload frontend build
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-dist
-          path: gateway/explorer/web/dist
-          retention-days: 1
+---
 
+### Task 2: Update build-binaries to depend on generate-notes
+
+**Files:**
+- Modify: `.github/workflows/release.yml` (the `build-binaries` job)
+
+- [ ] **Step 1: Add `needs: generate-notes` to build-binaries**
+
+The existing `build-binaries` job currently has `needs: build-frontend`. Change it to depend on both:
+
+```yaml
   build-binaries:
     name: Build Go Binaries
     needs: [build-frontend, generate-notes]
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            ext: ""
-            archive: tar.gz
-          - goos: linux
-            goarch: arm64
-            ext: ""
-            archive: tar.gz
-          - goos: windows
-            goarch: amd64
-            ext: ".exe"
-            archive: zip
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+```
 
-      - name: Download frontend build
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-dist
-          path: gateway/explorer/web/dist
+- [ ] **Step 2: Commit**
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: 'go.mod'
-          cache: true
+```bash
+git add .github/workflows/release.yml
+git commit -m "ci: make build-binaries depend on generate-notes"
+```
 
-      - name: Build daemon
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
-        run: |
-          go build -trimpath -ldflags "-s -w -X github.com/nnlgsakib/membuss/rpc/server.Build=${{ github.ref_name }}" -o bin/membuss${{ matrix.ext }} ./cmd/membuss
+---
 
-      - name: Build CLI
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
-        run: |
-          go build -trimpath -ldflags "-s -w" -o bin/membuss-cli${{ matrix.ext }} ./cmd/membuss-cli
+### Task 3: Add Windows desktop installer job
 
-      - name: Package binaries (zip)
-        if: matrix.archive == 'zip'
-        run: |
-          cd bin
-          zip -r ../membuss-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}.zip membuss${{ matrix.ext }} membuss-cli${{ matrix.ext }}
+**Files:**
+- Modify: `.github/workflows/release.yml`
 
-      - name: Package binaries (tar.gz)
-        if: matrix.archive == 'tar.gz'
-        run: |
-          cd bin
-          tar -czf ../membuss-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz membuss${{ matrix.ext }} membuss-cli${{ matrix.ext }}
+- [ ] **Step 1: Add `build-desktop-windows` job**
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: |
-            membuss-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
-          retention-days: 1
+Add this job after the existing `build-binaries` job:
 
+```yaml
   build-desktop-windows:
     name: Build Desktop (Windows)
     needs: generate-notes
@@ -201,8 +171,8 @@ jobs:
         shell: bash
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          INSTALLER=$(find desktop/build/bin -name "*installer.exe" | head -1)
-          cp "$INSTALLER" "Membuss-${TAG}-windows-amd64-installer.exe"
+          cp desktop/build/bin/Membuss-Setup-amd64.exe \
+             "Membuss-${TAG}-windows-amd64-installer.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -210,7 +180,27 @@ jobs:
           name: desktop-windows-installer
           path: Membuss-*-windows-amd64-installer.exe
           retention-days: 1
+```
 
+- [ ] **Step 2: Commit**
+
+```bash
+git add .github/workflows/release.yml
+git commit -m "ci: add Windows desktop NSIS installer build job"
+```
+
+---
+
+### Task 4: Add Linux desktop AppImage job
+
+**Files:**
+- Modify: `.github/workflows/release.yml`
+
+- [ ] **Step 1: Add `build-desktop-linux` job**
+
+Add this job after the `build-desktop-windows` job:
+
+```yaml
   build-desktop-linux:
     name: Build Desktop (Linux)
     needs: generate-notes
@@ -243,10 +233,8 @@ jobs:
 
       - name: Install appimagetool
         run: |
-          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
-          chmod +x appimagetool
-          ./appimagetool --appimage-extract
-          mv squashfs-root /opt/appimagetool
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O /usr/local/bin/appimagetool
+          chmod +x /usr/local/bin/appimagetool
 
       - name: Build desktop app
         working-directory: desktop
@@ -264,7 +252,7 @@ jobs:
           mkdir -p "$APPDIR/usr/share/applications"
           mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 
-          cp desktop/build/bin/membuss "$APPDIR/usr/bin/membuss"
+          cp desktop/build/bin/desktop "$APPDIR/usr/bin/membuss"
           cp desktop/icon.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/membuss.png"
 
           cat > "$APPDIR/membuss.desktop" << 'EOF'
@@ -287,7 +275,7 @@ jobs:
       - name: Build AppImage
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          /opt/appimagetool/AppRun Membuss.AppDir "Membuss-${TAG}-linux-amd64.AppImage"
+          appimagetool Membuss.AppDir "Membuss-${TAG}-linux-amd64.AppImage"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -295,7 +283,27 @@ jobs:
           name: desktop-linux-appimage
           path: Membuss-*-linux-amd64.AppImage
           retention-days: 1
+```
 
+- [ ] **Step 2: Commit**
+
+```bash
+git add .github/workflows/release.yml
+git commit -m "ci: add Linux desktop AppImage build job"
+```
+
+---
+
+### Task 5: Update release job to collect all artifacts
+
+**Files:**
+- Modify: `.github/workflows/release.yml` (the `release` job)
+
+- [ ] **Step 1: Replace the release job**
+
+Replace the existing `release` job with:
+
+```yaml
   release:
     name: Create Release
     needs: [generate-notes, build-binaries, build-desktop-windows, build-desktop-linux]
@@ -330,3 +338,51 @@ jobs:
             artifacts/Membuss-*.AppImage
           draft: false
           prerelease: false
+```
+
+- [ ] **Step 2: Verify full workflow YAML syntax**
+
+Run: `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/release.yml'))"`
+Expected: no output (valid YAML)
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add .github/workflows/release.yml
+git commit -m "ci: update release job to collect all artifacts with commit-based notes"
+```
+
+---
+
+### Task 6: Verify the complete workflow
+
+- [ ] **Step 1: Read the final workflow file end-to-end**
+
+Verify:
+- `generate-notes` outputs `tag_name`
+- `build-binaries` depends on `build-frontend` and `generate-notes`
+- `build-desktop-windows` and `build-desktop-linux` both depend on `generate-notes`
+- `release` depends on all four build jobs
+- `release` uses `body_path: release-notes.md`
+- All artifact patterns match what the build jobs upload
+
+- [ ] **Step 2: Validate YAML one final time**
+
+Run: `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/release.yml'))"`
+Expected: no output
+
+- [ ] **Step 3: Test with a dry-run tag**
+
+Create a test tag to verify the workflow triggers correctly:
+```bash
+git tag v0.1.3-rc.1
+git push origin v0.1.3-rc.1
+```
+Then check the Actions tab on GitHub to verify all jobs run.
+
+- [ ] **Step 4: Clean up test tag**
+
+```bash
+git tag -d v0.1.3-rc.1
+git push origin :refs/tags/v0.1.3-rc.1
+```
