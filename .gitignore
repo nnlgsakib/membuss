@@ -57,5 +57,6 @@ graphify-out/
 CLAUDE.md
 skills-lock.json
 .agents/skills/
+.opencode/
 
 
