@@ -539,18 +539,43 @@ func isProcessRunning(name string) bool {
 	}
 }
 
-// killProcess kills all processes matching the given name.
+// killProcess kills all processes matching the given name, excluding the current process.
 func killProcess(name string) error {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		if !strings.HasSuffix(name, ".exe") && !strings.Contains(name, "*") {
 			name += ".exe"
 		}
-		cmd = exec.Command("taskkill", "/F", "/IM", name)
-	} else {
-		cmd = exec.Command("pkill", "-9", "-f", name)
+		ourPid := fmt.Sprintf("%d", os.Getpid())
+		cmd = exec.Command("taskkill", "/F", "/FI", "PID ne "+ourPid, "/IM", name)
+		hideConsoleWindow(cmd)
+		return cmd.Run()
 	}
-	hideConsoleWindow(cmd)
-	return cmd.Run()
+
+	// On non-Windows: run pgrep to find PIDs matching the pattern
+	pgrep := exec.Command("pgrep", "-f", name)
+	out, err := pgrep.Output()
+	if err != nil {
+		return nil // no matching processes or pgrep not found
+	}
+
+	ourPid := os.Getpid()
+	pids := strings.Split(string(out), "\n")
+	for _, pidStr := range pids {
+		pidStr = strings.TrimSpace(pidStr)
+		if pidStr == "" {
+			continue
+		}
+		var pid int
+		if _, err := fmt.Sscanf(pidStr, "%d", &pid); err == nil {
+			if pid != ourPid {
+				// Kill the process
+				if proc, err := os.FindProcess(pid); err == nil {
+					_ = proc.Kill()
+				}
+			}
+		}
+	}
+	return nil
 }
 
