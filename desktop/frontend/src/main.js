@@ -17,7 +17,11 @@ import {
   CheckExplorer,
   GetDaemonLogs,
   VerifyInstallation,
-  ResetSetup
+  ResetSetup,
+  CheckForUpdate,
+  UpgradeBinaries,
+  IsNodeRunningSystemWide,
+  ForceKillNode
 } from '../wailsjs/go/main/App';
 
 import * as wailsRuntime from '../wailsjs/runtime/runtime';
@@ -56,6 +60,9 @@ async function init() {
       if (checks.valid) {
         renderDashboardLayout();
         startStatusPolling();
+
+        // Check for updates asynchronously after startup
+        setTimeout(triggerUpdateCheck, 1000);
       } else {
         renderBrokenInstallationScreen(checks);
       }
@@ -962,7 +969,7 @@ function showCustomAlert(title, message, type = 'info') {
   document.body.appendChild(modal);
   
   return new Promise((resolve) => {
-    document.getElementById('custom-modal-ok').addEventListener('click', () => {
+    modal.querySelector('#custom-modal-ok').addEventListener('click', () => {
       modal.remove();
       resolve();
     });
@@ -999,15 +1006,191 @@ function showCustomConfirm(title, message) {
   document.body.appendChild(modal);
 
   return new Promise((resolve) => {
-    document.getElementById('custom-modal-confirm').addEventListener('click', () => {
+    modal.querySelector('#custom-modal-confirm').addEventListener('click', () => {
       modal.remove();
       resolve(true);
     });
-    document.getElementById('custom-modal-cancel').addEventListener('click', () => {
+    modal.querySelector('#custom-modal-cancel').addEventListener('click', () => {
       modal.remove();
       resolve(false);
     });
   });
+}
+
+// Asynchronously check for updates on startup
+async function triggerUpdateCheck() {
+  try {
+    logMessage("Checking GitHub releases for updates...");
+    const updateResult = await CheckForUpdate();
+    if (updateResult && updateResult.has_update) {
+      logMessage(`New version available: ${updateResult.latest_version} (current: ${updateResult.current_version})`);
+      
+      const isRunning = await IsNodeRunningSystemWide();
+      let ok = false;
+      if (isRunning) {
+        ok = await showCustomConfirm(
+          "Stop Node & Update",
+          `A new upgraded version of the Membuss binary (${updateResult.latest_version}) is available. Current version is ${updateResult.current_version}.\n\nThe node daemon is currently running. Would you like to stop the node and perform the upgrade now?`
+        );
+        if (ok) {
+          logMessage("Force killing running node processes...");
+          await ForceKillNode();
+        }
+      } else {
+        ok = await showCustomConfirm(
+          "Update Available",
+          `A new upgraded version of the Membuss binary (${updateResult.latest_version}) is available. Current version is ${updateResult.current_version}.\n\nDo you want to download and install this update now?`
+        );
+      }
+
+      if (ok) {
+        renderUpgradeModal();
+      }
+    } else {
+      logMessage("Membuss binaries are up to date.");
+    }
+  } catch (err) {
+    console.error("Update check failed:", err);
+    logMessage("Failed to check for updates: " + err);
+  }
+}
+
+function renderUpgradeModal() {
+  const modal = document.createElement('div');
+  modal.id = 'upgrade-modal';
+  modal.style.position = 'fixed';
+  modal.style.top = '0';
+  modal.style.left = '0';
+  modal.style.width = '100vw';
+  modal.style.height = '100vh';
+  modal.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+  modal.style.display = 'flex';
+  modal.style.alignItems = 'center';
+  modal.style.justifyContent = 'center';
+  modal.style.zIndex = '99999';
+  modal.style.backdropFilter = 'blur(4px)';
+  modal.style.animation = 'fadeIn 0.2s ease-out';
+
+  modal.innerHTML = `
+    <div class="wizard-card" style="max-width: 480px; padding: 30px; text-align: center; animation: modalIn 0.25s cubic-bezier(0.4, 0, 0.2, 1);">
+      <img src="/icon.png" alt="Membuss" class="brand-icon" style="width: 48px; height: 48px; margin-bottom: 16px;" />
+      <h3 style="font-size: 18px; font-weight: 700; margin-bottom: 8px;">Upgrading Membuss Binaries</h3>
+      <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 20px; line-height: 1.5;" id="upgrade-subtitle">
+        Stopping the node, removing old binaries, and downloading latest release.
+      </p>
+      
+      <div class="progress-percent" id="upgrade-percent" style="font-size: 24px; font-weight: bold; color: var(--primary); margin-bottom: 10px;">0%</div>
+      <div class="progress-bar-container" style="background: var(--bg-main); border: 1px solid var(--border-color); height: 8px; border-radius: 4px; overflow: hidden; margin-bottom: 16px;">
+        <div class="progress-bar-fill" id="upgrade-progress-bar" style="background: var(--primary); width: 0%; height: 100%; transition: width 0.2s;"></div>
+      </div>
+      <p class="progress-message" id="upgrade-msg" style="font-size: 12px; color: var(--text-muted);">Initializing upgrade...</p>
+      
+      <div style="display: flex; justify-content: flex-end; margin-top: 24px;" id="upgrade-actions">
+        <!-- Disabled during install -->
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  // Stop active status polling during upgrade to prevent errors
+  if (statusPollerId) {
+    clearInterval(statusPollerId);
+    statusPollerId = null;
+  }
+
+  // Trigger backend upgrade
+  UpgradeBinaries()
+    .catch(err => {
+      console.error(err);
+      showUpgradeError(err.message || err);
+    });
+
+  // Listen for upgrade progress events from Wails
+  wailsRuntime.EventsOn('upgrade_progress', (data) => {
+    const percent = data.percent;
+    const msg = data.message;
+
+    if (percent === -1) {
+      showUpgradeError(msg);
+      return;
+    }
+
+    const bar = document.getElementById('upgrade-progress-bar');
+    const percentLabel = document.getElementById('upgrade-percent');
+    const msgLabel = document.getElementById('upgrade-msg');
+
+    if (bar) bar.style.width = `${percent}%`;
+    if (percentLabel) percentLabel.innerText = `${percent}%`;
+    if (msgLabel) msgLabel.innerText = msg;
+
+    if (percent === 100) {
+      wailsRuntime.EventsOff('upgrade_progress');
+      if (percentLabel) percentLabel.style.color = "var(--success)";
+      
+      setTimeout(async () => {
+        modal.remove();
+        await showCustomAlert("Upgrade Complete", "Membuss binaries have been upgraded successfully. Starting the node...", "success");
+        
+        try {
+          // Refresh local configuration
+          appState.config = await GetConfig();
+          logMessage("Starting node daemon process after upgrade...");
+          await StartNode();
+        } catch (err) {
+          logMessage("Error starting node: " + err);
+        }
+        
+        // Re-render dashboard overview and restart status checking
+        switchTab('dashboard');
+        startStatusPolling();
+      }, 1500);
+    }
+  });
+}
+
+function showUpgradeError(msg) {
+  wailsRuntime.EventsOff('upgrade_progress');
+  const modal = document.getElementById('upgrade-modal');
+  if (!modal) return;
+  
+  const card = modal.querySelector('.wizard-card');
+  if (card) card.style.borderColor = 'var(--error)';
+  
+  const title = modal.querySelector('h3');
+  if (title) {
+    title.innerText = "Upgrade Failed";
+    title.style.color = "var(--error)";
+  }
+  
+  const percentLabel = document.getElementById('upgrade-percent');
+  if (percentLabel) {
+    percentLabel.innerText = "ERROR";
+    percentLabel.style.color = "var(--error)";
+  }
+  
+  const msgLabel = document.getElementById('upgrade-msg');
+  if (msgLabel) {
+    msgLabel.innerHTML = `<span class="terminal-err">${msg}</span>`;
+  }
+
+  const bar = document.getElementById('upgrade-progress-bar');
+  if (bar) {
+    bar.style.width = '100%';
+    bar.style.background = 'var(--error)';
+  }
+
+  const actions = document.getElementById('upgrade-actions');
+  if (actions) {
+    actions.innerHTML = `
+      <button class="btn btn-secondary" id="btn-upgrade-close" style="width: 100%; margin: 0;">Close</button>
+    `;
+    document.getElementById('btn-upgrade-close').addEventListener('click', () => {
+      modal.remove();
+      // Resume regular polling
+      startStatusPolling();
+    });
+  }
 }
 
 // Start Initialization

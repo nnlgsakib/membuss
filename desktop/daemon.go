@@ -18,18 +18,20 @@ import (
 	"time"
 
 	"github.com/nnlgsakib/membuss/config"
+	"github.com/nnlgsakib/membuss/core/version"
 	"gopkg.in/yaml.v3"
 )
 
 // DesktopConfig stores the GUI application configurations.
 type DesktopConfig struct {
-	DataDir       string `json:"data_dir"`
-	SetupComplete bool   `json:"setup_complete"`
-	GRPCAddr      string `json:"grpc_addr"`
-	APIAddr       string `json:"api_addr"`
-	GatewayAddr   string `json:"gateway_addr"`
-	KeepAlive     bool   `json:"keep_alive"` // Keep daemon running when GUI closes
-	AutoStart     bool   `json:"auto_start"` // Start daemon on GUI start
+	DataDir          string `json:"data_dir"`
+	SetupComplete    bool   `json:"setup_complete"`
+	GRPCAddr         string `json:"grpc_addr"`
+	APIAddr          string `json:"api_addr"`
+	GatewayAddr      string `json:"gateway_addr"`
+	KeepAlive        bool   `json:"keep_alive"` // Keep daemon running when GUI closes
+	AutoStart        bool   `json:"auto_start"` // Start daemon on GUI start
+	InstalledVersion string `json:"installed_version"`
 }
 
 // GetConfigPath returns the persistent configuration path:
@@ -199,14 +201,14 @@ func (dm *DaemonManager) Stop() error {
 // If the latest release has no compatible asset compiled yet (common in local dev),
 // it will fall back to checking if the binaries are compiled in the local bin/ folder
 // and copying them to targetDir to simulate a download.
-func (dm *DaemonManager) DownloadLatestRelease(targetDir string, progressCb func(percent int, msg string)) error {
+func (dm *DaemonManager) DownloadLatestRelease(targetDir string, progressCb func(percent int, msg string)) (string, error) {
 	progressCb(5, "Checking GitHub for latest releases...")
 
 	// Make HTTP Client with timeout
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, err := http.NewRequest("GET", "https://api.github.com/repos/nnlgsakib/membuss/releases/latest", nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("User-Agent", "Membuss-Desktop-App")
 
@@ -240,7 +242,7 @@ func (dm *DaemonManager) DownloadLatestRelease(targetDir string, progressCb func
 
 	binDir := filepath.Join(targetDir, "bin")
 	if err := os.MkdirAll(binDir, 0755); err != nil {
-		return err
+		return "", err
 	}
 
 	// Fallback implementation: If download URL is empty, we look for locally built binaries.
@@ -252,7 +254,7 @@ func (dm *DaemonManager) DownloadLatestRelease(targetDir string, progressCb func
 		// Go workspace root is 2 directories up from /desktop.
 		wd, err := os.Getwd()
 		if err != nil {
-			return err
+			return "", err
 		}
 		
 		// If running in development, we can find binary at root bin/
@@ -266,23 +268,23 @@ func (dm *DaemonManager) DownloadLatestRelease(targetDir string, progressCb func
 		cliSrc := filepath.Join(rootBin, "membuss-cli"+exeExt)
 
 		if _, err := os.Stat(daemonSrc); err != nil {
-			return fmt.Errorf("local development binaries not found at %s. Please run 'make build' at the root repository first", rootBin)
+			return "", fmt.Errorf("local development binaries not found at %s. Please run 'make build' at the root repository first", rootBin)
 		}
 
 		progressCb(60, "Copying local development binaries...")
 		
 		err = copyFile(daemonSrc, filepath.Join(binDir, "membuss"+exeExt))
 		if err != nil {
-			return fmt.Errorf("failed to copy local daemon binary: %w", err)
+			return "", fmt.Errorf("failed to copy local daemon binary: %w", err)
 		}
 		
 		err = copyFile(cliSrc, filepath.Join(binDir, "membuss-cli"+exeExt))
 		if err != nil {
-			return fmt.Errorf("failed to copy local CLI binary: %w", err)
+			return "", fmt.Errorf("failed to copy local CLI binary: %w", err)
 		}
 
 		progressCb(100, "Local installation complete!")
-		return nil
+		return version.Version, nil
 	}
 
 	// If downloadUrl is found, perform the actual download
@@ -291,18 +293,18 @@ func (dm *DaemonManager) DownloadLatestRelease(targetDir string, progressCb func
 	
 	out, err := os.Create(zipPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer out.Close()
 
 	dresp, err := client.Get(downloadUrl)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer dresp.Body.Close()
 
 	if dresp.StatusCode != 200 {
-		return fmt.Errorf("download failed: status %s", dresp.Status)
+		return "", fmt.Errorf("download failed: status %s", dresp.Status)
 	}
 
 	// Copy and report progress
@@ -315,7 +317,7 @@ func (dm *DaemonManager) DownloadLatestRelease(targetDir string, progressCb func
 		if n > 0 {
 			_, werr := out.Write(buf[:n])
 			if werr != nil {
-				return werr
+				return "", werr
 			}
 			downloaded += int64(n)
 			if totalSize > 0 {
@@ -327,7 +329,7 @@ func (dm *DaemonManager) DownloadLatestRelease(targetDir string, progressCb func
 			break
 		}
 		if rerr != nil {
-			return rerr
+			return "", rerr
 		}
 	}
 	out.Close()
@@ -335,14 +337,14 @@ func (dm *DaemonManager) DownloadLatestRelease(targetDir string, progressCb func
 	progressCb(85, "Extracting binaries...")
 	err = extractZip(zipPath, binDir)
 	if err != nil {
-		return fmt.Errorf("failed to extract zip: %w", err)
+		return "", fmt.Errorf("failed to extract zip: %w", err)
 	}
 
 	progressCb(95, "Cleaning up downloaded archive...")
 	_ = os.Remove(zipPath)
 
 	progressCb(100, "Installation complete!")
-	return nil
+	return versionTag, nil
 }
 
 // copyFile copies a file from src to dst.
@@ -469,6 +471,9 @@ func SaveYamlConfig(dataDir string, cfg map[string]any) error {
 	
 	// Set default data_dir in config.yaml to target directory
 	cfg["data_dir"] = filepath.ToSlash(dataDir)
+	if geo, ok := cfg["geolocation_db"].(string); ok {
+		cfg["geolocation_db"] = filepath.ToSlash(geo)
+	}
 
 	data, err := yaml.Marshal(cfg)
 	if err != nil {

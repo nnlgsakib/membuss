@@ -285,13 +285,21 @@ func (a *explorerAdapter) AllStoredMIDs(ctx context.Context) ([]explorer.StoredM
 			continue
 		}
 		name := ""
-		if info, serr := store.GetObjectInfo(b.store, m); serr == nil && info.Name != "" {
+		var size uint64
+		mime := "application/octet-stream"
+		if info, serr := store.GetObjectInfo(b.store, m); serr == nil {
 			name = info.Name
+			size = info.Size
+			if info.MimeType != "" {
+				mime = info.MimeType
+			}
 		}
 		out = append(out, explorer.StoredMIDView{
-			MID:    key,
-			Name:   name,
-			Sealed: func() bool { _, ok := sealedSet[key]; return ok }(),
+			MID:      key,
+			Name:     name,
+			Sealed:   func() bool { _, ok := sealedSet[key]; return ok }(),
+			Size:     size,
+			MimeType: mime,
 		})
 	}
 	return out, nil

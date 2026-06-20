@@ -231,7 +231,7 @@ func Default() *Config {
 		MIDVersion:                    "v1",
 		DHTMode:                       "server",
 		DHTOptimisticProvide:          true,
-		EnableGeolocation:             false,
+		EnableGeolocation:             true,
 	}
 }
 

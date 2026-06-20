@@ -38,3 +38,10 @@ docs/
 membuss.yaml
 membuss.exe
 *.exe
+
+# Go workspace files cause ambiguous imports in Docker build
+go.work
+go.work.sum
+
+# Desktop app is not needed in the daemon image
+desktop/

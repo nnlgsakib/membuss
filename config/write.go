@@ -1,4 +1,4 @@
-﻿package config
+package config
 
 import (
 	"fmt"
@@ -180,6 +180,17 @@ api_tls:
 metrics_enabled: <<METRICS_ENABLED>>
 
 # -----------------------------------------------------------------------------
+# Geolocation
+# -----------------------------------------------------------------------------
+
+# Enable server-side IP geolocation for peer addresses.
+enable_geolocation: <<ENABLE_GEOLOCATION>>
+
+# Optional path to a custom GeoLite2-City.mmdb database file.
+# If empty, the database is downloaded automatically to the data directory.
+geolocation_db: "<<GEOLOCATION_DB>>"
+
+# -----------------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------------
 
@@ -244,6 +255,8 @@ func writeTemplate(cfg *Config) (string, error) {
 		"<<DHT_MODE>>",                    cfg.DHTMode,
 		"<<DHT_OPTIMISTIC_PROVIDE>>",         boolString(cfg.DHTOptimisticProvide),
 		"<<MID_VERSION>>",                  cfg.MIDVersion,
+		"<<ENABLE_GEOLOCATION>>",           boolString(cfg.EnableGeolocation),
+		"<<GEOLOCATION_DB>>",               cfg.GeolocationDB,
 		"<<LISTEN_ADDRS>>",                 listenBlock,
 		"<<BOOTSTRAP_PEERS>>",              bootBlock,
 	)

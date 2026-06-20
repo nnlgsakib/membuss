@@ -2,11 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"time"
 
+	"github.com/nnlgsakib/membuss/core/version"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -60,6 +67,7 @@ func (a *App) SaveConfig(cfg *DesktopConfig) error {
 	a.config.GatewayAddr = cfg.GatewayAddr
 	a.config.KeepAlive = cfg.KeepAlive
 	a.config.AutoStart = cfg.AutoStart
+	a.config.InstalledVersion = cfg.InstalledVersion
 	return a.config.Save()
 }
 
@@ -92,7 +100,7 @@ func (a *App) InstallBinaries(targetDir string) error {
 
 	// Run installation in background
 	go func() {
-		err := a.daemonManager.DownloadLatestRelease(targetDir, progressCallback)
+		versionTag, err := a.daemonManager.DownloadLatestRelease(targetDir, progressCallback)
 		if err != nil {
 			wailsRuntime.EventsEmit(a.ctx, "install_progress", map[string]any{
 				"percent": -1, // Indicates error
@@ -103,6 +111,7 @@ func (a *App) InstallBinaries(targetDir string) error {
 
 		// Save the folder and set setup as complete
 		a.config.DataDir = targetDir
+		a.config.InstalledVersion = versionTag
 		a.config.SetupComplete = true
 		_ = a.config.Save()
 	}()
@@ -147,6 +156,20 @@ func (a *App) SaveNodeConfigRaw(content string) error {
 	if a.config.DataDir == "" {
 		return errors.New("no data directory configured")
 	}
+
+	// Normalize Windows backslashes to forward slashes in path fields to prevent escape sequence parse errors in YAML
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "geolocation_db:") ||
+			strings.HasPrefix(trimmed, "data_dir:") ||
+			strings.HasPrefix(trimmed, "cert_file:") ||
+			strings.HasPrefix(trimmed, "key_file:") {
+			lines[i] = strings.ReplaceAll(line, "\\", "/")
+		}
+	}
+	content = strings.Join(lines, "\n")
+
 	path := filepath.Join(a.config.DataDir, "config.yaml")
 	return os.WriteFile(path, []byte(content), 0644)
 }
@@ -299,4 +322,235 @@ func (a *App) beforeClose(ctx context.Context) bool {
 	_ = a.daemonManager.Stop()
 	return false // Allow app termination
 }
-// Trigger rebuild
+
+// UpdateCheckResult holds the version check status.
+type UpdateCheckResult struct {
+	HasUpdate      bool   `json:"has_update"`
+	CurrentVersion string `json:"current_version"`
+	LatestVersion  string `json:"latest_version"`
+}
+
+// CheckForUpdate queries GitHub for the latest release and compares with the installed version.
+func (a *App) CheckForUpdate() (*UpdateCheckResult, error) {
+	// 1. Determine current version
+	currentVer := a.config.InstalledVersion
+	if currentVer == "" {
+		exeExt := ""
+		if runtime.GOOS == "windows" {
+			exeExt = ".exe"
+		}
+		cliPath := filepath.Join(a.config.DataDir, "bin", "membuss-cli"+exeExt)
+		currentVer = getInstalledBinaryVersion(cliPath)
+		if currentVer == "" {
+			currentVer = version.Version
+		}
+	}
+	currentVer = strings.TrimPrefix(currentVer, "v")
+
+	// 2. Fetch latest release info from GitHub API
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("GET", "https://api.github.com/repos/nnlgsakib/membuss/releases/latest", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Membuss-Desktop-App")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch latest release: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github api returned status %s", resp.Status)
+	}
+
+	var release map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return nil, fmt.Errorf("failed to decode release JSON: %w", err)
+	}
+
+	latestVer, _ := release["tag_name"].(string)
+	latestVerClean := strings.TrimPrefix(latestVer, "v")
+
+	hasUpdate := isVersionNewer(currentVer, latestVerClean)
+
+	return &UpdateCheckResult{
+		HasUpdate:      hasUpdate,
+		CurrentVersion: "v" + currentVer,
+		LatestVersion:  latestVer,
+	}, nil
+}
+
+// getInstalledBinaryVersion runs the installed CLI binary and parses its version string.
+func getInstalledBinaryVersion(cliPath string) string {
+	if _, err := os.Stat(cliPath); err != nil {
+		return ""
+	}
+	cmd := exec.Command(cliPath, "version")
+	hideConsoleWindow(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "membuss version") {
+			parts := strings.Fields(line)
+			for i, part := range parts {
+				if part == "version" && i+1 < len(parts) {
+					return parts[i+1]
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// UpgradeBinaries stops the node, removes the old binaries, downloads the latest release, and updates config.
+func (a *App) UpgradeBinaries() error {
+	if a.config.DataDir == "" {
+		return errors.New("no data directory configured")
+	}
+
+	// 1. Stop the node and force-kill system-wide to ensure files are not locked
+	wailsRuntime.LogInfo(a.ctx, "stopping node and force killing processes before upgrading...")
+	_ = a.daemonManager.Stop()
+	_ = killProcess("membuss*")
+	_ = killProcess("membuss-cli*")
+	time.Sleep(1 * time.Second)
+
+	// 2. Remove old binaries
+	exeExt := ""
+	if runtime.GOOS == "windows" {
+		exeExt = ".exe"
+	}
+	daemonPath := filepath.Join(a.config.DataDir, "bin", "membuss"+exeExt)
+	cliPath := filepath.Join(a.config.DataDir, "bin", "membuss-cli"+exeExt)
+
+	wailsRuntime.LogInfo(a.ctx, "removing old binaries...")
+	if err := os.Remove(daemonPath); err != nil && !os.IsNotExist(err) {
+		oldPath := daemonPath + ".old"
+		_ = os.Remove(oldPath) // remove previous old file if any
+		if renameErr := os.Rename(daemonPath, oldPath); renameErr != nil {
+			return fmt.Errorf("failed to remove or rename old daemon binary: %w", err)
+		}
+	}
+	if err := os.Remove(cliPath); err != nil && !os.IsNotExist(err) {
+		oldPath := cliPath + ".old"
+		_ = os.Remove(oldPath) // remove previous old file if any
+		if renameErr := os.Rename(cliPath, oldPath); renameErr != nil {
+			return fmt.Errorf("failed to remove or rename old CLI binary: %w", err)
+		}
+	}
+
+	// 3. Download and extract the latest release in a background goroutine
+	progressCallback := func(percent int, msg string) {
+		wailsRuntime.EventsEmit(a.ctx, "upgrade_progress", map[string]any{
+			"percent": percent,
+			"message": msg,
+		})
+	}
+
+	go func() {
+		versionTag, err := a.daemonManager.DownloadLatestRelease(a.config.DataDir, progressCallback)
+		if err != nil {
+			wailsRuntime.EventsEmit(a.ctx, "upgrade_progress", map[string]any{
+				"percent": -1,
+				"message": err.Error(),
+			})
+			return
+		}
+
+		// Update config with installed version
+		a.config.InstalledVersion = versionTag
+		_ = a.config.Save()
+
+		// Send success event
+		wailsRuntime.EventsEmit(a.ctx, "upgrade_progress", map[string]any{
+			"percent": 100,
+			"message": "Upgrade complete!",
+		})
+	}()
+
+	return nil
+}
+
+// IsNodeRunningSystemWide checks if any membuss daemon process is running on the system.
+func (a *App) IsNodeRunningSystemWide() bool {
+	return isProcessRunning("membuss")
+}
+
+// ForceKillNode attempts to force-kill any running membuss daemon processes on the system.
+func (a *App) ForceKillNode() error {
+	wailsRuntime.LogInfo(a.ctx, "force killing node daemon processes...")
+	_ = a.daemonManager.Stop()
+	_ = killProcess("membuss*")
+	_ = killProcess("membuss-cli*")
+	time.Sleep(500 * time.Millisecond)
+	return nil
+}
+
+// isVersionNewer helper function to compare two semantic versions.
+func isVersionNewer(current, latest string) bool {
+	current = strings.TrimPrefix(strings.TrimSpace(current), "v")
+	latest = strings.TrimPrefix(strings.TrimSpace(latest), "v")
+	if current == "" {
+		return latest != ""
+	}
+	if latest == "" {
+		return false
+	}
+	cParts := strings.Split(current, ".")
+	lParts := strings.Split(latest, ".")
+	for i := 0; i < len(cParts) && i < len(lParts); i++ {
+		var cVal, lVal int
+		fmt.Sscanf(cParts[i], "%d", &cVal)
+		fmt.Sscanf(lParts[i], "%d", &lVal)
+		if lVal > cVal {
+			return true
+		}
+		if lVal < cVal {
+			return false
+		}
+	}
+	return len(lParts) > len(cParts)
+}
+
+// isProcessRunning checks if a process with the given name is active on the host system.
+func isProcessRunning(name string) bool {
+	if runtime.GOOS == "windows" {
+		if !strings.HasSuffix(name, ".exe") {
+			name += ".exe"
+		}
+		cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("IMAGENAME eq %s", name), "/NH")
+		hideConsoleWindow(cmd)
+		out, err := cmd.Output()
+		if err != nil {
+			return false
+		}
+		return strings.Contains(strings.ToLower(string(out)), strings.ToLower(name))
+	} else {
+		cmd := exec.Command("pgrep", "-x", name)
+		hideConsoleWindow(cmd)
+		err := cmd.Run()
+		return err == nil
+	}
+}
+
+// killProcess kills all processes matching the given name.
+func killProcess(name string) error {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		if !strings.HasSuffix(name, ".exe") && !strings.Contains(name, "*") {
+			name += ".exe"
+		}
+		cmd = exec.Command("taskkill", "/F", "/IM", name)
+	} else {
+		cmd = exec.Command("pkill", "-9", "-f", name)
+	}
+	hideConsoleWindow(cmd)
+	return cmd.Run()
+}
+

@@ -467,9 +467,11 @@ type sealedMIDView struct {
 
 // StoredMIDView is a MID in the local store with its sealed status.
 type StoredMIDView struct {
-	MID    string `json:"MID"`
-	Name   string `json:"Name"`
-	Sealed bool   `json:"Sealed"`
+	MID      string `json:"MID"`
+	Name     string `json:"Name"`
+	Sealed   bool   `json:"Sealed"`
+	Size     uint64 `json:"Size"`
+	MimeType string `json:"MimeType"`
 }
 
 type indexData struct {
@@ -501,16 +503,24 @@ func (e *Explorer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	b := e.cfg.Backend
 	version, build := b.NodeVersion(ctx)
 	sealed, _ := b.SealedMIDs(ctx)
-	
+
+	// Fetch ALL stored MIDs (sealed and unsealed) for the file list.
+	allFiles, _ := b.AllStoredMIDs(ctx)
+
+	// Build a name lookup from allFiles to avoid per-MID Stat calls.
+	nameMap := make(map[string]string, len(allFiles))
+	for _, f := range allFiles {
+		if f.Name != "" {
+			nameMap[f.MID] = f.Name
+		}
+	}
+
 	sealedList := make([]sealedMIDView, 0, len(sealed))
 	for _, m := range sealed {
-		name := ""
-		if info, err := b.Stat(ctx, m); err == nil && info.Name != "" {
-			name = info.Name
-		}
+		midStr := m.String()
 		sealedList = append(sealedList, sealedMIDView{
-			MID:  m.String(),
-			Name: name,
+			MID:  midStr,
+			Name: nameMap[midStr],
 		})
 	}
 	sort.Slice(sealedList, func(i, j int) bool {
@@ -529,9 +539,6 @@ func (e *Explorer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if len(sealedList) > 50 {
 		sealedList = sealedList[:50]
 	}
-
-	// Fetch ALL stored MIDs (sealed and unsealed) for the file list.
-	allFiles, _ := b.AllStoredMIDs(ctx)
 
 	peers, _ := b.Peers(ctx, e.cfg.PeerLimit)
 	totIn, totOut, rateIn, rateOut, _ := b.BandwidthStats(ctx)

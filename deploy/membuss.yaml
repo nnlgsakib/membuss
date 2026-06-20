@@ -47,4 +47,4 @@ dht_mode: server
 # When true, the explorer enriches peer addresses with
 # approximate geolocation (country, city, lat/lon) using
 # a local MaxMind GeoLite2-City database.
-enable_geolocation: false
+enable_geolocation: true
