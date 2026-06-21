@@ -1,7 +1,9 @@
 package main
 
 import (
+	"archive/tar"
 	"archive/zip"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -226,7 +228,11 @@ func (dm *DaemonManager) DownloadLatestRelease(targetDir string, progressCb func
 		assets, _ := latestRelease["assets"].([]any)
 
 		// Search for platform-specific asset
-		expectedSuffix := fmt.Sprintf("-%s-%s.zip", runtime.GOOS, runtime.GOARCH)
+		archiveExt := ".zip"
+		if runtime.GOOS != "windows" {
+			archiveExt = ".tar.gz"
+		}
+		expectedSuffix := fmt.Sprintf("-%s-%s%s", runtime.GOOS, runtime.GOARCH, archiveExt)
 		for _, a := range assets {
 			assetMap, ok := a.(map[string]any)
 			if !ok {
@@ -280,9 +286,13 @@ func (dm *DaemonManager) DownloadLatestRelease(targetDir string, progressCb func
 
 	// If downloadUrl is found, perform the actual download
 	progressCb(20, fmt.Sprintf("Downloading %s release...", versionTag))
-	zipPath := filepath.Join(targetDir, "membuss-latest.zip")
+	archiveExt := ".zip"
+	if runtime.GOOS != "windows" {
+		archiveExt = ".tar.gz"
+	}
+	archivePath := filepath.Join(targetDir, "membuss-latest"+archiveExt)
 	
-	out, err := os.Create(zipPath)
+	out, err := os.Create(archivePath)
 	if err != nil {
 		return "", err
 	}
@@ -326,13 +336,20 @@ func (dm *DaemonManager) DownloadLatestRelease(targetDir string, progressCb func
 	out.Close()
 
 	progressCb(85, "Extracting binaries...")
-	err = extractZip(zipPath, binDir)
-	if err != nil {
-		return "", fmt.Errorf("failed to extract zip: %w", err)
+	var extractErr error
+	if strings.HasSuffix(downloadUrl, ".zip") {
+		extractErr = extractZip(archivePath, binDir)
+	} else if strings.HasSuffix(downloadUrl, ".tar.gz") {
+		extractErr = extractTarGz(archivePath, binDir)
+	} else {
+		extractErr = fmt.Errorf("unsupported archive format: %s", downloadUrl)
+	}
+	if extractErr != nil {
+		return "", fmt.Errorf("failed to extract archive: %w", extractErr)
 	}
 
 	progressCb(95, "Cleaning up downloaded archive...")
-	_ = os.Remove(zipPath)
+	_ = os.Remove(archivePath)
 
 	progressCb(100, "Installation complete!")
 	return versionTag, nil
@@ -559,4 +576,68 @@ func WriteDefaultConfig(dataDir string) error {
 	path := filepath.Join(dataDir, "config.yaml")
 	_ = os.MkdirAll(dataDir, 0755)
 	return os.WriteFile(path, data, 0644)
+}
+
+// extractTarGz extracts all files from a tar.gz archive to dest directory.
+func extractTarGz(src, dest string) error {
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	gzr, err := gzip.NewReader(f)
+	if err != nil {
+		return err
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		// The files in the archive are at the root (membuss, membuss-cli)
+		// Clean and join paths safely
+		fpath := filepath.Join(dest, header.Name)
+
+		// Check for Zip Slip / Path Traversal vulnerability
+		if !strings.HasPrefix(fpath, filepath.Clean(dest)+string(os.PathSeparator)) {
+			return fmt.Errorf("tar: illegal file path: %s", fpath)
+		}
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(fpath, 0755); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(fpath), 0755); err != nil {
+				return err
+			}
+			
+			outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, header.FileInfo().Mode())
+			if err != nil {
+				return err
+			}
+			
+			if _, err := io.Copy(outFile, tr); err != nil {
+				outFile.Close()
+				return err
+			}
+			outFile.Close()
+
+			// Ensure executable permissions on Unix-like OSes
+			if runtime.GOOS != "windows" {
+				_ = os.Chmod(fpath, 0755)
+			}
+		}
+	}
+	return nil
 }
