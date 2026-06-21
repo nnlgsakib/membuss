@@ -59,4 +59,7 @@ skills-lock.json
 .agents/skills/
 .opencode/
 
+# Roadmap docs
+info.txt
+
 
