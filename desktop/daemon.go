@@ -250,26 +250,17 @@ func (dm *DaemonManager) DownloadLatestRelease(targetDir string, progressCb func
 		progressCb(30, "No compatible asset found in GitHub release. Falling back to local binaries...")
 		time.Sleep(500 * time.Millisecond)
 
-		// Look for locally built binaries in workspace root bin directory.
-		// Go workspace root is 2 directories up from /desktop.
-		wd, err := os.Getwd()
+		rootBin, err := findLocalBinaries()
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("local development binaries not found: %w", err)
 		}
-		
-		// If running in development, we can find binary at root bin/
-		rootBin := filepath.Clean(filepath.Join(wd, "..", "bin"))
-		
+
 		exeExt := ""
 		if runtime.GOOS == "windows" {
 			exeExt = ".exe"
 		}
 		daemonSrc := filepath.Join(rootBin, "membuss"+exeExt)
 		cliSrc := filepath.Join(rootBin, "membuss-cli"+exeExt)
-
-		if _, err := os.Stat(daemonSrc); err != nil {
-			return "", fmt.Errorf("local development binaries not found at %s. Please run 'make build' at the root repository first", rootBin)
-		}
 
 		progressCb(60, "Copying local development binaries...")
 		
@@ -347,6 +338,73 @@ func (dm *DaemonManager) DownloadLatestRelease(targetDir string, progressCb func
 	return versionTag, nil
 }
 
+// findLocalBinaries attempts to dynamically locate the directory containing
+// the built membuss and membuss-cli binaries.
+func findLocalBinaries() (string, error) {
+	exeExt := ""
+	if runtime.GOOS == "windows" {
+		exeExt = ".exe"
+	}
+
+	// 1. Try relative to the currently running executable path
+	if execPath, err := os.Executable(); err == nil {
+		execDir := filepath.Dir(execPath)
+		candidates := []string{
+			execDir,
+			filepath.Join(execDir, "bin"),
+			filepath.Clean(filepath.Join(execDir, "..")),
+			filepath.Clean(filepath.Join(execDir, "..", "bin")),
+			filepath.Clean(filepath.Join(execDir, "..", "..")),
+			filepath.Clean(filepath.Join(execDir, "..", "..", "bin")),
+			filepath.Clean(filepath.Join(execDir, "..", "..", "..", "bin")),
+		}
+
+		for _, cand := range candidates {
+			daemonPath := filepath.Join(cand, "membuss"+exeExt)
+			cliPath := filepath.Join(cand, "membuss-cli"+exeExt)
+			if fi1, err1 := os.Stat(daemonPath); err1 == nil && !fi1.IsDir() {
+				if fi2, err2 := os.Stat(cliPath); err2 == nil && !fi2.IsDir() {
+					return cand, nil
+				}
+			}
+		}
+	}
+
+	// 2. Try relative to the current working directory
+	if wd, err := os.Getwd(); err == nil {
+		candidates := []string{
+			wd,
+			filepath.Join(wd, "bin"),
+			filepath.Clean(filepath.Join(wd, "..")),
+			filepath.Clean(filepath.Join(wd, "..", "bin")),
+			filepath.Clean(filepath.Join(wd, "..", "..")),
+			filepath.Clean(filepath.Join(wd, "..", "..", "bin")),
+		}
+		for _, cand := range candidates {
+			daemonPath := filepath.Join(cand, "membuss"+exeExt)
+			cliPath := filepath.Join(cand, "membuss-cli"+exeExt)
+			if fi1, err1 := os.Stat(daemonPath); err1 == nil && !fi1.IsDir() {
+				if fi2, err2 := os.Stat(cliPath); err2 == nil && !fi2.IsDir() {
+					return cand, nil
+				}
+			}
+		}
+	}
+
+	// 3. Try finding them in system PATH
+	if p1, err1 := exec.LookPath("membuss"); err1 == nil {
+		if p2, err2 := exec.LookPath("membuss-cli"); err2 == nil {
+			dDir := filepath.Dir(p1)
+			cDir := filepath.Dir(p2)
+			if dDir == cDir {
+				return dDir, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("local development binaries not found")
+}
+
 // copyFile copies a file from src to dst.
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
@@ -411,6 +469,11 @@ func extractZip(src, dest string) error {
 
 		if err != nil {
 			return err
+		}
+
+		// Ensure executable permissions on Unix-like OSes
+		if runtime.GOOS != "windows" {
+			_ = os.Chmod(fpath, 0755)
 		}
 	}
 	return nil
