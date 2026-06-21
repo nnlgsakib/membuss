@@ -140,6 +140,7 @@ type Config struct {
 
 	// Phase 18: MemNS resolver
 	MemNSResolver *memns.Resolver
+	LogLevel      string
 }
 
 // MemGate is the public HTTP gateway.
@@ -201,7 +202,11 @@ func (m *MemGate) buildRouter() chi.Router {
 				next.ServeHTTP(w, r)
 				return
 			}
-			middleware.Logger(next).ServeHTTP(w, r)
+			if strings.ToLower(m.cfg.LogLevel) == "debug" {
+				middleware.Logger(next).ServeHTTP(w, r)
+			} else {
+				next.ServeHTTP(w, r)
+			}
 		})
 	})
 	r.Use(middleware.Recoverer)

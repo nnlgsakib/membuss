@@ -7,7 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nnlgsakib/membuss/core/keyring"
 	"github.com/nnlgsakib/membuss/core/mid"
+	"github.com/nnlgsakib/membuss/net/dht"
+	"github.com/nnlgsakib/membuss/net/host"
 )
 
 // fakeStore is a tiny in-memory SealedLister.
@@ -175,5 +178,58 @@ func TestTokenBucket_BurstThenLimit(t *testing.T) {
 	defer cancel()
 	if err := tb.Wait(ctx); err == nil {
 		t.Fatal("expected bucket to be empty after burst")
+	}
+}
+
+func TestHerald_RepublishMemNS_NoRecord(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	tempDir := t.TempDir()
+
+	// Generate and save identity.key
+	priv, err := host.GenerateIdentity()
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	if err := host.SaveIdentity(tempDir, priv); err != nil {
+		t.Fatalf("SaveIdentity: %v", err)
+	}
+
+	kr := keyring.NewKeyRing(tempDir)
+
+	// List keys should show "self"
+	keys, err := kr.List()
+	if err != nil {
+		t.Fatalf("List keys: %v", err)
+	}
+	if len(keys) != 1 || keys[0].Name != "self" {
+		t.Fatalf("expected only 'self' key, got %v", keys)
+	}
+
+	// We have "self" key but no "self.record" file.
+	// Run herald with this keyring. It should skip the missing record silently.
+	store := &fakeStore{}
+	prov := &fakeProvider{}
+
+	h, err := New(Config{
+		Store:    store,
+		DHT:      prov,
+		Strategy: StrategyRoots,
+		Interval: time.Hour,
+		Rate:     1000,
+		Burst:    32,
+		KeyRing:  kr,
+		MemDHT:   &dht.MemDHT{},
+		Now:      time.Now,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// RunOnce should execute cleanly without panics/errors
+	n := h.RunOnce(ctx)
+	if n != 0 {
+		t.Fatalf("expected 0 MIDs announced, got %d", n)
 	}
 }

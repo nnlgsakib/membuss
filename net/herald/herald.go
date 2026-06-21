@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -237,6 +238,10 @@ func (h *MemHerald) RunOnce(ctx context.Context) int {
 				}
 				rec, err := h.cfg.KeyRing.LoadRecord(kInfo.Name)
 				if err != nil {
+					if errors.Is(err, os.ErrNotExist) {
+						// It is normal for a key to exist in the keyring without a published record
+						continue
+					}
 					log.Printf("herald: failed to load record for key %s: %v", kInfo.Name, err)
 					continue
 				}

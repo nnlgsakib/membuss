@@ -176,6 +176,7 @@ type Config struct {
 	// Phase 18: MemNS and KeyRing fields
 	KeyRing       *keyring.KeyRing
 	MemNSResolver *memns.Resolver
+	LogLevel      string
 }
 
 // NodeAPI is the local HTTP control API.
@@ -223,7 +224,11 @@ func (a *NodeAPI) buildRouter() chi.Router {
 				next.ServeHTTP(w, r)
 				return
 			}
-			middleware.Logger(next).ServeHTTP(w, r)
+			if strings.ToLower(a.cfg.LogLevel) == "debug" {
+				middleware.Logger(next).ServeHTTP(w, r)
+			} else {
+				next.ServeHTTP(w, r)
+			}
 		})
 	})
 	r.Use(middleware.Recoverer)
