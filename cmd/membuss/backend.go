@@ -186,6 +186,11 @@ func (b *daemonBackend) Get(ctx context.Context, midStr string, offset, limit ui
 	if err != nil {
 		return nil, err
 	}
+	if has {
+		if complete, cerr := isDAGComplete(b.store, root); cerr != nil || !complete {
+			has = false
+		}
+	}
 	if !has && b.memex != nil {
 		// Try DHT to find a provider, then Memex-fetch.
 		if b.dht != nil {
@@ -200,8 +205,11 @@ func (b *daemonBackend) Get(ctx context.Context, midStr string, offset, limit ui
 					Timeout:   30 * time.Second,
 				})
 				if serr == nil {
-					if _, ferr := sess.Fetch(ctx); ferr == nil {
+					if rc, ferr := sess.FetchWithBackoff(ctx, memex.DefaultRetryConfig()); ferr == nil && rc != nil {
 						has = true
+						if c, ok := rc.(io.Closer); ok {
+							_ = c.Close()
+						}
 					}
 				}
 			}
@@ -237,6 +245,11 @@ func (b *daemonBackend) GetWithProgress(ctx context.Context, midStr string, offs
 	if err != nil {
 		return nil, err
 	}
+	if has {
+		if complete, cerr := isDAGComplete(b.store, root); cerr != nil || !complete {
+			has = false
+		}
+	}
 	if !has && b.memex != nil {
 		// Try DHT to find a provider, then Memex-fetch.
 		if b.dht != nil {
@@ -252,8 +265,11 @@ func (b *daemonBackend) GetWithProgress(ctx context.Context, midStr string, offs
 					ProgressFn: progressFn,
 				})
 				if serr == nil {
-					if _, ferr := sess.Fetch(ctx); ferr == nil {
+					if rc, ferr := sess.FetchWithBackoff(ctx, memex.DefaultRetryConfig()); ferr == nil && rc != nil {
 						has = true
+						if c, ok := rc.(io.Closer); ok {
+							_ = c.Close()
+						}
 					}
 				}
 			}
@@ -352,6 +368,13 @@ func (b *daemonBackend) Stat(ctx context.Context, midStr string) (serverpkg.Stat
 		return serverpkg.StatInfo{}, err
 	}
 	if !has {
+		return serverpkg.StatInfo{Present: false}, nil
+	}
+	complete, err := isDAGComplete(b.store, root)
+	if err != nil {
+		return serverpkg.StatInfo{}, err
+	}
+	if !complete {
 		return serverpkg.StatInfo{Present: false}, nil
 	}
 	sealed, _ := b.store.IsSealed(root)

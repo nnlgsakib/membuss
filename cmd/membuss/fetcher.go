@@ -32,10 +32,16 @@ func (f *memexFetcher) Fetch(ctx context.Context, root mid.MID, providers []peer
 	if err != nil {
 		return err
 	}
-	rc, err := sess.Fetch(ctx)
+	rc, err := sess.FetchWithBackoff(ctx, memex.DefaultRetryConfig())
 	if err != nil {
 		return err
 	}
-	_, _ = io.Copy(io.Discard, rc)
+	if rc != nil {
+		if c, ok := rc.(io.Closer); ok {
+			_ = c.Close()
+		} else {
+			_, _ = io.Copy(io.Discard, rc)
+		}
+	}
 	return nil
 }

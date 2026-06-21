@@ -230,6 +230,7 @@ func (e *Engine) handleStream(s network.Stream) {
 	_ = s.SetWriteDeadline(time.Now().Add(DefaultPeerTimeout))
 
 	for {
+		_ = s.SetReadDeadline(time.Now().Add(DefaultPeerTimeout))
 		buf := readFrame(s)
 		if buf == nil {
 			return

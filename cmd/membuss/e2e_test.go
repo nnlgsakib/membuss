@@ -81,6 +81,7 @@ grpc_addr: %s
 anchor_mode: false
 reprovide_interval: 12h
 nat_wait_seconds: 0
+enable_geolocation: false
 `, filepath.ToSlash(tmp), addr))
 	cfgPath := filepath.Join(tmp, "config.yaml")
 	if err := os.WriteFile(cfgPath, cfg, 0644); err != nil {

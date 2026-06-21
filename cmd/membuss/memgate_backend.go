@@ -52,10 +52,16 @@ func (a *memgateAdapter) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser,
 		}
 	}
 	if !has && b.memex != nil && b.dht != nil {
-		provCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		provCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		provs, perr := b.dht.FindProviders(provCtx, m)
 		cancel()
-		if perr == nil && len(provs) > 0 {
+		if perr != nil || len(provs) == 0 {
+			// Fallback: use currently connected swarm peers
+			for _, pid := range b.host.Network().Peers() {
+				provs = append(provs, b.host.Peerstore().PeerInfo(pid))
+			}
+		}
+		if len(provs) > 0 {
 			sess, serr := memex.NewSession(memex.SessionConfig{
 				Engine:    b.memex,
 				Root:      m,
@@ -63,8 +69,11 @@ func (a *memgateAdapter) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser,
 				Timeout:   30 * time.Second,
 			})
 			if serr == nil {
-				if _, ferr := sess.Fetch(ctx); ferr == nil {
+				if rc, ferr := sess.FetchWithBackoff(ctx, memex.DefaultRetryConfig()); ferr == nil && rc != nil {
 					has = true
+					if c, ok := rc.(io.Closer); ok {
+						_ = c.Close()
+					}
 				}
 			}
 		}
@@ -221,6 +230,9 @@ func (a *memgateAdapter) Stat(ctx context.Context, m mid.MID) (memgate.ContentIn
 		return memgate.ContentInfo{}, err
 	}
 	if !has {
+		return memgate.ContentInfo{}, errMGNotFound
+	}
+	if complete, cerr := isDAGComplete(b.store, m); cerr != nil || !complete {
 		return memgate.ContentInfo{}, errMGNotFound
 	}
 	var (
