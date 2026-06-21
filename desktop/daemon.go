@@ -116,6 +116,11 @@ func (dm *DaemonManager) IsRunning() bool {
 
 // Start spawns the daemon in the background.
 func (dm *DaemonManager) Start(dataDir string) error {
+	// 1. Resolve any blocked ports dynamically
+	if err := dm.resolveBlockedPorts(dataDir); err != nil {
+		// Log error but continue trying to start
+	}
+
 	if dm.IsRunning() {
 		return errors.New("daemon is already running")
 	}
@@ -173,30 +178,166 @@ func (dm *DaemonManager) Start(dataDir string) error {
 	return nil
 }
 
-// Stop sends a termination/interrupt signal to the daemon.
+// Stop sends a termination/interrupt signal to the daemon and ensures it terminates.
 func (dm *DaemonManager) Stop() error {
 	dm.mu.Lock()
-	defer dm.mu.Unlock()
+	cmd := dm.cmd
+	dm.mu.Unlock()
 
-	if dm.cmd == nil || dm.cmd.Process == nil {
+	if cmd == nil || cmd.Process == nil {
+		_ = killProcess("membuss")
+		_ = killProcess("membuss-cli")
 		return nil
 	}
 
-	// On Windows, TaskKill or interrupting isn't as clean as SIGINT on unix,
-	// but we can kill the process. Let's try to terminate gracefully.
+	// Try graceful stop first
 	var err error
 	if runtime.GOOS == "windows" {
-		err = dm.cmd.Process.Kill()
+		err = cmd.Process.Kill()
 	} else {
-		err = dm.cmd.Process.Signal(os.Interrupt)
+		err = cmd.Process.Signal(os.Interrupt)
 	}
 
-	if err != nil {
-		return fmt.Errorf("failed to stop daemon: %w", err)
+	if err == nil {
+		// Wait for the process to exit (up to 3 seconds)
+		done := make(chan error, 1)
+		go func() {
+			done <- cmd.Wait()
+		}()
+
+		select {
+		case <-done:
+			// Process exited cleanly
+		case <-time.After(3 * time.Second):
+			// Timed out, force kill
+			_ = cmd.Process.Kill()
+			// Wait for the kill to register
+			<-done
+		}
+	} else {
+		// Graceful signal failed, try force kill directly
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 	}
 
-	dm.cmd = nil
+	dm.mu.Lock()
+	if dm.cmd == cmd {
+		dm.cmd = nil
+	}
+	dm.mu.Unlock()
+
+	// Clean up any remaining/orphan processes just to be completely safe
+	_ = killProcess("membuss")
+	_ = killProcess("membuss-cli")
+	
+	// Wait a tiny bit for the OS to release the socket bindings
+	time.Sleep(500 * time.Millisecond)
+
 	return nil
+}
+
+func (dm *DaemonManager) resolveBlockedPorts(dataDir string) error {
+	// First, load config.yaml if it exists to get the configured daemon ports
+	yamlConfig, err := LoadYamlConfig(dataDir)
+	if err != nil {
+		return err
+	}
+
+	// Helper to get string from map
+	getAddr := func(key string, defaultVal string) string {
+		if val, ok := yamlConfig[key].(string); ok && val != "" {
+			return val
+		}
+		return defaultVal
+	}
+
+	// Daemon ports (from config.yaml or defaults)
+	daemonGRPC := getAddr("grpc_addr", "127.0.0.1:50051")
+	daemonAPI := getAddr("api_addr", "127.0.0.1:5001")
+	daemonGateway := getAddr("gateway_addr", "127.0.0.1:8080")
+
+	// Desktop config ports
+	desktopGRPC := dm.config.GRPCAddr
+	desktopAPI := dm.config.APIAddr
+	desktopGateway := dm.config.GatewayAddr
+
+	// Reconcile/sync them: if they differ, prioritize the desktop config
+	if desktopGRPC == "" {
+		desktopGRPC = daemonGRPC
+	}
+	if desktopAPI == "" {
+		desktopAPI = daemonAPI
+	}
+	if desktopGateway == "" {
+		desktopGateway = daemonGateway
+	}
+
+	changed := false
+
+	// GRPC
+	resolvedGRPC, err := findNextFreePort(desktopGRPC)
+	if err == nil && resolvedGRPC != desktopGRPC {
+		desktopGRPC = resolvedGRPC
+		changed = true
+	}
+
+	// API
+	resolvedAPI, err := findNextFreePort(desktopAPI)
+	if err == nil && resolvedAPI != desktopAPI {
+		desktopAPI = resolvedAPI
+		changed = true
+	}
+
+	// Gateway
+	resolvedGateway, err := findNextFreePort(desktopGateway)
+	if err == nil && resolvedGateway != desktopGateway {
+		desktopGateway = resolvedGateway
+		changed = true
+	}
+
+	if changed {
+		// Update desktop config
+		dm.config.GRPCAddr = desktopGRPC
+		dm.config.APIAddr = desktopAPI
+		dm.config.GatewayAddr = desktopGateway
+		_ = dm.config.Save()
+
+		// Update config.yaml
+		yamlConfig["grpc_addr"] = desktopGRPC
+		yamlConfig["api_addr"] = desktopAPI
+		yamlConfig["gateway_addr"] = desktopGateway
+		_ = SaveYamlConfig(dataDir, yamlConfig)
+	}
+
+	return nil
+}
+
+func isPortFree(addr string) bool {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	ln.Close()
+	return true
+}
+
+func findNextFreePort(addr string) (string, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr, err
+	}
+	var port int
+	if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil {
+		return addr, err
+	}
+
+	for i := 0; i < 100; i++ {
+		candidateAddr := net.JoinHostPort(host, fmt.Sprintf("%d", port+i))
+		if isPortFree(candidateAddr) {
+			return candidateAddr, nil
+		}
+	}
+	return addr, fmt.Errorf("failed to find free port starting from %s", addr)
 }
 
 // DownloadLatestRelease queries GitHub releases and downloads the appropriate zip file.
