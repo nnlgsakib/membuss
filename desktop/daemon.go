@@ -214,11 +214,18 @@ func (dm *DaemonManager) DownloadLatestRelease(targetDir string, progressCb func
 	}
 	req.Header.Set("User-Agent", "Membuss-Desktop-App")
 
+	var apiErr error
 	resp, err := client.Do(req)
 	var latestRelease map[string]any
-	if err == nil && resp.StatusCode == 200 {
+	if err != nil {
+		apiErr = fmt.Errorf("failed to fetch latest release from GitHub: %w", err)
+	} else {
 		defer resp.Body.Close()
-		_ = json.NewDecoder(resp.Body).Decode(&latestRelease)
+		if resp.StatusCode != 200 {
+			apiErr = fmt.Errorf("GitHub API returned status %s", resp.Status)
+		} else {
+			_ = json.NewDecoder(resp.Body).Decode(&latestRelease)
+		}
 	}
 
 	var downloadUrl string
@@ -258,7 +265,10 @@ func (dm *DaemonManager) DownloadLatestRelease(targetDir string, progressCb func
 
 		rootBin, err := findLocalBinaries()
 		if err != nil {
-			return "", fmt.Errorf("local development binaries not found: %w", err)
+			if apiErr != nil {
+				return "", fmt.Errorf("GitHub release query failed: %w (and local fallback failed: %v)", apiErr, err)
+			}
+			return "", fmt.Errorf("no compatible asset found in GitHub release (and local fallback failed: %w)", err)
 		}
 
 		exeExt := ""
