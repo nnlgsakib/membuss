@@ -1,4 +1,4 @@
-﻿package herald
+package herald
 
 import (
 	"context"
@@ -11,13 +11,24 @@ import (
 // fakePublisher records every PublishAsRelay call so the
 // tests can assert on the cadence.
 type fakePublisher struct {
-	calls atomic.Int64
-	err   error
+	calls            atomic.Int64
+	err              error
+	routingTableSize int
 }
 
 func (f *fakePublisher) PublishAsRelay(_ context.Context) error {
 	f.calls.Add(1)
 	return f.err
+}
+
+func (f *fakePublisher) RoutingTableSize() int {
+	if f.routingTableSize == -1 {
+		return 0
+	}
+	if f.routingTableSize == 0 {
+		return 1 // default to 1 so tests run immediately
+	}
+	return f.routingTableSize
 }
 
 // TestNewRelayAnnouncer_NilDHT confirms the constructor
@@ -46,12 +57,13 @@ func TestNewRelayAnnouncer_AppliesDefaults(t *testing.T) {
 }
 
 // TestRelayAnnouncer_StartFiresImmediate asserts that Start
-// fires one publish synchronously before returning.
+// fires one publish asynchronously after routing table is populated.
 func TestRelayAnnouncer_StartFiresImmediate(t *testing.T) {
 	pub := &fakePublisher{}
 	r, err := NewRelayAnnouncer(RelayAnnouncer{
-		DHT:      pub,
-		Interval: 200 * time.Millisecond,
+		DHT:               pub,
+		Interval:          200 * time.Millisecond,
+		BootCheckInterval: 5 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("NewRelayAnnouncer: %v", err)
@@ -59,6 +71,16 @@ func TestRelayAnnouncer_StartFiresImmediate(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	r.Start(ctx)
+
+	// Poll until the asynchronous publish happens
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if pub.calls.Load() >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	if got := pub.calls.Load(); got < 1 {
 		t.Fatalf("Start did not fire an immediate publish (calls=%d)", got)
 	}
@@ -70,8 +92,9 @@ func TestRelayAnnouncer_StartFiresImmediate(t *testing.T) {
 func TestRelayAnnouncer_LoopTicks(t *testing.T) {
 	pub := &fakePublisher{}
 	r, err := NewRelayAnnouncer(RelayAnnouncer{
-		DHT:      pub,
-		Interval: 30 * time.Millisecond,
+		DHT:               pub,
+		Interval:          30 * time.Millisecond,
+		BootCheckInterval: 5 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("NewRelayAnnouncer: %v", err)
@@ -103,5 +126,47 @@ func TestRelayAnnouncer_PropagatesError(t *testing.T) {
 	}
 	if err := r.RunOnce(context.Background()); !errors.Is(err, want) {
 		t.Fatalf("RunOnce err = %v, want %v", err, want)
+	}
+}
+
+// TestRelayAnnouncer_Start_DelayedRoutingTable asserts that Start does not
+// announce until the routing table has at least 1 peer.
+func TestRelayAnnouncer_Start_DelayedRoutingTable(t *testing.T) {
+	pub := &fakePublisher{
+		routingTableSize: -1, // initially empty (returns 0)
+	}
+	r, err := NewRelayAnnouncer(RelayAnnouncer{
+		DHT:               pub,
+		Interval:          10 * time.Second,
+		BootCheckInterval: 5 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewRelayAnnouncer: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.Start(ctx)
+
+	// Wait a bit and check that no calls were made because RoutingTableSize == 0
+	time.Sleep(50 * time.Millisecond)
+	if got := pub.calls.Load(); got != 0 {
+		t.Fatalf("expected 0 calls when routing table is empty, got %d", got)
+	}
+
+	// Now populate the routing table
+	pub.routingTableSize = 1
+
+	// Wait and check that the announce was made
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if pub.calls.Load() >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if got := pub.calls.Load(); got < 1 {
+		t.Fatalf("expected call to be made after routing table populated, got %d", got)
 	}
 }

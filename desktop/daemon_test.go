@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -122,5 +123,36 @@ func TestExtractTarGz(t *testing.T) {
 		if fi2.Mode().Perm() != 0755 {
 			t.Errorf("expected permission 0755 for f2, got %o", fi2.Mode().Perm())
 		}
+	}
+}
+
+func TestIsPortFreeAndFindNextFreePort(t *testing.T) {
+	// Bind to a port temporarily
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on dynamic port: %v", err)
+	}
+	defer ln.Close()
+
+	addr := ln.Addr().String()
+
+	// Check if the port is free (should be false since we are listening)
+	if isPortFree(addr) {
+		t.Errorf("expected port %s to be busy, but it was reported free", addr)
+	}
+
+	// Try to find the next free port starting from this busy one
+	nextFree, err := findNextFreePort(addr)
+	if err != nil {
+		t.Fatalf("findNextFreePort failed: %v", err)
+	}
+
+	if nextFree == addr {
+		t.Errorf("expected next free port to be different from %s, got same", addr)
+	}
+
+	// The next free port should actually be free
+	if !isPortFree(nextFree) {
+		t.Errorf("expected found port %s to be free, but it was reported busy", nextFree)
 	}
 }

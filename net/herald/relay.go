@@ -1,4 +1,4 @@
-﻿// Phase 11: Mem-Herald relay announcer.
+// Phase 11: Mem-Herald relay announcer.
 //
 // Anchor nodes and any node with RelayService=true re-publish
 // their presence under the DHT's /membuss/relays/v1 key on
@@ -30,6 +30,10 @@ type RelayAnnouncer struct {
 	// Interval is the time between republishes. Zero
 	// defaults to 12 hours (same as the regular herald).
 	Interval time.Duration
+	// BootCheckInterval is the polling interval for checking
+	// DHT routing table size before the first publish. Zero
+	// defaults to 5 seconds.
+	BootCheckInterval time.Duration
 	// Now overrides the wall clock for tests. Default is
 	// time.Now.
 	Now func() time.Time
@@ -44,6 +48,7 @@ type RelayAnnouncer struct {
 // from the DHT package and trivial to test with a fake.
 type RelayPublisher interface {
 	PublishAsRelay(ctx context.Context) error
+	RoutingTableSize() int
 }
 
 // AnnouncerLogger is the minimal logging surface the
@@ -80,19 +85,40 @@ func NewRelayAnnouncer(cfg RelayAnnouncer) (*RelayAnnouncer, error) {
 		cfg.Now = time.Now
 	}
 	return &RelayAnnouncer{
-		DHT:     cfg.DHT,
-		Interval: cfg.Interval,
-		Now:     cfg.Now,
-		Logger:  cfg.Logger,
+		DHT:               cfg.DHT,
+		Interval:          cfg.Interval,
+		BootCheckInterval: cfg.BootCheckInterval,
+		Now:               cfg.Now,
+		Logger:            cfg.Logger,
 	}, nil
 }
 
 // Start launches the background republish loop. It returns
-// immediately. A first publish is also fired immediately so
-// the node appears in the relay list at startup.
+// immediately. It waits in the background until the DHT's
+// routing table is non-empty before performing the first
+// publish and starting the interval loop.
 func (r *RelayAnnouncer) Start(ctx context.Context) {
-	r.RunOnce(ctx)
-	go r.loop(ctx)
+	go func() {
+		bootCheckInterval := r.BootCheckInterval
+		if bootCheckInterval <= 0 {
+			bootCheckInterval = 5 * time.Second
+		}
+		ticker := time.NewTicker(bootCheckInterval)
+		defer ticker.Stop()
+		for {
+			if r.DHT.RoutingTableSize() > 0 {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+
+		r.RunOnce(ctx)
+		r.loop(ctx)
+	}()
 }
 
 // loop is the long-lived ticker.
