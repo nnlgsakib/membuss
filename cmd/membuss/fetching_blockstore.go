@@ -35,10 +35,16 @@ func (f *fetchingBlockstore) Get(m mid.MID) ([]byte, error) {
 	}
 
 	// Not found locally. Try fetching from network.
-	provCtx, cancel := context.WithTimeout(f.ctx, 5*time.Second)
+	provCtx, cancel := context.WithTimeout(f.ctx, 15*time.Second)
 	provs, perr := f.b.dht.FindProviders(provCtx, m)
 	cancel()
 	if perr != nil || len(provs) == 0 {
+		// Fallback: use currently connected swarm peers
+		for _, pid := range f.b.host.Network().Peers() {
+			provs = append(provs, f.b.host.Peerstore().PeerInfo(pid))
+		}
+	}
+	if len(provs) == 0 {
 		return nil, store.ErrNotFound
 	}
 
@@ -52,7 +58,7 @@ func (f *fetchingBlockstore) Get(m mid.MID) ([]byte, error) {
 		return nil, store.ErrNotFound
 	}
 
-	rc, ferr := sess.Fetch(f.ctx)
+	rc, ferr := sess.FetchWithBackoff(f.ctx, memex.DefaultRetryConfig())
 	if ferr != nil {
 		return nil, store.ErrNotFound
 	}

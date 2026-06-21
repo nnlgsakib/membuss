@@ -45,8 +45,13 @@ COMPOSE       ?= docker compose
         docker-compose-up docker-compose-down docker-compose-logs
 
 # Dynamic versioning linker flags
-GIT_COMMIT := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
-BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo unknown)
+ifeq ($(OS),Windows_NT)
+    GIT_COMMIT := $(shell git rev-parse HEAD 2>NUL || echo unknown)
+    BUILD_TIME := $(shell powershell -Command "[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')" 2>NUL || echo unknown)
+else
+    GIT_COMMIT := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+    BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo unknown)
+endif
 LDFLAGS    := -ldflags "-X github.com/nnlgsakib/membuss/core/version.GitCommit=$(GIT_COMMIT) -X github.com/nnlgsakib/membuss/core/version.BuildTime=$(BUILD_TIME)"
 
 build:

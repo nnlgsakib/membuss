@@ -170,11 +170,17 @@ func (a *explorerAdapter) ResolveWithProgress(ctx context.Context, m mid.MID, pr
 		}
 	}
 	if !has && b.dht != nil && b.memex != nil {
-		provCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		provCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		provs, perr := b.dht.FindProviders(provCtx, m)
 		cancel()
 		if perr != nil || len(provs) == 0 {
-			// No DHT providers -> explorer will render
+			// Fallback: use currently connected swarm peers
+			for _, pid := range b.host.Network().Peers() {
+				provs = append(provs, b.host.Peerstore().PeerInfo(pid))
+			}
+		}
+		if len(provs) == 0 {
+			// No DHT providers and no connected swarm peers -> explorer will render
 			// "not found". Returning a typed error
 			// keeps the explorer template free of
 			// string matching on transport errors.
@@ -188,15 +194,18 @@ func (a *explorerAdapter) ResolveWithProgress(ctx context.Context, m mid.MID, pr
 			ProgressFn: progressFn,
 		})
 		if serr == nil {
-			if _, ferr := sess.Fetch(ctx); ferr == nil {
+			if rc, ferr := sess.FetchWithBackoff(ctx, memex.DefaultRetryConfig()); ferr == nil && rc != nil {
 				has = true
+				if c, ok := rc.(io.Closer); ok {
+					_ = c.Close()
+				}
 			} else {
 				// The Memex session reported progress (blocks
 				// downloaded) but the final reassembly or
 				// verification step failed. Re-check the store
 				// because individual blocks may have been stored
 				// even though the session-level Fetch errored.
-				if h2, herr := b.store.Has(m); herr == nil && h2 {
+				if complete, cerr := isDAGComplete(b.store, m); cerr == nil && complete {
 					has = true
 				}
 			}
