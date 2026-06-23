@@ -455,3 +455,80 @@ func TestMemStoreCodecPersistence(t *testing.T) {
 	}
 }
 
+func TestMemStoreDeleteRecursive(t *testing.T) {
+	s := newTestStore(t)
+
+	// Create child blocks
+	c1Data := []byte("child-block-1-data")
+	c1 := mid.FromBytes(c1Data)
+	if err := s.Put(c1, c1Data); err != nil {
+		t.Fatalf("Put c1: %v", err)
+	}
+
+	c2Data := []byte("child-block-2-data")
+	c2 := mid.FromBytes(c2Data)
+	if err := s.Put(c2, c2Data); err != nil {
+		t.Fatalf("Put c2: %v", err)
+	}
+
+	// Create root DAG node referencing child blocks
+	node := &membusspb.DAGNode{
+		Links: []string{c1.String(), c2.String()},
+	}
+	nodeData, err := proto.Marshal(node)
+	if err != nil {
+		t.Fatalf("Marshal DAG node: %v", err)
+	}
+	root := mid.FromBytes(nodeData)
+	if err := s.PutDAG(root, nodeData); err != nil {
+		t.Fatalf("PutDAG root: %v", err)
+	}
+
+	// Seal root
+	if err := s.Seal(root, true); err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+
+	// Verify all blocks and seals are present
+	if has, _ := s.Has(root); !has {
+		t.Fatal("expected root to be present")
+	}
+	if has, _ := s.Has(c1); !has {
+		t.Fatal("expected c1 to be present")
+	}
+	if has, _ := s.Has(c2); !has {
+		t.Fatal("expected c2 to be present")
+	}
+	if isSealed, _ := s.IsSealed(root); !isSealed {
+		t.Fatal("expected root to be sealed")
+	}
+
+	// Delete recursively
+	deleted, freed, err := s.DeleteRecursive(root)
+	if err != nil {
+		t.Fatalf("DeleteRecursive: %v", err)
+	}
+	if deleted != 3 {
+		t.Errorf("expected 3 blocks deleted, got %d", deleted)
+	}
+	expectedFreed := uint64(len(c1Data) + len(c2Data) + len(nodeData))
+	if freed != expectedFreed {
+		t.Errorf("expected %d bytes freed, got %d", expectedFreed, freed)
+	}
+
+	// Verify everything is gone
+	if has, _ := s.Has(root); has {
+		t.Fatal("expected root to be deleted")
+	}
+	if has, _ := s.Has(c1); has {
+		t.Fatal("expected c1 to be deleted")
+	}
+	if has, _ := s.Has(c2); has {
+		t.Fatal("expected c2 to be deleted")
+	}
+	if isSealed, _ := s.IsSealed(root); isSealed {
+		t.Fatal("expected root to be unsealed")
+	}
+}
+
+

@@ -90,7 +90,7 @@
 				sealed: item.Sealed,
 				size: item.Size || 0,
 				mime: item.MimeType || 'application/octet-stream',
-				type: 'file'
+				type: item.MimeType === 'inode/directory' ? 'dir' : 'file'
 			}));
 
 			fileList = mapped;
@@ -110,11 +110,27 @@
 			});
 			if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
 			
-			// Modify local state immediately before full list query
 			file.sealed = !file.sealed;
 			loadFiles();
 		} catch (err) {
 			alert(`Action failed: ${err instanceof Error ? err.message : err}`);
+		}
+	}
+
+	async function deleteFile(file: LocalFile) {
+		if (!confirm(`Are you sure you want to delete "${file.name}" and all its blocks recursively from this node? This cannot be undone.`)) {
+			return;
+		}
+		try {
+			const res = await fetch(`${base}/mid/${file.mid}/delete`, {
+				method: 'POST'
+			});
+			if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
+			
+			// Remove from local list immediately
+			fileList = fileList.filter(f => f.mid !== file.mid);
+		} catch (err) {
+			alert(`Delete failed: ${err instanceof Error ? err.message : err}`);
 		}
 	}
 
@@ -231,7 +247,8 @@
 			formData.append('file', files[0]);
 		} else {
 			for (let i = 0; i < files.length; i++) {
-				formData.append('files', files[i], files[i].webkitRelativePath || files[i].name);
+				formData.append('files', files[i]);
+				formData.append('paths', files[i].webkitRelativePath || files[i].name);
 			}
 			if (customFolderName) {
 				formData.append('folder_name', customFolderName);
@@ -595,6 +612,14 @@
 										>
 											Inspect
 										</a>
+
+										<!-- Delete recursively -->
+										<button 
+											onclick={() => deleteFile(file)}
+											class="text-red-500 hover:text-red-400 font-bold hover:underline"
+										>
+											Delete
+										</button>
 									</div>
 								</td>
 							</tr>

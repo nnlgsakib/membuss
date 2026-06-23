@@ -52,6 +52,8 @@ type Backend interface {
 	DHTPeek(ctx context.Context, midStr string, limit uint32) ([]NodePeerInfo, error)
 	// GC runs garbage collection on the local store.
 	GC(ctx context.Context, all bool) (GCInfo, error)
+	// Delete recursively removes the given MID and its children from the store.
+	Delete(ctx context.Context, midStr string) (DeleteResult, error)
 	// AnchorStatus returns the anchor engine's stats.
 	AnchorStatus() AnchorInfo
 }
@@ -113,6 +115,12 @@ type NodePeerInfo struct {
 type GCInfo struct {
 	BytesFreed uint64
 	BlocksKept uint64
+}
+
+// DeleteResult mirrors the DeleteResponse proto.
+type DeleteResult struct {
+	BlocksDeleted uint64
+	BytesFreed    uint64
 }
 
 // AnchorInfo mirrors the AnchorStatusResponse proto.
@@ -347,6 +355,22 @@ func (s *Server) GC(ctx context.Context, req *membusspb.GCRequest) (*membusspb.G
 	}
 	return &membusspb.GCResponse{BytesFreed: info.BytesFreed, BlocksKept: info.BlocksKept}, nil
 }
+
+// Delete recursively removes the given MID and its children from the store.
+func (s *Server) Delete(ctx context.Context, req *membusspb.DeleteRequest) (*membusspb.DeleteResponse, error) {
+	if req.GetMid() == "" {
+		return nil, status.Error(codes.InvalidArgument, "delete: mid required")
+	}
+	res, err := s.Backend.Delete(ctx, req.GetMid())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "delete: %v", err)
+	}
+	return &membusspb.DeleteResponse{
+		BlocksDeleted: res.BlocksDeleted,
+		BytesFreed:    res.BytesFreed,
+	}, nil
+}
+
 
 // AnchorStatus returns the anchor engine's stats.
 func (s *Server) AnchorStatus(ctx context.Context, req *membusspb.AnchorStatusRequest) (*membusspb.AnchorStatusResponse, error) {

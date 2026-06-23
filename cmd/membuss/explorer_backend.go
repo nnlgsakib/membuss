@@ -100,6 +100,17 @@ func (a *explorerAdapter) Unseal(ctx context.Context, m mid.MID) error {
 	return err
 }
 
+// Delete recursively removes the given MID and its children.
+func (a *explorerAdapter) Delete(ctx context.Context, m mid.MID) (uint64, uint64, error) {
+	res, err := a.b.Delete(ctx, m.String())
+	if err != nil {
+		return 0, 0, err
+	}
+	delete(a.allRoots, m.String())
+	return res.BlocksDeleted, res.BytesFreed, nil
+}
+
+
 // Providers returns DHT-known providers for m.
 func (a *explorerAdapter) Providers(ctx context.Context, m mid.MID, limit int) ([]string, error) {
 	b := a.b

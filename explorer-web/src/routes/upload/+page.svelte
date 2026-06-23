@@ -161,8 +161,9 @@
 		for (let i = 0; i < selectedFiles.length; i++) {
 			const file = selectedFiles[i];
 			filesArr.push(file);
-			// Pass relative path so directory hierarchy is preserved
-			formData.append('files', file, file.webkitRelativePath || file.name);
+			// Pass file and parallel relative path parameter
+			formData.append('files', file);
+			formData.append('paths', file.webkitRelativePath || file.name);
 		}
 
 		if (folderName.trim()) {

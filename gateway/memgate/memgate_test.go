@@ -128,6 +128,14 @@ func (b *memBackend) MemFSList(ctx context.Context, m mid.MID) ([]MemFSEntry, er
 	return nil, errNotFound
 }
 
+func (b *memBackend) MemFSPathInfo(ctx context.Context, m mid.MID, path string) (MemFSInfo, error) {
+	return MemFSInfo{}, errNotFound
+}
+
+func (b *memBackend) MemFSPathList(ctx context.Context, m mid.MID, path string) ([]MemFSEntry, error) {
+	return nil, errNotFound
+}
+
 var errNotFound = &notFoundError{}
 
 type notFoundError struct{}
@@ -612,6 +620,38 @@ func (b *memfsBackend) MemFSList(ctx context.Context, m mid.MID) ([]MemFSEntry, 
 	return out, nil
 }
 
+func (b *memfsBackend) MemFSPathInfo(ctx context.Context, m mid.MID, subPath string) (MemFSInfo, error) {
+	node, err := b.resolver.ResolvePath(ctx, m, subPath)
+	if err != nil {
+		return MemFSInfo{}, errNotFound
+	}
+	return MemFSInfo{
+		MID:  node.MustMID().String(),
+		Type: memFSTypeString(node.GetType()),
+		Size: node.TotalSize(),
+	}, nil
+}
+
+func (b *memfsBackend) MemFSPathList(ctx context.Context, m mid.MID, subPath string) ([]MemFSEntry, error) {
+	node, err := b.resolver.ResolvePath(ctx, m, subPath)
+	if err != nil {
+		return nil, errNotFound
+	}
+	if !node.IsDir() {
+		return nil, errNotFound
+	}
+	out := make([]MemFSEntry, 0, node.EntryCount())
+	for _, e := range node.EntriesValue() {
+		out = append(out, MemFSEntry{
+			Name: e.Name,
+			MID:  e.Mid.String(),
+			Type: memFSTypeString(e.Type),
+			Size: e.Size,
+		})
+	}
+	return out, nil
+}
+
 // memFSTypeString mirrors the production adapter's helper.
 func memFSTypeString(t memfs.MemFSType) string {
 	switch t {
@@ -733,6 +773,61 @@ func TestMemFS_PathGet(t *testing.T) {
 		if ct != tc.wantCT {
 			t.Errorf("content-type for %s: got %q, want %q", tc.urlPath, ct, tc.wantCT)
 		}
+	}
+}
+
+func TestMemFS_SubdirList(t *testing.T) {
+	bs, _ := store.NewMemStore(store.Options{InMemory: true})
+	defer bs.Close()
+	b := memfs.NewBuilder(bs)
+	root, err := b.AddDirectoryFromFS(fstest.MapFS{
+		"assets/style.css":   &fstest.MapFile{Data: []byte("body { color: blue; }")},
+		"assets/index.js":    &fstest.MapFile{Data: []byte("console.log(1)")},
+	}, ".")
+	if err != nil {
+		t.Fatalf("add dir: %v", err)
+	}
+	be := &memfsBackend{memBackend: newMemBackend(), resolver: memfs.NewResolver(bs)}
+	srv := httptest.NewServer(newTestGate(t, be).Router())
+	defer srv.Close()
+
+	// 1. Directory subpath without trailing slash redirect test
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse // don't follow redirects
+		},
+	}
+	resp, err := client.Get(srv.URL + "/mem/" + root.MID.String() + "/assets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMovedPermanently {
+		t.Errorf("expected 301 redirect for directory subpath without slash, got %d", resp.StatusCode)
+	}
+	loc := resp.Header.Get("Location")
+	if !strings.HasSuffix(loc, "/assets/") {
+		t.Errorf("expected redirect location ending with /assets/, got %q", loc)
+	}
+
+	// 2. Directory subpath with trailing slash listing test
+	resp2, err := http.Get(srv.URL + "/mem/" + root.MID.String() + "/assets/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp2.StatusCode)
+	}
+	body, _ := io.ReadAll(resp2.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "style.css") || !strings.Contains(bodyStr, "index.js") {
+		t.Errorf("expected index.js and style.css in directory list, got body: %q", bodyStr)
+	}
+
+	// Check that relative hrefs are correct
+	if !strings.Contains(bodyStr, `href="style.css"`) {
+		t.Errorf("expected relative link href=\"style.css\", got: %q", bodyStr)
 	}
 }
 

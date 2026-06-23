@@ -34,6 +34,7 @@ service MembussNode {
   rpc DHTPeek(DHTPeekRequest) returns (DHTPeekResponse);
   rpc GC(GCRequest) returns (GCResponse);
   rpc AnchorStatus(AnchorStatusRequest) returns (AnchorStatusResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
 }
 
 message AddRequest {
@@ -323,3 +324,13 @@ message MemFSMeta {
   string                mime_type = 1;
   map<string, string>   attrs     = 2;
 }
+
+message DeleteRequest {
+  string mid = 1;
+}
+
+message DeleteResponse {
+  uint64 blocks_deleted = 1;
+  uint64 bytes_freed = 2;
+}
+

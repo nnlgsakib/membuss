@@ -115,6 +115,11 @@ func (b *memBackend) GC(ctx context.Context) (GCInfo, error) {
 	return GCInfo{BytesFreed: 1024, BlocksKept: 5}, nil
 }
 
+func (b *memBackend) Delete(ctx context.Context, midStr string) (DeleteResult, error) {
+	return DeleteResult{BlocksDeleted: 1, BytesFreed: 1024}, nil
+}
+
+
 func (b *memBackend) NodeInfo() NodeInfo {
 	return NodeInfo{PeerID: "12D3KooA", Addrs: []string{"/ip4/1.2.3.4/tcp/4001"}, Version: "0.1.0", Build: "test"}
 }

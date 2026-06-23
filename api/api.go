@@ -77,7 +77,16 @@ type Backend interface {
 	// Path uses "/" separators and may be empty (returns
 	// the file at m itself).
 	GetPath(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error)
+	// Delete recursively removes the given MID and its children from the store.
+	Delete(ctx context.Context, midStr string) (DeleteResult, error)
 }
+
+// DeleteResult is the return value of Backend.Delete.
+type DeleteResult struct {
+	BlocksDeleted uint64
+	BytesFreed    uint64
+}
+
 
 // DirectoryPart is one file in a multipart directory upload.
 type DirectoryPart struct {
@@ -253,6 +262,7 @@ func (a *NodeAPI) buildRouter() chi.Router {
 		r.Get("/peers", a.handlePeers)
 		r.Get("/node/info", a.handleNodeInfo)
 		r.Post("/gc", a.handleGC)
+		r.Delete("/delete/{mid}", a.handleDelete)
 		r.Get("/healthz", a.handleHealthz)
 
 		// Phase 18: MemNS and KeyRing API routes
@@ -612,6 +622,24 @@ func (a *NodeAPI) handleGC(w http.ResponseWriter, r *http.Request) {
 		"blocks_kept": info.BlocksKept,
 	})
 }
+
+func (a *NodeAPI) handleDelete(w http.ResponseWriter, r *http.Request) {
+	midStr := chi.URLParam(r, "mid")
+	if midStr == "" {
+		fail(w, http.StatusBadRequest, fmt.Errorf("delete: mid required"))
+		return
+	}
+	res, err := a.cfg.Backend.Delete(r.Context(), midStr)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	ok(w, map[string]any{
+		"blocks_deleted": res.BlocksDeleted,
+		"bytes_freed":    res.BytesFreed,
+	})
+}
+
 
 // --- helpers ---
 

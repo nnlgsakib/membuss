@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/nnlgsakib/membuss/core/mid"
+	membusspb "github.com/nnlgsakib/membuss/proto"
 )
 
 // Seal marks root as a pinned root. If recursive is true, Seal
@@ -359,3 +361,159 @@ func ksToMID(ks string) string {
 	}
 	return ks
 }
+
+// DeleteRecursive removes the given root MID and all its reachable children from the store.
+// It also unseals them. It returns the number of blocks deleted and the number of bytes freed.
+func (s *MemStore) DeleteRecursive(root mid.MID) (uint64, uint64, error) {
+	if s.db == nil {
+		return 0, 0, errors.New("store: closed")
+	}
+	if root.IsZero() {
+		return 0, 0, errors.New("store: zero MID")
+	}
+
+	// First, unseal the root to clear its seals/pins
+	if err := s.Unseal(root); err != nil {
+		// Ignore not found or similar
+	}
+
+	// Collect all reachable MIDs. If a block is missing, we still want to delete
+	// the blocks we *do* have, so we tolerate missing block errors during traversal.
+	reachable := make(map[string]mid.MID)
+
+	// We do a custom traverse to tolerate missing blocks
+	var collect func(m mid.MID)
+	collect = func(m mid.MID) {
+		if m.IsZero() {
+			return
+		}
+		ms := m.String()
+		if _, seen := reachable[ms]; seen {
+			return
+		}
+		reachable[ms] = m
+
+		data, err := s.Get(m)
+		if err != nil {
+			// Tolerate missing block, just stop traversing this branch
+			return
+		}
+
+		var childMIDs []mid.MID
+		if m.Codec() == mid.CodecMemFS {
+			var node membusspb.MemFSNode
+			if uerr := proto.Unmarshal(data, &node); uerr == nil {
+				switch node.Type {
+				case membusspb.MemFSType_FILE:
+					for _, b := range node.Blocks {
+						if b == nil || len(b.Mid) == 0 {
+							continue
+						}
+						var codec uint64 = mid.CodecMemFS
+						if b.Size > 0 {
+							codec = mid.CodecRaw
+						}
+						child, err := mid.FromMultihash(codec, b.Mid)
+						if err == nil {
+							childMIDs = append(childMIDs, child)
+						}
+					}
+				case membusspb.MemFSType_DIR:
+					for _, e := range node.Entries {
+						if e == nil || len(e.Mid) == 0 {
+							continue
+						}
+						var codec uint64 = mid.CodecMemFS
+						if e.Type == membusspb.MemFSType_RAW {
+							codec = mid.CodecRaw
+						}
+						child, err := mid.FromMultihash(codec, e.Mid)
+						if err == nil {
+							childMIDs = append(childMIDs, child)
+						}
+					}
+				}
+			}
+		} else {
+			var node membusspb.DAGNode
+			if uerr := proto.Unmarshal(data, &node); uerr == nil && len(node.Links) > 0 {
+				for _, s := range node.Links {
+					child, err := mid.Parse(s)
+					if err == nil {
+						childMIDs = append(childMIDs, child)
+					}
+				}
+			}
+		}
+
+		for _, child := range childMIDs {
+			collect(child)
+		}
+	}
+
+	collect(root)
+
+	// Now delete all collected MIDs and count size freed.
+	// To minimize transaction overhead and latency, we group deletions into batches
+	// using a single Update transaction per batch.
+	var blocksDeleted uint64
+	var bytesFreed uint64
+
+	mids := make([]mid.MID, 0, len(reachable))
+	for _, m := range reachable {
+		mids = append(mids, m)
+	}
+
+	const batchSize = 100
+	for i := 0; i < len(mids); i += batchSize {
+		end := i + batchSize
+		if end > len(mids) {
+			end = len(mids)
+		}
+		batch := mids[i:end]
+
+		err := s.db.Update(func(txn *badger.Txn) error {
+			for _, m := range batch {
+				// 1. Get size and delete from block/dag namespaces
+				var size uint64
+				deletedThisBlock := false
+				for _, key := range [][]byte{blockKey(m), dagKey(m)} {
+					item, err := txn.Get(key)
+					if err == nil {
+						size += uint64(item.ValueSize())
+						errDel := txn.Delete(key)
+						if errDel == nil {
+							deletedThisBlock = true
+						}
+					}
+				}
+				if deletedThisBlock {
+					blocksDeleted++
+					bytesFreed += size
+				}
+
+				// 2. Also delete the ObjectInfo metadata from /m/ namespace if exists
+				_ = txn.Delete([]byte(prefixMeta + m.String()))
+			}
+			return nil
+		})
+		if err != nil {
+			return blocksDeleted, bytesFreed, fmt.Errorf("store: batch delete failed: %w", err)
+		}
+	}
+
+	// Rebuild bloom filter if enabled
+	if s.bloom != nil {
+		if rerr := s.bloom.rebuildFromDB(s.db); rerr != nil {
+			return blocksDeleted, bytesFreed, fmt.Errorf("store: bloom rebuild after delete: %w", rerr)
+		}
+	}
+
+	// Trigger value-log GC once
+	if bytesFreed > 0 {
+		go func() { _ = s.db.RunValueLogGC(0.5) }()
+	}
+
+	return blocksDeleted, bytesFreed, nil
+}
+

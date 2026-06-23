@@ -20,6 +20,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -53,8 +54,6 @@ type Backend interface {
 	// Ping returns nil if the backend is healthy.
 	Ping(ctx context.Context) error
 
-	// --- Phase 17: MemFS support ---
-
 	// MemFSInfo describes a MemFS node. Type is one of
 	// "file", "dir", "symlink", "metadata", "raw".
 	MemFSInfo(ctx context.Context, m mid.MID) (MemFSInfo, error)
@@ -64,6 +63,10 @@ type Backend interface {
 	// MemFSList returns the entries of a MemFS directory,
 	// sorted lexicographically by name.
 	MemFSList(ctx context.Context, m mid.MID) ([]MemFSEntry, error)
+	// MemFSPathInfo returns metadata about a path under the given root.
+	MemFSPathInfo(ctx context.Context, m mid.MID, path string) (MemFSInfo, error)
+	// MemFSPathList returns entries of a directory under root at path.
+	MemFSPathList(ctx context.Context, m mid.MID, path string) ([]MemFSEntry, error)
 }
 
 // MemFSInfo is the metadata returned by Backend.MemFSInfo.
@@ -388,12 +391,17 @@ func (m *MemGate) handleDirList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	m.renderDirectoryList(w, r, "Directory "+root.String(), root.String(), info.Size, entries)
+}
+
+// renderDirectoryList renders a directory listing to the client.
+func (m *MemGate) renderDirectoryList(w http.ResponseWriter, r *http.Request, title string, midStr string, size uint64, entries []MemFSEntry) {
 	if r.URL.Query().Get("format") == "json" {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"mid":     root.String(),
-			"type":    info.Type,
-			"size":    info.Size,
+			"mid":     midStr,
+			"type":    "dir",
+			"size":    size,
 			"entries": entries,
 		})
 		return
@@ -405,14 +413,18 @@ func (m *MemGate) handleDirList(w http.ResponseWriter, r *http.Request) {
 		`table{border-collapse:collapse;width:100%%}td,th{padding:.5rem;text-align:left;border-bottom:1px solid #eee}`+
 		`a{color:#06c;text-decoration:none}a:hover{text-decoration:underline}`+
 		`.muted{color:#888;font-size:.9em}</style></head><body>`+
-		`<h1>Directory <code>%s</code></h1>`+
+		`<h1>%s</h1>`+
 		`<table><tr><th>Name</th><th>Type</th><th>Size</th><th>MID</th></tr>`,
-		html.EscapeString(root.String()), html.EscapeString(root.String()))
+		html.EscapeString(title), html.EscapeString(title))
 	for _, e := range entries {
-		fmt.Fprintf(w, `<tr><td><a href="/mem/%s/%s">%s</a></td>`+
+		href := url.PathEscape(e.Name)
+		if e.Type == "dir" {
+			href += "/"
+		}
+		fmt.Fprintf(w, `<tr><td><a href="%s">%s</a></td>`+
 			`<td>%s</td><td>%d</td>`+
 			`<td class="muted"><a href="/explorer/mid/%s">%s…</a></td></tr>`,
-			url.PathEscape(root.String()), url.PathEscape(e.Name), html.EscapeString(e.Name), html.EscapeString(e.Type), e.Size, url.PathEscape(e.MID), html.EscapeString(shortMID(e.MID)))
+			href, html.EscapeString(e.Name), html.EscapeString(e.Type), e.Size, url.PathEscape(e.MID), html.EscapeString(shortMID(e.MID)))
 	}
 	fmt.Fprintf(w, `</table></body></html>`)
 }
@@ -965,17 +977,28 @@ func (m *MemGate) serveMemFSPath(w http.ResponseWriter, r *http.Request, midStr,
 		return
 	}
 
-	info, err := m.cfg.Backend.MemFSInfo(r.Context(), root)
-	isDir := err == nil && info.Type == "dir"
-
-	if isDir && innerPath == "" && !strings.HasSuffix(r.URL.Path, "/") {
-		http.Redirect(w, r, r.URL.Path+"/", http.StatusMovedPermanently)
+	pathInfo, err := m.cfg.Backend.MemFSPathInfo(r.Context(), root, innerPath)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, "not found: "+err.Error(), http.StatusNotFound)
+		} else {
+			http.Error(w, "memfs: "+err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
 
-	if isDir && innerPath == "" {
-		entries, err := m.cfg.Backend.MemFSList(r.Context(), root)
-		if err == nil {
+	if pathInfo.Type == "dir" {
+		if !strings.HasSuffix(r.URL.Path, "/") {
+			http.Redirect(w, r, r.URL.Path+"/", http.StatusMovedPermanently)
+			return
+		}
+		entries, err := m.cfg.Backend.MemFSPathList(r.Context(), root, innerPath)
+		if err != nil {
+			http.Error(w, "memfs list: "+err.Error(), http.StatusNotFound)
+			return
+		}
+		// Auto-serve index.html if it exists and ?format is not set
+		if r.URL.Query().Get("format") == "" {
 			hasIndex := false
 			for _, e := range entries {
 				if e.Name == "index.html" {
@@ -984,13 +1007,11 @@ func (m *MemGate) serveMemFSPath(w http.ResponseWriter, r *http.Request, midStr,
 				}
 			}
 			if hasIndex {
-				innerPath = "index.html"
+				m.serveMemFSPath(w, r, midStr, path.Join(innerPath, "index.html"))
+				return
 			}
 		}
-	}
-
-	if innerPath == "" {
-		m.handleResolved(w, r, root, midStr)
+		m.renderDirectoryList(w, r, "Directory "+midStr+"/"+innerPath, pathInfo.MID, pathInfo.Size, entries)
 		return
 	}
 

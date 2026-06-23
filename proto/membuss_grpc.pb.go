@@ -141,6 +141,7 @@ const (
 	MembussNode_DHTPeek_FullMethodName      = "/membuss.v1.MembussNode/DHTPeek"
 	MembussNode_GC_FullMethodName           = "/membuss.v1.MembussNode/GC"
 	MembussNode_AnchorStatus_FullMethodName = "/membuss.v1.MembussNode/AnchorStatus"
+	MembussNode_Delete_FullMethodName       = "/membuss.v1.MembussNode/Delete"
 )
 
 // MembussNodeClient is the client API for MembussNode service.
@@ -159,6 +160,7 @@ type MembussNodeClient interface {
 	DHTPeek(ctx context.Context, in *DHTPeekRequest, opts ...grpc.CallOption) (*DHTPeekResponse, error)
 	GC(ctx context.Context, in *GCRequest, opts ...grpc.CallOption) (*GCResponse, error)
 	AnchorStatus(ctx context.Context, in *AnchorStatusRequest, opts ...grpc.CallOption) (*AnchorStatusResponse, error)
+	Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
 }
 
 type membussNodeClient struct {
@@ -268,6 +270,16 @@ func (c *membussNodeClient) AnchorStatus(ctx context.Context, in *AnchorStatusRe
 	return out, nil
 }
 
+func (c *membussNodeClient) Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteResponse)
+	err := c.cc.Invoke(ctx, MembussNode_Delete_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MembussNodeServer is the server API for MembussNode service.
 // All implementations must embed UnimplementedMembussNodeServer
 // for forward compatibility.
@@ -284,6 +296,7 @@ type MembussNodeServer interface {
 	DHTPeek(context.Context, *DHTPeekRequest) (*DHTPeekResponse, error)
 	GC(context.Context, *GCRequest) (*GCResponse, error)
 	AnchorStatus(context.Context, *AnchorStatusRequest) (*AnchorStatusResponse, error)
+	Delete(context.Context, *DeleteRequest) (*DeleteResponse, error)
 	mustEmbedUnimplementedMembussNodeServer()
 }
 
@@ -320,6 +333,9 @@ func (UnimplementedMembussNodeServer) GC(context.Context, *GCRequest) (*GCRespon
 }
 func (UnimplementedMembussNodeServer) AnchorStatus(context.Context, *AnchorStatusRequest) (*AnchorStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AnchorStatus not implemented")
+}
+func (UnimplementedMembussNodeServer) Delete(context.Context, *DeleteRequest) (*DeleteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Delete not implemented")
 }
 func (UnimplementedMembussNodeServer) mustEmbedUnimplementedMembussNodeServer() {}
 func (UnimplementedMembussNodeServer) testEmbeddedByValue()                     {}
@@ -497,6 +513,24 @@ func _MembussNode_AnchorStatus_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MembussNode_Delete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MembussNodeServer).Delete(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MembussNode_Delete_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MembussNodeServer).Delete(ctx, req.(*DeleteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MembussNode_ServiceDesc is the grpc.ServiceDesc for MembussNode service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -535,6 +569,10 @@ var MembussNode_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AnchorStatus",
 			Handler:    _MembussNode_AnchorStatus_Handler,
+		},
+		{
+			MethodName: "Delete",
+			Handler:    _MembussNode_Delete_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

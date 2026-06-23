@@ -2,6 +2,7 @@
 	import { onMount, onDestroy, untrack } from 'svelte';
 	import { page } from '$app/state';
 	import { base } from '$app/paths';
+	import { goto } from '$app/navigation';
 	import { apiFetch, formatBytes } from '$lib/api';
 	import Icon from '@iconify/svelte';
 	import DagNode from '$lib/components/DagNode.svelte';
@@ -216,14 +217,18 @@
 		});
 	}
 
-	async function runAction(action: 'seal' | 'unseal') {
+	async function runAction(action: 'seal' | 'unseal' | 'delete') {
 		try {
 			loading = true;
 			const res = await fetch(`${base}/mid/${midVal}/${action}`, {
 				method: 'POST'
 			});
 			if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
-			fetchMIDData(midVal);
+			if (action === 'delete') {
+				goto(`${base}/`);
+			} else {
+				fetchMIDData(midVal);
+			}
 		} catch (err) {
 			alert(`Action failed: ${err instanceof Error ? err.message : err}`);
 			loading = false;
@@ -518,6 +523,9 @@
 									Seal (Pin)
 								</button>
 							{/if}
+							<button onclick={() => { if (confirm('Are you sure you want to delete this Content ID and all its blocks recursively from this node? This cannot be undone.')) runAction('delete'); }} class="px-4 py-2 rounded-lg bg-red-650 hover:bg-red-700 text-slate-50 border border-red-900/40 text-xs font-bold transition-colors active:scale-[0.98]">
+								Delete
+							</button>
 						</div>
 					</div>
 

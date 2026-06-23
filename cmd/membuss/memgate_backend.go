@@ -357,6 +357,45 @@ func (a *memgateAdapter) MemFSList(ctx context.Context, m mid.MID) ([]memgate.Me
 	return out, nil
 }
 
+// MemFSPathInfo returns metadata about a path under the given root.
+func (a *memgateAdapter) MemFSPathInfo(ctx context.Context, m mid.MID, subPath string) (memgate.MemFSInfo, error) {
+	r := a.memfsResolver(ctx)
+	node, err := r.ResolvePath(ctx, m, subPath)
+	if err != nil {
+		return memgate.MemFSInfo{}, errMGNotFound
+	}
+	return memgate.MemFSInfo{
+		MID:   node.MustMID().String(),
+		Type:  memFSTypeString(node.GetType()),
+		Size:  node.TotalSize(),
+		Mode:  uint32(node.Mode()),
+		MTime: node.MTime().Unix(),
+		Mime:  node.MimeType(),
+	}, nil
+}
+
+// MemFSPathList returns entries of a directory under root at subPath.
+func (a *memgateAdapter) MemFSPathList(ctx context.Context, m mid.MID, subPath string) ([]memgate.MemFSEntry, error) {
+	r := a.memfsResolver(ctx)
+	node, err := r.ResolvePath(ctx, m, subPath)
+	if err != nil {
+		return nil, errMGNotFound
+	}
+	if !node.IsDir() {
+		return nil, errMGNotFound
+	}
+	out := make([]memgate.MemFSEntry, 0, node.EntryCount())
+	for _, e := range node.EntriesValue() {
+		out = append(out, memgate.MemFSEntry{
+			Name: e.Name,
+			MID:  e.Mid.String(),
+			Type: memFSTypeString(e.Type),
+			Size: e.Size,
+		})
+	}
+	return out, nil
+}
+
 // memFSTypeString returns a short label for a MemFSType.
 func memFSTypeString(t memfs.MemFSType) string {
 	switch t {
