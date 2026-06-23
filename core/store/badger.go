@@ -108,8 +108,9 @@ type Store interface {
 // MemStore is the BadgerDB-backed Store implementation. A zero
 // value is invalid; use NewMemStore.
 type MemStore struct {
-	db    *badger.DB
-	bloom *bloomIndex
+	db     *badger.DB
+	bloom  *bloomIndex
+	stopGC chan struct{}
 }
 
 // Options configures a MemStore at construction time.
@@ -164,6 +165,10 @@ func NewMemStore(opts Options) (*MemStore, error) {
 	if err := s.initBloom(opts.Bloom); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("store: init bloom: %w", err)
+	}
+	if !opts.ReadOnly {
+		s.stopGC = make(chan struct{})
+		go s.runValueLogGC()
 	}
 	return s, nil
 }
@@ -450,6 +455,9 @@ func (s *MemStore) Close() error {
 	if s.db == nil {
 		return nil
 	}
+	if s.stopGC != nil {
+		close(s.stopGC)
+	}
 	var snapErr error
 	if s.bloom != nil {
 	
@@ -462,6 +470,26 @@ func (s *MemStore) Close() error {
 		return dbErr
 	}
 	return snapErr
+}
+
+// runValueLogGC runs BadgerDB's value-log GC periodically to reclaim disk space.
+func (s *MemStore) runValueLogGC() {
+	db := s.db
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stopGC:
+			return
+		case <-ticker.C:
+			// Run Value Log GC in a loop until it returns an error (badger.ErrNoRewrite)
+			for {
+				if err := db.RunValueLogGC(0.5); err != nil {
+					break
+				}
+			}
+		}
+	}
 }
 
 // Size returns the approximate on-disk size in bytes. Instead

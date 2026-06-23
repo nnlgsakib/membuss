@@ -531,4 +531,16 @@ func TestMemStoreDeleteRecursive(t *testing.T) {
 	}
 }
 
+func TestMemStoreValueLogGC(t *testing.T) {
+	s, err := NewMemStore(Options{InMemory: true})
+	if err != nil {
+		t.Fatalf("NewMemStore: %v", err)
+	}
+	if s.stopGC == nil {
+		t.Error("expected stopGC channel to be initialized")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
 
