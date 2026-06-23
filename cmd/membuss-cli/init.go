@@ -1,4 +1,4 @@
-﻿// Phase 16: `membuss-cli init`.
+// Phase 16: `membuss-cli init`.
 //
 // The init command is the canonical way to bring a fresh node
 // online. It is intentionally self-contained: it does not dial
@@ -21,12 +21,15 @@ package main
 import (
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	"github.com/nnlgsakib/membuss/config"
 	"github.com/nnlgsakib/membuss/net/host"
@@ -112,6 +115,13 @@ func runInit(datadir string, force bool) (*InitResult, error) {
 		return nil, nil
 	}
 
+	if force {
+		// Clean the existing data directory to start completely fresh
+		if err := os.RemoveAll(datadir); err != nil {
+			return nil, fmt.Errorf("the data directory %s or files inside it (like config.yaml or badger files) are currently locked/in-use by another process (such as a running daemon). Please stop the daemon, close any open files, and try again. (Details: %w)", datadir, err)
+		}
+	}
+
 	// 1) Layout.
 	dirs := []string{
 		datadir,
@@ -149,6 +159,7 @@ func runInit(datadir string, force bool) (*InitResult, error) {
 
 	// 3) Config.
 	cfg := config.DefaultConfig(datadir)
+	adjustPorts(cfg)
 	cfgPath := config.DefaultConfigPath(datadir)
 	if err := config.WriteConfig(cfg, cfgPath); err != nil {
 		return nil, err
@@ -190,3 +201,214 @@ func printInitSummary(w io.Writer, r *InitResult) {
 // trimNewline is a small helper used by tests that capture
 // the printed summary as a string.
 func trimNewline(s string) string { return strings.TrimRight(s, "\n") }
+
+func adjustPorts(cfg *config.Config) {
+	usedPorts := make(map[int]bool)
+
+	// Scan sibling directories for existing config.yaml files
+	if cfg.DataDir != "" {
+		parent := filepath.Dir(cfg.DataDir)
+		if entries, err := os.ReadDir(parent); err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					siblingPath := filepath.Join(parent, entry.Name())
+					// Skip our own directory
+					if filepath.Clean(siblingPath) == filepath.Clean(cfg.DataDir) {
+						continue
+					}
+					// Check if sibling config exists
+					if config.IsInitialized(siblingPath) {
+						loadPortsFromSibling(siblingPath, usedPorts)
+					}
+				}
+			}
+		}
+	}
+
+	var err error
+	cfg.GatewayAddr, err = adjustHostPort(cfg.GatewayAddr, usedPorts)
+	if err != nil {
+		_ = err
+	}
+	cfg.APIAddr, err = adjustHostPort(cfg.APIAddr, usedPorts)
+	if err != nil {
+		_ = err
+	}
+	cfg.GRPCAddr, err = adjustHostPort(cfg.GRPCAddr, usedPorts)
+	if err != nil {
+		_ = err
+	}
+
+	for i, ma := range cfg.ListenAddrs {
+		cfg.ListenAddrs[i], err = adjustMultiaddrPort(ma, usedPorts)
+		if err != nil {
+			_ = err
+		}
+	}
+}
+
+func loadPortsFromSibling(siblingPath string, usedPorts map[int]bool) {
+	siblingCfg, err := config.LoadConfig(siblingPath)
+	if err == nil && siblingCfg != nil {
+		collectPortsFromConfig(siblingCfg, usedPorts)
+		return
+	}
+
+	// Fallback to manual parsing if Validate() or other checks failed
+	path := config.DefaultConfigPath(siblingPath)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+
+	var minimalCfg struct {
+		GatewayAddr string   `yaml:"gateway_addr"`
+		APIAddr     string   `yaml:"api_addr"`
+		GRPCAddr    string   `yaml:"grpc_addr"`
+		ListenAddrs []string `yaml:"listen_addrs"`
+	}
+	if err := yaml.Unmarshal(data, &minimalCfg); err == nil {
+		if _, portStr, err := net.SplitHostPort(minimalCfg.GatewayAddr); err == nil {
+			if p, err := strconv.Atoi(portStr); err == nil {
+				usedPorts[p] = true
+			}
+		}
+		if _, portStr, err := net.SplitHostPort(minimalCfg.APIAddr); err == nil {
+			if p, err := strconv.Atoi(portStr); err == nil {
+				usedPorts[p] = true
+			}
+		}
+		if _, portStr, err := net.SplitHostPort(minimalCfg.GRPCAddr); err == nil {
+			if p, err := strconv.Atoi(portStr); err == nil {
+				usedPorts[p] = true
+			}
+		}
+		for _, maStr := range minimalCfg.ListenAddrs {
+			parts := strings.Split(maStr, "/")
+			for idx, part := range parts {
+				if (part == "tcp" || part == "udp") && idx+1 < len(parts) {
+					if p, err := strconv.Atoi(parts[idx+1]); err == nil {
+						usedPorts[p] = true
+					}
+				}
+			}
+		}
+	}
+}
+
+func collectPortsFromConfig(cfg *config.Config, usedPorts map[int]bool) {
+	if _, portStr, err := net.SplitHostPort(cfg.GatewayAddr); err == nil {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			usedPorts[p] = true
+		}
+	}
+	if _, portStr, err := net.SplitHostPort(cfg.APIAddr); err == nil {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			usedPorts[p] = true
+		}
+	}
+	if _, portStr, err := net.SplitHostPort(cfg.GRPCAddr); err == nil {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			usedPorts[p] = true
+		}
+	}
+	for _, maStr := range cfg.ListenAddrs {
+		parts := strings.Split(maStr, "/")
+		for idx, part := range parts {
+			if (part == "tcp" || part == "udp") && idx+1 < len(parts) {
+				if p, err := strconv.Atoi(parts[idx+1]); err == nil {
+					usedPorts[p] = true
+				}
+			}
+		}
+	}
+}
+
+func adjustHostPort(addrStr string, usedPorts map[int]bool) (string, error) {
+	host, portStr, err := net.SplitHostPort(addrStr)
+	if err != nil {
+		return addrStr, nil
+	}
+
+	startPort, err := strconv.Atoi(portStr)
+	if err != nil {
+		return addrStr, nil
+	}
+
+	port := startPort
+	for attempts := 0; attempts < 1000 && port <= 65535; attempts++ {
+		if !usedPorts[port] {
+			if isTCPPortAvailable(host, port) {
+				usedPorts[port] = true
+				return net.JoinHostPort(host, strconv.Itoa(port)), nil
+			}
+		}
+		port++
+	}
+	return addrStr, nil
+}
+
+func adjustMultiaddrPort(maStr string, usedPorts map[int]bool) (string, error) {
+	parts := strings.Split(maStr, "/")
+	protoIdx := -1
+	for i, part := range parts {
+		if part == "tcp" || part == "udp" {
+			protoIdx = i
+			break
+		}
+	}
+	if protoIdx == -1 || protoIdx+1 >= len(parts) {
+		return maStr, nil
+	}
+
+	proto := parts[protoIdx]
+	portStr := parts[protoIdx+1]
+	startPort, err := strconv.Atoi(portStr)
+	if err != nil {
+		return maStr, nil
+	}
+
+	hostIP := "0.0.0.0"
+	if protoIdx >= 2 {
+		hostIP = parts[protoIdx-1]
+	}
+
+	port := startPort
+	for attempts := 0; attempts < 1000 && port <= 65535; attempts++ {
+		if !usedPorts[port] {
+			available := false
+			if proto == "tcp" {
+				available = isTCPPortAvailable(hostIP, port)
+			} else if proto == "udp" {
+				available = isUDPPortAvailable(hostIP, port)
+			}
+			if available {
+				usedPorts[port] = true
+				parts[protoIdx+1] = strconv.Itoa(port)
+				return strings.Join(parts, "/"), nil
+			}
+		}
+		port++
+	}
+	return maStr, nil
+}
+
+func isTCPPortAvailable(host string, port int) bool {
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	_ = l.Close()
+	return true
+}
+
+func isUDPPortAvailable(host string, port int) bool {
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	l, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		return false
+	}
+	_ = l.Close()
+	return true
+}

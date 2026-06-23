@@ -15,6 +15,8 @@ import (
 	libp2pquic "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	"github.com/multiformats/go-multiaddr"
+
+	membusspb "github.com/nnlgsakib/membuss/proto"
 )
 
 func newTestHost(t *testing.T) host.Host {
@@ -176,14 +178,10 @@ func TestPEX_OfflineDetectionAndEviction(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	// Generate a fake peer ID and address
-	priv, _, _ := crypto.GenerateEd25519Key(rand.Reader)
-	fakeID, _ := peer.IDFromPrivateKey(priv)
 	fakeAddr, _ := multiaddr.NewMultiaddr("/ip4/127.0.0.1/tcp/9999")
-	ai := peer.AddrInfo{ID: fakeID, Addrs: []multiaddr.Multiaddr{fakeAddr}}
 
-	// Add the fake peer. Since it's new, it defaults to LastDialSuccess = true
-	p1.AddPeer(ai)
+	// Add the fake peer as signed
+	fakeID := addSignedTestPeer(t, p1, membusspb.Reachability_PUBLIC, []multiaddr.Multiaddr{fakeAddr}, nil)
 
 	// Verify it's returned by Peers() and FilterForGossip()
 	if !tableHas(p1, fakeID) {
@@ -227,5 +225,140 @@ func TestPEX_OfflineDetectionAndEviction(t *testing.T) {
 	p1.mu.Unlock()
 	if exists {
 		t.Fatalf("offline peer should be completely evicted from internal table after 2 failed dials")
+	}
+}
+
+func TestPEX_SignatureDefense(t *testing.T) {
+	h, err := NewTestInProcessHost()
+	if err != nil {
+		t.Fatalf("in-process host: %v", err)
+	}
+	defer h.Close()
+
+	p, err := New(Config{Host: h})
+	if err != nil {
+		t.Fatalf("pex: %v", err)
+	}
+
+	// Generate a fake peer ID & key pair
+	priv, _, _ := crypto.GenerateEd25519Key(rand.Reader)
+	pid, _ := peer.IDFromPrivateKey(priv)
+	pubBytes, _ := crypto.MarshalPublicKey(priv.GetPublic())
+
+	// 1. Test Unsigned Record (should be rejected)
+	unsignedInfo := &membusspb.PeerInfo{
+		PeerId:       pid.String(),
+		Addrs:        []string{"/ip4/1.2.3.4/tcp/4001"},
+		LastSeen:     p.now().Unix(),
+		Reachability: membusspb.Reachability_PUBLIC,
+		Seq:          p.now().Unix(),
+		PubKey:       pubBytes,
+	}
+	p.mergeFromMessage([]*membusspb.PeerInfo{unsignedInfo}, p.now().Unix())
+	if tableHas(p, pid) {
+		t.Fatal("unsigned peer record should be rejected")
+	}
+
+	// 2. Test Invalid Signature Record (should be rejected)
+	badSigInfo := &membusspb.PeerInfo{
+		PeerId:       pid.String(),
+		Addrs:        []string{"/ip4/1.2.3.4/tcp/4001"},
+		LastSeen:     p.now().Unix(),
+		Reachability: membusspb.Reachability_PUBLIC,
+		Seq:          p.now().Unix(),
+		PubKey:       pubBytes,
+		Signature:    []byte("invalid-signature"),
+	}
+	p.mergeFromMessage([]*membusspb.PeerInfo{badSigInfo}, p.now().Unix())
+	if tableHas(p, pid) {
+		t.Fatal("invalid signature peer record should be rejected")
+	}
+
+	// 3. Test Expired Record (should be rejected)
+	expiredInfo := &membusspb.PeerInfo{
+		PeerId:       pid.String(),
+		Addrs:        []string{"/ip4/1.2.3.4/tcp/4001"},
+		LastSeen:     p.now().Unix(),
+		Reachability: membusspb.Reachability_PUBLIC,
+		Seq:          p.now().Unix() - int64(freshnessWindow.Seconds()) - 100,
+		PubKey:       pubBytes,
+	}
+	// Sign expired record
+	canonicalExpired := CanonicalPeerInfoBytes(expiredInfo)
+	sigExpired, _ := priv.Sign(canonicalExpired)
+	expiredInfo.Signature = sigExpired
+	p.mergeFromMessage([]*membusspb.PeerInfo{expiredInfo}, p.now().Unix())
+	if tableHas(p, pid) {
+		t.Fatal("expired peer record should be rejected")
+	}
+
+	// 4. Test Valid Record (should be accepted)
+	validInfo := &membusspb.PeerInfo{
+		PeerId:          pid.String(),
+		Addrs:           []string{"/ip4/1.2.3.4/tcp/4001"},
+		LastSeen:        p.now().Unix(),
+		Reachability:    membusspb.Reachability_PUBLIC,
+		Seq:             p.now().Unix(),
+		PubKey:          pubBytes,
+		LastDialSuccess: true,
+	}
+	canonicalValid := CanonicalPeerInfoBytes(validInfo)
+	sigValid, _ := priv.Sign(canonicalValid)
+	validInfo.Signature = sigValid
+	p.mergeFromMessage([]*membusspb.PeerInfo{validInfo}, p.now().Unix())
+	if !tableHas(p, pid) {
+		t.Fatal("valid signed peer record should be accepted")
+	}
+
+	// 5. Test Replay / Older Sequence Record (should be ignored)
+	replayInfo := &membusspb.PeerInfo{
+		PeerId:          pid.String(),
+		Addrs:           []string{"/ip4/1.2.3.4/tcp/4001", "/ip4/5.6.7.8/tcp/4001"}, // modified addrs
+		LastSeen:        p.now().Unix(),
+		Reachability:    membusspb.Reachability_PUBLIC,
+		Seq:             validInfo.Seq - 10, // older sequence
+		PubKey:          pubBytes,
+		LastDialSuccess: true,
+	}
+	canonicalReplay := CanonicalPeerInfoBytes(replayInfo)
+	sigReplay, _ := priv.Sign(canonicalReplay)
+	replayInfo.Signature = sigReplay
+	p.mergeFromMessage([]*membusspb.PeerInfo{replayInfo}, p.now().Unix())
+
+	// Verify addrs did not update to the replay's values
+	p.mu.Lock()
+	entry, ok := p.peers[pid]
+	p.mu.Unlock()
+	if !ok {
+		t.Fatal("peer missing")
+	}
+	if len(entry.info.Addrs) != 1 {
+		t.Fatalf("expected addrs not to update on replay, got: %v", entry.info.Addrs)
+	}
+
+	// 6. Test Newer Sequence Record (should overwrite)
+	newerInfo := &membusspb.PeerInfo{
+		PeerId:          pid.String(),
+		Addrs:           []string{"/ip4/1.2.3.4/tcp/4001", "/ip4/5.6.7.8/tcp/4001"}, // modified addrs
+		LastSeen:        p.now().Unix(),
+		Reachability:    membusspb.Reachability_PUBLIC,
+		Seq:             validInfo.Seq + 10, // newer sequence
+		PubKey:          pubBytes,
+		LastDialSuccess: true,
+	}
+	canonicalNewer := CanonicalPeerInfoBytes(newerInfo)
+	sigNewer, _ := priv.Sign(canonicalNewer)
+	newerInfo.Signature = sigNewer
+	p.mergeFromMessage([]*membusspb.PeerInfo{newerInfo}, p.now().Unix())
+
+	// Verify addrs updated
+	p.mu.Lock()
+	entry, ok = p.peers[pid]
+	p.mu.Unlock()
+	if !ok {
+		t.Fatal("peer missing")
+	}
+	if len(entry.info.Addrs) != 2 {
+		t.Fatalf("expected addrs to update on newer seq, got: %v", entry.info.Addrs)
 	}
 }

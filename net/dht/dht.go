@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	ds "github.com/ipfs/go-datastore"
@@ -281,50 +282,80 @@ func (m *MemDHT) BootstrapWithBackoff(ctx context.Context, peers []peer.AddrInfo
 
 	h := m.dht.Host()
 	hostCtx := func() context.Context { return bgCtx }
-	var lastErr error
-	successes := 0
+
+	var (
+		mu        sync.Mutex
+		lastErr   error
+		successes int
+		wg        sync.WaitGroup
+	)
+
 	for _, p := range peers {
-		delay := cfg.Initial
-		for attempt := 1; ; attempt++ {
-			if ctx.Err() != nil {
-				return successes, ctx.Err()
-			}
-			connectCtx, cancel := context.WithTimeout(hostCtx(), 10*time.Second)
-			err := h.Connect(connectCtx, p)
-			cancel()
-			if err == nil {
-				successes++
+		wg.Add(1)
+		go func(p peer.AddrInfo) {
+			defer wg.Done()
+			delay := cfg.Initial
+			for attempt := 1; ; attempt++ {
+				if ctx.Err() != nil {
+					return
+				}
+				connectCtx, cancel := context.WithTimeout(hostCtx(), 10*time.Second)
+				err := h.Connect(connectCtx, p)
+				cancel()
+				if err == nil {
+					mu.Lock()
+					successes++
+					mu.Unlock()
+					if cfg.Logger != nil {
+						cfg.Logger.Info("dht bootstrap peer connected",
+							"peer", p.ID.String(),
+							"attempt", attempt,
+						)
+					}
+					break
+				}
+				mu.Lock()
+				lastErr = err
+				mu.Unlock()
 				if cfg.Logger != nil {
-					cfg.Logger.Info("dht bootstrap peer connected",
+					cfg.Logger.Warn("dht bootstrap peer connect failed",
 						"peer", p.ID.String(),
 						"attempt", attempt,
+						"err", err.Error(),
 					)
 				}
-				break
+				if cfg.MaxAttempts > 0 && attempt >= cfg.MaxAttempts {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(delay):
+				}
+				delay = time.Duration(float64(delay) * cfg.Factor)
+				if delay > cfg.Max {
+					delay = cfg.Max
+				}
 			}
-			lastErr = err
-			if cfg.Logger != nil {
-				cfg.Logger.Warn("dht bootstrap peer connect failed",
-					"peer", p.ID.String(),
-					"attempt", attempt,
-					"err", err.Error(),
-				)
-			}
-			if cfg.MaxAttempts > 0 && attempt >= cfg.MaxAttempts {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				return successes, ctx.Err()
-			case <-time.After(delay):
-			}
-			delay = time.Duration(float64(delay) * cfg.Factor)
-			if delay > cfg.Max {
-				delay = cfg.Max
-			}
-		}
+		}(p)
 	}
-	return successes, lastErr
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-ctx.Done():
+		mu.Lock()
+		defer mu.Unlock()
+		return successes, ctx.Err()
+	case <-done:
+		mu.Lock()
+		defer mu.Unlock()
+		return successes, lastErr
+	}
 }
 
 // Close releases the DHT's resources.

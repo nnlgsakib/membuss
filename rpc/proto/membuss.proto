@@ -215,6 +215,9 @@ message PeerInfo {
   int64          last_seen         = 4;
   Reachability   reachability      = 5;   // Phase 12
   bool           last_dial_success = 6;   // Phase 12
+  bytes          signature         = 7;   // Phase 20
+  bytes          pub_key           = 8;   // Phase 20
+  int64          seq               = 9;   // Phase 20
 }
 
 // PEXMessage is the body of a /membuss/pex/1.0.0 gossip frame.

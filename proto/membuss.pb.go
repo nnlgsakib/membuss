@@ -1678,6 +1678,9 @@ type PeerInfo struct {
 	LastSeen        int64                  `protobuf:"varint,4,opt,name=last_seen,json=lastSeen,proto3" json:"last_seen,omitempty"`
 	Reachability    Reachability           `protobuf:"varint,5,opt,name=reachability,proto3,enum=membuss.v1.Reachability" json:"reachability,omitempty"`   // Phase 12
 	LastDialSuccess bool                   `protobuf:"varint,6,opt,name=last_dial_success,json=lastDialSuccess,proto3" json:"last_dial_success,omitempty"` // Phase 12
+	Signature       []byte                 `protobuf:"bytes,7,opt,name=signature,proto3" json:"signature,omitempty"`                                       // Phase 20
+	PubKey          []byte                 `protobuf:"bytes,8,opt,name=pub_key,json=pubKey,proto3" json:"pub_key,omitempty"`                               // Phase 20
+	Seq             int64                  `protobuf:"varint,9,opt,name=seq,proto3" json:"seq,omitempty"`                                                  // Phase 20
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -1752,6 +1755,27 @@ func (x *PeerInfo) GetLastDialSuccess() bool {
 		return x.LastDialSuccess
 	}
 	return false
+}
+
+func (x *PeerInfo) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
+	}
+	return nil
+}
+
+func (x *PeerInfo) GetPubKey() []byte {
+	if x != nil {
+		return x.PubKey
+	}
+	return nil
+}
+
+func (x *PeerInfo) GetSeq() int64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
 }
 
 // PEXMessage is the body of a /membuss/pex/1.0.0 gossip frame.
@@ -2487,7 +2511,7 @@ const file_membuss_proto_rawDesc = "" +
 	"\rparity_shards\x18\x03 \x01(\rR\fparityShards\x12\x1d\n" +
 	"\n" +
 	"shard_mids\x18\x04 \x03(\tR\tshardMids\x12#\n" +
-	"\roriginal_size\x18\x05 \x01(\x04R\foriginalSize\"\xe1\x01\n" +
+	"\roriginal_size\x18\x05 \x01(\x04R\foriginalSize\"\xaa\x02\n" +
 	"\bPeerInfo\x12\x17\n" +
 	"\apeer_id\x18\x01 \x01(\tR\x06peerId\x12\x14\n" +
 	"\x05addrs\x18\x02 \x03(\tR\x05addrs\x12\x1f\n" +
@@ -2495,7 +2519,10 @@ const file_membuss_proto_rawDesc = "" +
 	"relayAddrs\x12\x1b\n" +
 	"\tlast_seen\x18\x04 \x01(\x03R\blastSeen\x12<\n" +
 	"\freachability\x18\x05 \x01(\x0e2\x18.membuss.v1.ReachabilityR\freachability\x12*\n" +
-	"\x11last_dial_success\x18\x06 \x01(\bR\x0flastDialSuccess\"8\n" +
+	"\x11last_dial_success\x18\x06 \x01(\bR\x0flastDialSuccess\x12\x1c\n" +
+	"\tsignature\x18\a \x01(\fR\tsignature\x12\x17\n" +
+	"\apub_key\x18\b \x01(\fR\x06pubKey\x12\x10\n" +
+	"\x03seq\x18\t \x01(\x03R\x03seq\"8\n" +
 	"\n" +
 	"PEXMessage\x12*\n" +
 	"\x05peers\x18\x01 \x03(\v2\x14.membuss.v1.PeerInfoR\x05peers\"_\n" +

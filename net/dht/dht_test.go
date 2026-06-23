@@ -1,4 +1,4 @@
-﻿package dht
+package dht
 
 import (
 	"context"
@@ -274,5 +274,35 @@ func TestConfig_ModeOrDefault(t *testing.T) {
 				t.Fatalf("modeOrDefault: got %v want %v", got, c.want)
 			}
 		})
+	}
+}
+
+func TestBootstrapWithBackoff_ParallelDials(t *testing.T) {
+	h := newTestHost(t)
+	t.Cleanup(func() { h.Close() })
+	mdht, err := New(context.Background(), Config{Host: h})
+	if err != nil {
+		t.Fatalf("new dht: %v", err)
+	}
+	t.Cleanup(func() { _ = mdht.Close() })
+
+	bad1 := peer.AddrInfo{ID: peer.ID("QmInvalid1")}
+	bad2 := peer.AddrInfo{ID: peer.ID("QmInvalid2")}
+
+	cfg := BootstrapConfig{
+		Initial:     20 * time.Millisecond,
+		Max:         40 * time.Millisecond,
+		Factor:      2.0,
+		MaxAttempts: 2,
+	}
+
+	start := time.Now()
+	_, _ = mdht.BootstrapWithBackoff(context.Background(), []peer.AddrInfo{bad1, bad2}, cfg)
+	elapsed := time.Since(start)
+
+	// In parallel execution, both bad peers back off concurrently (minimum sleep is 20ms).
+	// In sequential execution, they back off one after another (minimum sleep is 40ms).
+	if elapsed >= 38*time.Millisecond {
+		t.Errorf("expected parallel execution to take less than 38ms, took %v", elapsed)
 	}
 }

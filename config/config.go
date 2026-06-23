@@ -159,6 +159,10 @@ type Config struct {
 	// GeoLite2-City.mmdb file. When empty the resolver
 	// looks for GeoLite2-City.mmdb in DataDir.
 	GeolocationDB string `yaml:"geolocation_db"`
+
+	// EnableMDNS enables libp2p mDNS discovery. When true, the node
+	// will broadcast and listen for other peers on the local network.
+	EnableMDNS bool `yaml:"enable_mdns"`
 }
 
 // TLSConfig is a pair of PEM file paths enabling HTTPS on an HTTP
@@ -232,6 +236,7 @@ func Default() *Config {
 		DHTMode:                       "server",
 		DHTOptimisticProvide:          true,
 		EnableGeolocation:             true,
+		EnableMDNS:                    true,
 	}
 }
 
