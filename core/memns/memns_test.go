@@ -416,3 +416,49 @@ func TestMemLogHistory(t *testing.T) {
 		}
 	}
 }
+
+func TestResolverDNSLink(t *testing.T) {
+	cache := NewRecordCache(10)
+	resolver := NewResolver(nil, nil, cache)
+
+	mockTXT := map[string][]string{
+		"_dnslink.example.com": {"dnslink=/memns/k51qziw"},
+		"fallback.com":         {"dnslink=/mem/membafy"},
+		"invalid.com":          {"not-a-dnslink=xyz"},
+	}
+
+	resolver.SetLookupTXT(func(host string) ([]string, error) {
+		if val, ok := mockTXT[host]; ok {
+			return val, nil
+		}
+		return nil, errors.New("dns error")
+	})
+
+	priv, _, _ := crypto.GenerateEd25519Key(rand.Reader)
+	key := &keyring.Key{Name: "key", PrivKey: priv, PubKey: priv.GetPublic(), MemNSName: "/memns/k51qziw"}
+	rec, _ := BuildRecord(key, "/mem/mid-resolved", 1, 10*time.Second, nil, "")
+	cache.Add("k51qziw", rec)
+
+	ctx := context.Background()
+
+	val, err := resolver.Resolve(ctx, "example.com")
+	if err != nil {
+		t.Fatalf("failed to resolve preferred: %v", err)
+	}
+	if val != "/mem/mid-resolved" {
+		t.Errorf("expected resolved '/mem/mid-resolved', got %q", val)
+	}
+
+	val, err = resolver.Resolve(ctx, "fallback.com")
+	if err != nil {
+		t.Fatalf("failed to resolve fallback: %v", err)
+	}
+	if val != "/mem/membafy" {
+		t.Errorf("expected resolved '/mem/membafy', got %q", val)
+	}
+
+	_, err = resolver.Resolve(ctx, "invalid.com")
+	if err == nil {
+		t.Error("expected error for invalid.com since no resolver configured")
+	}
+}

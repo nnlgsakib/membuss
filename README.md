@@ -28,6 +28,9 @@ network.
   multiple in-process fetchers share incoming blocks.
 - **Mem-PEX gossip.** A dedicated peer-exchange protocol so nodes
   discover each other even when bootstrap peers are unreachable.
+- **DNSLink Integration.** Resolve custom domains dynamically to Membuss addresses using standard DNS TXT record lookups (`dnslink=/memns/k51...` or `dnslink=/mem/...`), making it a true replacement for hosting mutable IPFS-style web projects.
+- **Dynamic Range Requests.** Fast, lazy HTTP `Range` requests resolve and stream specific Merkle DAG child blocks containing only the requested offset range on-demand, enabling high-performance audio/video streaming.
+- **BadgerDB Value Log GC.** Periodic background garbage collection automatically cleans fragmented value logs inside the local store, recovering disk space from deleted/overwritten blocks.
 - **Built-in explorer UI.** Every Membuss node serves a web UI at
   `/explorer/` for browsing MIDs, walking DAGs, inspecting peers,
   and seeing what anchor nodes are doing.
