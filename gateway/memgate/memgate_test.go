@@ -735,3 +735,116 @@ func TestMemFS_PathGet(t *testing.T) {
 		}
 	}
 }
+
+func TestHttpCachingAndMemoryCache(t *testing.T) {
+	bs, _ := store.NewMemStore(store.Options{InMemory: true})
+	defer bs.Close()
+	builder := memfs.NewBuilder(bs)
+	root, err := builder.AddDirectoryFromFS(fstest.MapFS{
+		"hello.txt": &fstest.MapFile{Data: []byte("Hello, world!")},
+	}, ".")
+	if err != nil {
+		t.Fatalf("add dir: %v", err)
+	}
+
+	be := &memfsBackend{
+		memBackend: newMemBackend(),
+		resolver:   memfs.NewResolver(bs),
+	}
+	// Ingest root directory bytes and metadata into memBackend so Resolve works
+	rawDir, _ := bs.Get(root.MID)
+	be.memBackend.put(root.MID, rawDir, "application/octet-stream")
+
+	mg := newTestGate(t, be)
+	srv := httptest.NewServer(mg.Router())
+	defer srv.Close()
+
+	client := &http.Client{}
+
+	// Test 1: Resolve MID Cache & ETag Validation
+	req, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String(), nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		t.Fatal("expected ETag header")
+	}
+
+	// Conditional request should return 304 Not Modified
+	reqCond, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String(), nil)
+	reqCond.Header.Set("If-None-Match", etag)
+	respCond, err := client.Do(reqCond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respCond.Body.Close()
+	if respCond.StatusCode != http.StatusNotModified {
+		t.Fatalf("expected 304, got %d", respCond.StatusCode)
+	}
+
+	// Test 2: DAG Node JSON Cache & ETag Validation
+	reqJSON, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String()+"?format=dag-json", nil)
+	respJSON, err := client.Do(reqJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respJSON.Body.Close()
+	etagJSON := respJSON.Header.Get("ETag")
+
+	reqCondJSON, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String()+"?format=dag-json", nil)
+	reqCondJSON.Header.Set("If-None-Match", etagJSON)
+	respCondJSON, err := client.Do(reqCondJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respCondJSON.Body.Close()
+	if respCondJSON.StatusCode != http.StatusNotModified {
+		t.Fatalf("expected 304 for conditional DAG-JSON, got %d", respCondJSON.StatusCode)
+	}
+
+	// Test 3: Raw Block Cache & ETag Validation
+	reqRaw, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String()+"?format=raw", nil)
+	respRaw, err := client.Do(reqRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respRaw.Body.Close()
+	etagRaw := respRaw.Header.Get("ETag")
+
+	reqCondRaw, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String()+"?format=raw", nil)
+	reqCondRaw.Header.Set("If-None-Match", etagRaw)
+	respCondRaw, err := client.Do(reqCondRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respCondRaw.Body.Close()
+	if respCondRaw.StatusCode != http.StatusNotModified {
+		t.Fatalf("expected 304 for conditional raw block, got %d", respCondRaw.StatusCode)
+	}
+
+	// Test 4: MemFS Path Cache & ETag Validation
+	reqPath, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String()+"/hello.txt", nil)
+	respPath, err := client.Do(reqPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respPath.Body.Close()
+	etagPath := respPath.Header.Get("ETag")
+
+	reqCondPath, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String()+"/hello.txt", nil)
+	reqCondPath.Header.Set("If-None-Match", etagPath)
+	respCondPath, err := client.Do(reqCondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respCondPath.Body.Close()
+	if respCondPath.StatusCode != http.StatusNotModified {
+		t.Fatalf("expected 304 for conditional MemFS subpath, got %d", respCondPath.StatusCode)
+	}
+}

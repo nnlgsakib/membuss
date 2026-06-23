@@ -433,29 +433,66 @@ func (m *MemGate) handlePathGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *MemGate) handleDAGJSON(w http.ResponseWriter, r *http.Request, root mid.MID) {
+	etagVal := root.String()
+	if checkETag(w, r, etagVal) {
+		return
+	}
+
+	cacheKey := "dagjson:" + root.String()
+	if data, ok := m.lru.get(cacheKey); ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Membuss-MID", root.String())
+		w.Header().Set("ETag", `"`+etagVal+`"`)
+		w.Header().Set("Cache-Control", "public, immutable, max-age=31536000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+		return
+	}
+
 	body, err := m.cfg.Backend.DAGNodeJSON(r.Context(), root)
 	if err != nil {
 		http.Error(w, "dag-json: "+err.Error(), http.StatusNotFound)
 		return
 	}
+	m.lru.put(cacheKey, body)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Membuss-MID", root.String())
-	w.Header().Set("ETag", `"`+root.String()+`"`)
+	w.Header().Set("ETag", `"`+etagVal+`"`)
 	w.Header().Set("Cache-Control", "public, immutable, max-age=31536000")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }
 
 func (m *MemGate) handleRawBlock(w http.ResponseWriter, r *http.Request, root mid.MID) {
+	etagVal := root.String()
+	if checkETag(w, r, etagVal) {
+		return
+	}
+
+	cacheKey := "raw:" + root.String()
+	if data, ok := m.lru.get(cacheKey); ok {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		w.Header().Set("X-Membuss-MID", root.String())
+		w.Header().Set("ETag", `"`+etagVal+`"`)
+		w.Header().Set("Cache-Control", "public, immutable, max-age=31536000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+		return
+	}
+
 	data, err := m.cfg.Backend.RawBlock(r.Context(), root)
 	if err != nil {
 		http.Error(w, "raw: "+err.Error(), http.StatusNotFound)
 		return
 	}
+	m.lru.put(cacheKey, data)
+
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.Header().Set("X-Membuss-MID", root.String())
-	w.Header().Set("ETag", `"`+root.String()+`"`)
+	w.Header().Set("ETag", `"`+etagVal+`"`)
 	w.Header().Set("Cache-Control", "public, immutable, max-age=31536000")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
@@ -465,10 +502,16 @@ func (m *MemGate) handleRawBlock(w http.ResponseWriter, r *http.Request, root mi
 // is: cache hit -> write directly. Miss -> Backend.Resolve ->
 // copy with optional range slicing.
 func (m *MemGate) handleResolved(w http.ResponseWriter, r *http.Request, root mid.MID, midStr string) {
+	// RFC 7234 conditional validation
+	if checkETag(w, r, midStr) {
+		return
+	}
+
 	// Cache lookup. LRU is keyed on the public MID string
 	// so that a malicious or buggy caller cannot trigger
 	// cache growth by spamming raw-block requests.
-	if data, ok := m.lru.get(midStr); ok {
+	cacheKey := "resolved:" + midStr
+	if data, ok := m.lru.get(cacheKey); ok {
 		m.writeBytes(w, r, midStr, data, detectContentType(midStr, data, ""))
 		return
 	}
@@ -494,7 +537,7 @@ func (m *MemGate) handleResolved(w http.ResponseWriter, r *http.Request, root mi
 			http.Error(w, "read: "+err.Error(), http.StatusBadGateway)
 			return
 		}
-		m.lru.put(midStr, buf)
+		m.lru.put(cacheKey, buf)
 		stream = false
 	} else {
 		// Streamed path. Don't cache.
@@ -523,9 +566,13 @@ func (m *MemGate) writeBytes(w http.ResponseWriter, r *http.Request, midStr stri
 	h.Set("Content-Type", contentType)
 	h.Set("X-Membuss-MID", midStr)
 	h.Set("X-Membuss-Size", strconv.Itoa(len(data)))
-	h.Set("ETag", `"`+midStr+`"`)
+	if h.Get("ETag") == "" {
+		h.Set("ETag", `"`+midStr+`"`)
+	}
 	h.Set("Accept-Ranges", "bytes")
-	h.Set("Cache-Control", "public, immutable, max-age=31536000")
+	if h.Get("Cache-Control") == "" {
+		h.Set("Cache-Control", "public, immutable, max-age=31536000")
+	}
 
 	if rng := r.Header.Get("Range"); rng != "" {
 		start, end, err := parseRange(rng, int64(len(data)))
@@ -645,6 +692,22 @@ func sanitizeFilename(s string) string {
 		}
 		return r
 	}, s)
+}
+
+func checkETag(w http.ResponseWriter, r *http.Request, etagValue string) bool {
+	ifNoneMatch := r.Header.Get("If-None-Match")
+	if ifNoneMatch == "" {
+		return false
+	}
+	cleanETag := strings.TrimPrefix(ifNoneMatch, "W/")
+	cleanETag = strings.Trim(cleanETag, `"`)
+	if cleanETag == etagValue {
+		w.Header().Set("ETag", `"`+etagValue+`"`)
+		w.Header().Set("Cache-Control", "public, immutable, max-age=31536000")
+		w.WriteHeader(http.StatusNotModified)
+		return true
+	}
+	return false
 }
 
 // --- LRU ---
@@ -903,6 +966,34 @@ func (m *MemGate) serveMemFSPath(w http.ResponseWriter, r *http.Request, midStr,
 		return
 	}
 
+	etagVal := midStr + "/" + innerPath
+	if checkETag(w, r, etagVal) {
+		return
+	}
+
+	cacheKey := "path:" + midStr + ":" + innerPath
+	if cachedBytes, ok := m.lru.get(cacheKey); ok {
+		var cp struct {
+			Data []byte `json:"data"`
+			Mime string `json:"mime"`
+		}
+		if json.Unmarshal(cachedBytes, &cp) == nil {
+			filename := filepath.Base(innerPath)
+			w.Header().Set("Content-Type", cp.Mime)
+			w.Header().Set("X-Membuss-MID", midStr)
+			w.Header().Set("X-Membuss-Path", "/"+innerPath)
+			w.Header().Set("X-Membuss-Name", filename)
+			w.Header().Set("X-Membuss-MimeType", cp.Mime)
+			if w.Header().Get("Content-Disposition") == "" {
+				w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": sanitizeFilename(filename)}))
+			}
+			w.Header().Set("ETag", `"`+etagVal+`"`)
+			w.Header().Set("Cache-Control", "public, immutable, max-age=31536000")
+			m.writeBytes(w, r, midStr, cp.Data, cp.Mime)
+			return
+		}
+	}
+
 	rc, size, mimeType, err := m.cfg.Backend.MemFSPathGet(r.Context(), root, innerPath)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
@@ -919,6 +1010,38 @@ func (m *MemGate) serveMemFSPath(w http.ResponseWriter, r *http.Request, midStr,
 		ct = "application/octet-stream"
 	}
 	filename := filepath.Base(innerPath)
+
+	if size > 0 && size <= m.cfg.MaxCacheBytes {
+		buf := make([]byte, size)
+		if _, err := io.ReadFull(rc, buf); err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+			http.Error(w, "read: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		cp := struct {
+			Data []byte `json:"data"`
+			Mime string `json:"mime"`
+		}{
+			Data: buf,
+			Mime: ct,
+		}
+		if cpBytes, err := json.Marshal(cp); err == nil {
+			m.lru.put(cacheKey, cpBytes)
+		}
+
+		w.Header().Set("Content-Type", ct)
+		w.Header().Set("X-Membuss-MID", midStr)
+		w.Header().Set("X-Membuss-Path", "/"+innerPath)
+		w.Header().Set("X-Membuss-Name", filename)
+		w.Header().Set("X-Membuss-MimeType", ct)
+		if w.Header().Get("Content-Disposition") == "" {
+			w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": sanitizeFilename(filename)}))
+		}
+		w.Header().Set("ETag", `"`+etagVal+`"`)
+		w.Header().Set("Cache-Control", "public, immutable, max-age=31536000")
+		m.writeBytes(w, r, midStr, buf, ct)
+		return
+	}
+
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("X-Membuss-MID", midStr)
 	w.Header().Set("X-Membuss-Path", "/"+innerPath)
@@ -930,7 +1053,7 @@ func (m *MemGate) serveMemFSPath(w http.ResponseWriter, r *http.Request, midStr,
 	if size > 0 {
 		w.Header().Set("Content-Length", strconv.FormatUint(size, 10))
 	}
-	w.Header().Set("ETag", `"`+midStr+"/"+innerPath+`"`)
+	w.Header().Set("ETag", `"`+etagVal+`"`)
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Cache-Control", "public, immutable, max-age=31536000")
 	w.WriteHeader(http.StatusOK)
