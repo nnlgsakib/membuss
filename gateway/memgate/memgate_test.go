@@ -467,14 +467,14 @@ func TestParseRange_Cases(t *testing.T) {
 }
 
 func TestDetectContentType_OverrideWins(t *testing.T) {
-	got := detectContentType("mem1abc.html", []byte("<html/>"), "text/x-custom")
+	got := DetectContentType("mem1abc.html", []byte("<html/>"), "text/x-custom")
 	if got != "text/x-custom" {
 		t.Errorf("override: %q", got)
 	}
 }
 
 func TestDetectContentType_EmptyData(t *testing.T) {
-	got := detectContentType("mem1abc", nil, "")
+	got := DetectContentType("mem1abc", nil, "")
 	if got != "application/octet-stream" {
 		t.Errorf("empty: %q", got)
 	}
@@ -483,7 +483,7 @@ func TestDetectContentType_EmptyData(t *testing.T) {
 func TestDetectContentType_HTMLByExtension(t *testing.T) {
 	// Sanity: filepath.Ext strips the leading dot, mime picks it.
 	_ = mime.TypeByExtension
-	ct := detectContentType("mem1.html", []byte("x"), "")
+	ct := DetectContentType("mem1.html", []byte("x"), "")
 	if !strings.HasPrefix(ct, "text/html") {
 		t.Errorf("html: %q", ct)
 	}
@@ -846,5 +846,60 @@ func TestHttpCachingAndMemoryCache(t *testing.T) {
 	respCondPath.Body.Close()
 	if respCondPath.StatusCode != http.StatusNotModified {
 		t.Fatalf("expected 304 for conditional MemFS subpath, got %d", respCondPath.StatusCode)
+	}
+}
+
+func TestDetectContentType_MimeLibraryAndCustomMap(t *testing.T) {
+	cases := []struct {
+		name     string
+		mid      string
+		data     []byte
+		expected string
+	}{
+		{
+			name:     "HTML sniffed (no ext)",
+			mid:      "mem1abc",
+			data:     []byte("<!DOCTYPE html><html><body>hello</body></html>"),
+			expected: "text/html; charset=utf-8",
+		},
+		{
+			name:     "WASM extension",
+			mid:      "mem1abc.wasm",
+			data:     []byte{0x00, 0x61, 0x73, 0x6d},
+			expected: "application/wasm",
+		},
+		{
+			name:     "CSS extension override registry",
+			mid:      "mem1abc.css",
+			data:     []byte("body { color: red; }"),
+			expected: "text/css; charset=utf-8",
+		},
+		{
+			name:     "JS extension override registry",
+			mid:      "mem1abc.js",
+			data:     []byte("console.log('hello');"),
+			expected: "text/javascript; charset=utf-8",
+		},
+		{
+			name:     "SVG extension override registry",
+			mid:      "mem1abc.svg",
+			data:     []byte("<svg></svg>"),
+			expected: "image/svg+xml",
+		},
+		{
+			name:     "PNG sniffed (no ext)",
+			mid:      "mem1abc",
+			data:     []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a},
+			expected: "image/png",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := DetectContentType(c.mid, c.data, "")
+			if got != c.expected {
+				t.Errorf("expected %q, got %q", c.expected, got)
+			}
+		})
 	}
 }

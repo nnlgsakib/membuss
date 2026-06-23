@@ -9,9 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net/http"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -141,10 +138,7 @@ func (a *memgateAdapter) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser,
 		Sealed:     sealed,
 		Name:       oi.Name,
 		MimeType:   mimeType,
-		// ContentType is the legacy / extension-based
-		// fallback. The handleGet handler prefers
-		// MimeType when both are set.
-		ContentType: detectContentType(m.String(), nil, mimeType),
+		ContentType: memgate.DetectContentType(m.String(), nil, mimeType),
 	}, nil
 }
 
@@ -275,7 +269,7 @@ func (a *memgateAdapter) Stat(ctx context.Context, m mid.MID) (memgate.ContentIn
 		Sealed:      sealed,
 		Name:        oi.Name,
 		MimeType:    mimeType,
-		ContentType: detectContentType(m.String(), nil, mimeType),
+		ContentType: memgate.DetectContentType(m.String(), nil, mimeType),
 	}, nil
 }
 
@@ -381,42 +375,4 @@ func memFSTypeString(t memfs.MemFSType) string {
 
 var errMGNotFound = errors.New("not found")
 
-// detectContentType is exported so the memgate handler can
-// use it. It prefers the ContentType the client provided as
-// a hint, then sniffs the bytes, and finally falls back to
-// "application/octet-stream".
-func detectContentType(midStr string, data []byte, hint string) string {
-	if hint != "" {
-		return hint
-	}
-	if ext := filepath.Ext(midStr); ext != "" {
-		if ct := mimeByExt(ext); ct != "" {
-			return ct
-		}
-	}
-	if len(data) > 0 {
-		return http.DetectContentType(data)
-	}
-	return "application/octet-stream"
-}
 
-func mimeByExt(ext string) string {
-	switch strings.ToLower(ext) {
-	case ".html", ".htm":
-		return "text/html; charset=utf-8"
-	case ".json":
-		return "application/json"
-	case ".txt":
-		return "text/plain; charset=utf-8"
-	case ".png":
-		return "image/png"
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".gif":
-		return "image/gif"
-	case ".pdf":
-		return "application/pdf"
-	default:
-		return ""
-	}
-}

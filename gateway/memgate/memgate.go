@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gabriel-vasile/mimetype"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
@@ -512,7 +513,7 @@ func (m *MemGate) handleResolved(w http.ResponseWriter, r *http.Request, root mi
 	// cache growth by spamming raw-block requests.
 	cacheKey := "resolved:" + midStr
 	if data, ok := m.lru.get(cacheKey); ok {
-		m.writeBytes(w, r, midStr, data, detectContentType(midStr, data, ""))
+		m.writeBytes(w, r, midStr, data, DetectContentType(midStr, data, ""))
 		return
 	}
 
@@ -555,7 +556,7 @@ func (m *MemGate) handleResolved(w http.ResponseWriter, r *http.Request, root mi
 	}
 
 	_ = stream
-	m.writeBytes(w, r, midStr, buf, chooseContentType(info.ContentType, detectContentType(midStr, buf, "")))
+	m.writeBytes(w, r, midStr, buf, chooseContentType(info.ContentType, DetectContentType(midStr, buf, "")))
 }
 
 // writeBytes writes data to w honoring an optional Range
@@ -651,13 +652,40 @@ func parseRange(s string, size int64) (int64, int64, error) {
 	return int64(start), int64(end), nil
 }
 
-// detectContentType picks a MIME type using (in order):
-//   1. The Mid's suffix if the MID looks like a path with an
-//      extension. MIDs do not normally carry extensions, so
-//      this is rarely useful.
-//   2. http.DetectContentType on the first 512 bytes.
-//   3. application/octet-stream as a fallback.
-func detectContentType(midStr string, data []byte, override string) string {
+func init() {
+	// Seed common web MIME types to prevent discrepancies or missing records in standard OS registries (e.g. on Windows).
+	_ = mime.AddExtensionType(".html", "text/html; charset=utf-8")
+	_ = mime.AddExtensionType(".htm", "text/html; charset=utf-8")
+	_ = mime.AddExtensionType(".css", "text/css; charset=utf-8")
+	_ = mime.AddExtensionType(".js", "text/javascript; charset=utf-8")
+	_ = mime.AddExtensionType(".mjs", "text/javascript; charset=utf-8")
+	_ = mime.AddExtensionType(".json", "application/json")
+	_ = mime.AddExtensionType(".svg", "image/svg+xml")
+	_ = mime.AddExtensionType(".wasm", "application/wasm")
+	_ = mime.AddExtensionType(".txt", "text/plain; charset=utf-8")
+	_ = mime.AddExtensionType(".png", "image/png")
+	_ = mime.AddExtensionType(".jpg", "image/jpeg")
+	_ = mime.AddExtensionType(".jpeg", "image/jpeg")
+	_ = mime.AddExtensionType(".gif", "image/gif")
+	_ = mime.AddExtensionType(".pdf", "application/pdf")
+	_ = mime.AddExtensionType(".xml", "application/xml")
+	_ = mime.AddExtensionType(".mp3", "audio/mpeg")
+	_ = mime.AddExtensionType(".mp4", "video/mp4")
+	_ = mime.AddExtensionType(".webm", "video/webm")
+	_ = mime.AddExtensionType(".webp", "image/webp")
+	_ = mime.AddExtensionType(".woff", "font/woff")
+	_ = mime.AddExtensionType(".woff2", "font/woff2")
+	_ = mime.AddExtensionType(".ttf", "font/ttf")
+	_ = mime.AddExtensionType(".otf", "font/otf")
+	_ = mime.AddExtensionType(".ico", "image/x-icon")
+}
+
+// DetectContentType picks a MIME type using (in order):
+//   1. The override/hint if provided.
+//   2. Extension-based lookup via the standard library's registry (mime.TypeByExtension).
+//   3. Content-based sniffing using the gabriel-vasile/mimetype library.
+//   4. application/octet-stream as a fallback.
+func DetectContentType(midStr string, data []byte, override string) string {
 	if override != "" {
 		return override
 	}
@@ -667,7 +695,7 @@ func detectContentType(midStr string, data []byte, override string) string {
 		}
 	}
 	if len(data) > 0 {
-		return http.DetectContentType(data)
+		return mimetype.Detect(data).String()
 	}
 	return "application/octet-stream"
 }
