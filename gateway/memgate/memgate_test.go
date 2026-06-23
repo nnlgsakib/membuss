@@ -571,6 +571,56 @@ func TestDownloadDisposition(t *testing.T) {
 type memfsBackend struct {
 	*memBackend
 	resolver *memfs.Resolver
+	bs       store.Blockstore
+}
+
+func (b *memfsBackend) RawBlock(ctx context.Context, m mid.MID) ([]byte, error) {
+	if b.bs != nil {
+		data, err := b.bs.Get(m)
+		if err == nil {
+			return data, nil
+		}
+	}
+	return b.memBackend.RawBlock(ctx, m)
+}
+
+func (b *memfsBackend) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser, ContentInfo, error) {
+	if b.bs != nil && m.Codec() == mid.CodecMemFS {
+		mr := memfs.NewResolver(b.bs)
+		node, err := mr.Resolve(ctx, m)
+		if err == nil {
+			if node.IsFile() {
+				rc, err := mr.Open(ctx, m)
+				if err == nil {
+					return rc, ContentInfo{
+						MID:      m.String(),
+						Size:     node.TotalSize(),
+						Blocks:   uint64(1 + node.BlockCount()),
+						MimeType: node.MimeType(),
+						Sealed:   true,
+					}, nil
+				}
+			}
+		}
+	}
+	return b.memBackend.Resolve(ctx, m)
+}
+
+func (b *memfsBackend) Stat(ctx context.Context, m mid.MID) (ContentInfo, error) {
+	if b.bs != nil && m.Codec() == mid.CodecMemFS {
+		mr := memfs.NewResolver(b.bs)
+		node, err := mr.Resolve(ctx, m)
+		if err == nil {
+			return ContentInfo{
+				MID:      m.String(),
+				Size:     node.TotalSize(),
+				Blocks:   uint64(1 + node.BlockCount()),
+				MimeType: node.MimeType(),
+				Sealed:   true,
+			}, nil
+		}
+	}
+	return b.memBackend.Stat(ctx, m)
 }
 
 func (b *memfsBackend) MemFSInfo(ctx context.Context, m mid.MID) (MemFSInfo, error) {
@@ -678,7 +728,7 @@ func TestMemFS_DirList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add dir: %v", err)
 	}
-	be := &memfsBackend{memBackend: newMemBackend(), resolver: memfs.NewResolver(bs)}
+	be := &memfsBackend{memBackend: newMemBackend(), resolver: memfs.NewResolver(bs), bs: bs}
 	srv := httptest.NewServer(newTestGate(t, be).Router())
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/mem/" + root.MID.String() + "/")
@@ -705,7 +755,7 @@ func TestMemFS_DirList_JSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add dir: %v", err)
 	}
-	be := &memfsBackend{memBackend: newMemBackend(), resolver: memfs.NewResolver(bs)}
+	be := &memfsBackend{memBackend: newMemBackend(), resolver: memfs.NewResolver(bs), bs: bs}
 	srv := httptest.NewServer(newTestGate(t, be).Router())
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/mem/" + root.MID.String() + "/?format=json")
@@ -740,7 +790,7 @@ func TestMemFS_PathGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add dir: %v", err)
 	}
-	be := &memfsBackend{memBackend: newMemBackend(), resolver: memfs.NewResolver(bs)}
+	be := &memfsBackend{memBackend: newMemBackend(), resolver: memfs.NewResolver(bs), bs: bs}
 	srv := httptest.NewServer(newTestGate(t, be).Router())
 	defer srv.Close()
 
@@ -787,7 +837,7 @@ func TestMemFS_SubdirList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add dir: %v", err)
 	}
-	be := &memfsBackend{memBackend: newMemBackend(), resolver: memfs.NewResolver(bs)}
+	be := &memfsBackend{memBackend: newMemBackend(), resolver: memfs.NewResolver(bs), bs: bs}
 	srv := httptest.NewServer(newTestGate(t, be).Router())
 	defer srv.Close()
 
@@ -845,6 +895,7 @@ func TestHttpCachingAndMemoryCache(t *testing.T) {
 	be := &memfsBackend{
 		memBackend: newMemBackend(),
 		resolver:   memfs.NewResolver(bs),
+		bs:         bs,
 	}
 	// Ingest root directory bytes and metadata into memBackend so Resolve works
 	rawDir, _ := bs.Get(root.MID)
@@ -996,5 +1047,100 @@ func TestDetectContentType_MimeLibraryAndCustomMap(t *testing.T) {
 				t.Errorf("expected %q, got %q", c.expected, got)
 			}
 		})
+	}
+}
+
+func TestStreamedRangeRequests_RawDAG(t *testing.T) {
+	b := newMemBackend()
+
+	mg, err := New(Config{
+		Backend:       b,
+		MaxCacheBytes: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte("0123456789abcdef")
+	m := putRandom(b, body)
+
+	srv := httptest.NewServer(mg.Router())
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/mem/"+m.String(), nil)
+	req.Header.Set("Range", "bytes=4-11")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("expected 206 Partial Content, got %d", resp.StatusCode)
+	}
+
+	gotRange := resp.Header.Get("Content-Range")
+	if gotRange != "bytes 4-11/16" {
+		t.Errorf("expected Content-Range 'bytes 4-11/16', got %q", gotRange)
+	}
+
+	gotBytes, _ := io.ReadAll(resp.Body)
+	if string(gotBytes) != "456789ab" {
+		t.Errorf("expected body '456789ab', got %q", string(gotBytes))
+	}
+}
+
+func TestStreamedRangeRequests_MemFS(t *testing.T) {
+	bs, _ := store.NewMemStore(store.Options{InMemory: true})
+	defer bs.Close()
+	builder := memfs.NewBuilder(bs)
+
+	fileData := []byte("abcdefghijklmnopqrstuvwxyz")
+	root, err := builder.AddDirectoryFromFS(fstest.MapFS{
+		"alphabet.txt": &fstest.MapFile{Data: fileData},
+	}, ".")
+	if err != nil {
+		t.Fatalf("add dir: %v", err)
+	}
+
+	be := &memfsBackend{
+		memBackend: newMemBackend(),
+		resolver:   memfs.NewResolver(bs),
+		bs:         bs,
+	}
+
+	mg, err := New(Config{
+		Backend:       be,
+		MaxCacheBytes: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(mg.Router())
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String()+"/alphabet.txt", nil)
+	req.Header.Set("Range", "bytes=10-15")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("expected 206 Partial Content, got %d", resp.StatusCode)
+	}
+
+	gotRange := resp.Header.Get("Content-Range")
+	if gotRange != "bytes 10-15/26" {
+		t.Errorf("expected Content-Range 'bytes 10-15/26', got %q", gotRange)
+	}
+
+	gotBytes, _ := io.ReadAll(resp.Body)
+	if string(gotBytes) != "klmnop" {
+		t.Errorf("expected body 'klmnop', got %q", string(gotBytes))
 	}
 }

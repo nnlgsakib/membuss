@@ -33,6 +33,8 @@ import (
 
 	"github.com/nnlgsakib/membuss/core/memns"
 	"github.com/nnlgsakib/membuss/core/mid"
+	membusspb "github.com/nnlgsakib/membuss/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 // Backend is the contract Mem-Gate depends on. The daemon
@@ -562,6 +564,11 @@ func (m *MemGate) handleResolved(w http.ResponseWriter, r *http.Request, root mi
 		w.Header().Set("ETag", `"`+info.MID+`"`)
 		w.Header().Set("Accept-Ranges", "bytes")
 		w.Header().Set("Cache-Control", "public, immutable, max-age=31536000")
+
+		if m.handleStreamRange(w, r, root, int64(info.Size)) {
+			return
+		}
+
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.Copy(w, rc)
 		return
@@ -1105,6 +1112,239 @@ func (m *MemGate) serveMemFSPath(w http.ResponseWriter, r *http.Request, midStr,
 	w.Header().Set("ETag", `"`+etagVal+`"`)
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Cache-Control", "public, immutable, max-age=31536000")
+
+	fileMID, err := mid.Parse(pathInfo.MID)
+	if err == nil {
+		if m.handleStreamRange(w, r, fileMID, int64(size)) {
+			return
+		}
+	}
+
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, rc)
+}
+
+type dagBlock struct {
+	mid    mid.MID
+	size   int64
+	offset int64
+}
+
+func buildBlockList(ctx context.Context, backend Backend, root mid.MID) ([]dagBlock, int64, error) {
+	raw, err := backend.RawBlock(ctx, root)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var blocks []dagBlock
+	var offset int64
+
+	if root.Codec() == mid.CodecMemFS {
+		var node membusspb.MemFSNode
+		if err := proto.Unmarshal(raw, &node); err != nil {
+			return nil, 0, err
+		}
+		if node.Type != membusspb.MemFSType_FILE {
+			return nil, 0, fmt.Errorf("memfs node is not a file")
+		}
+
+		var walkMemFS func(n *membusspb.MemFSNode) error
+		walkMemFS = func(n *membusspb.MemFSNode) error {
+			for _, b := range n.Blocks {
+				if b == nil || len(b.Mid) == 0 {
+					continue
+				}
+				var codec uint64 = mid.CodecMemFS
+				if b.Size > 0 {
+					codec = mid.CodecRaw
+				}
+				childMID, err := mid.FromMultihash(codec, b.Mid)
+				if err != nil {
+					return err
+				}
+
+				if b.Size > 0 {
+					blocks = append(blocks, dagBlock{
+						mid:    childMID,
+						size:   int64(b.Size),
+						offset: offset,
+					})
+					offset += int64(b.Size)
+				} else {
+					childRaw, err := backend.RawBlock(ctx, childMID)
+					if err != nil {
+						return err
+					}
+					var childNode membusspb.MemFSNode
+					if err := proto.Unmarshal(childRaw, &childNode); err != nil {
+						return err
+					}
+					if err := walkMemFS(&childNode); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
+
+		if err := walkMemFS(&node); err != nil {
+			return nil, 0, err
+		}
+		return blocks, offset, nil
+	} else {
+		var walkRawDAG func(curr mid.MID, rawBytes []byte) error
+		walkRawDAG = func(curr mid.MID, rawBytes []byte) error {
+			var node membusspb.DAGNode
+			if err := proto.Unmarshal(rawBytes, &node); err == nil && len(node.Links) > 0 {
+				for _, linkStr := range node.Links {
+					child, err := mid.Parse(linkStr)
+					if err != nil {
+						return err
+					}
+					childRaw, err := backend.RawBlock(ctx, child)
+					if err != nil {
+						return err
+					}
+					if err := walkRawDAG(child, childRaw); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+
+			size := int64(len(rawBytes))
+			blocks = append(blocks, dagBlock{
+				mid:    curr,
+				size:   size,
+				offset: offset,
+			})
+			offset += size
+			return nil
+		}
+
+		if err := walkRawDAG(root, raw); err != nil {
+			return nil, 0, err
+		}
+		return blocks, offset, nil
+	}
+}
+
+type dagReader struct {
+	ctx          context.Context
+	backend      Backend
+	blocks       []dagBlock
+	totalSize    int64
+	pos          int64
+	curBlockIdx  int
+	curBlockBuf  []byte
+}
+
+func newDagReader(ctx context.Context, backend Backend, blocks []dagBlock, totalSize int64) *dagReader {
+	return &dagReader{
+		ctx:         ctx,
+		backend:     backend,
+		blocks:      blocks,
+		totalSize:   totalSize,
+		curBlockIdx: -1,
+	}
+}
+
+func (r *dagReader) Read(p []byte) (int, error) {
+	if r.pos >= r.totalSize {
+		return 0, io.EOF
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	idx := r.findBlockIndex(r.pos)
+	if idx < 0 || idx >= len(r.blocks) {
+		return 0, io.EOF
+	}
+
+	if r.curBlockIdx != idx || r.curBlockBuf == nil {
+		block := r.blocks[idx]
+		data, err := r.backend.RawBlock(r.ctx, block.mid)
+		if err != nil {
+			return 0, fmt.Errorf("read block %s: %w", block.mid.String(), err)
+		}
+		r.curBlockIdx = idx
+		r.curBlockBuf = data
+	}
+
+	block := r.blocks[idx]
+	offsetInBlock := r.pos - block.offset
+	if offsetInBlock >= int64(len(r.curBlockBuf)) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.curBlockBuf[offsetInBlock:])
+	r.pos += int64(n)
+	return n, nil
+}
+
+func (r *dagReader) Seek(offset int64, whence int) (int64, error) {
+	var target int64
+	switch whence {
+	case io.SeekStart:
+		target = offset
+	case io.SeekCurrent:
+		target = r.pos + offset
+	case io.SeekEnd:
+		target = r.totalSize + offset
+	default:
+		return 0, fmt.Errorf("invalid whence: %d", whence)
+	}
+	if target < 0 {
+		return 0, fmt.Errorf("negative seek target: %d", target)
+	}
+	r.pos = target
+	return r.pos, nil
+}
+
+func (r *dagReader) Close() error {
+	r.curBlockBuf = nil
+	return nil
+}
+
+func (r *dagReader) findBlockIndex(pos int64) int {
+	for i, b := range r.blocks {
+		if pos >= b.offset && pos < b.offset+b.size {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m *MemGate) handleStreamRange(w http.ResponseWriter, r *http.Request, fileMID mid.MID, totalSize int64) bool {
+	rng := r.Header.Get("Range")
+	if rng == "" {
+		return false
+	}
+
+	start, end, err := parseRange(rng, totalSize)
+	if err != nil {
+		http.Error(w, "bad range: "+err.Error(), http.StatusRequestedRangeNotSatisfiable)
+		return true
+	}
+
+	blocks, _, err := buildBlockList(r.Context(), m.cfg.Backend, fileMID)
+	if err != nil {
+		http.Error(w, "build block list: "+err.Error(), http.StatusInternalServerError)
+		return true
+	}
+
+	reader := newDagReader(r.Context(), m.cfg.Backend, blocks, totalSize)
+	defer reader.Close()
+
+	if _, err := reader.Seek(start, io.SeekStart); err != nil {
+		http.Error(w, "seek error: "+err.Error(), http.StatusInternalServerError)
+		return true
+	}
+
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end-1, totalSize))
+	w.Header().Set("Content-Length", strconv.FormatInt(end-start, 10))
+	w.WriteHeader(http.StatusPartialContent)
+
+	_, _ = io.CopyN(w, reader, end-start)
+	return true
 }

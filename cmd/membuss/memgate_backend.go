@@ -145,15 +145,19 @@ func (a *memgateAdapter) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser,
 // RawBlock returns the raw bytes of a single block (no DAG
 // walk).
 func (a *memgateAdapter) RawBlock(ctx context.Context, m mid.MID) ([]byte, error) {
-	b := a.b
-	has, err := b.store.Has(m)
+	fbs := &fetchingBlockstore{
+		Blockstore: a.b.store,
+		b:          a.b,
+		ctx:        ctx,
+	}
+	data, err := fbs.Get(m)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, errMGNotFound
+		}
 		return nil, err
 	}
-	if !has {
-		return nil, errMGNotFound
-	}
-	return b.store.Get(m)
+	return data, nil
 }
 
 // DAGNodeJSON returns the DAG node at m serialized as JSON.
