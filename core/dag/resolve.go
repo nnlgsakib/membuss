@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -64,7 +65,18 @@ func (r *Resolver) stream(root mid.MID, visit func(mid.MID) error, w *io.PipeWri
 	walk = func(m mid.MID) error {
 		data, err := r.bs.Get(m)
 		if err != nil {
-			return fmt.Errorf("dag: get %s: %w", m.String(), err)
+			// Block may not be available yet (streaming
+			// assembly). Retry with backoff up to 5s.
+			for attempt := 0; attempt < 50; attempt++ {
+				time.Sleep(100 * time.Millisecond)
+				data, err = r.bs.Get(m)
+				if err == nil {
+					break
+				}
+			}
+			if err != nil {
+				return fmt.Errorf("dag: get %s: %w", m.String(), err)
+			}
 		}
 
 		// A block is an internal node iff its bytes unmarshal as

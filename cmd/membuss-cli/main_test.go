@@ -16,6 +16,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/nnlgsakib/membuss/net/memex"
 	serverpkg "github.com/nnlgsakib/membuss/rpc/server"
 )
 
@@ -46,10 +47,10 @@ func (f *fakeBackend) Get(ctx context.Context, midStr string, offset, limit uint
 	return f.GetWithProgress(ctx, midStr, offset, limit, nil)
 }
 
-func (f *fakeBackend) GetWithProgress(ctx context.Context, midStr string, offset, limit uint64, progressFn func(blocksResolved, blocksTotal uint64)) (io.ReadCloser, error) {
+func (f *fakeBackend) GetWithProgress(ctx context.Context, midStr string, offset, limit uint64, progressFn func(update memex.ProgressUpdate)) (io.ReadCloser, error) {
 	body := []byte("the quick brown fox jumps over the lazy dog\n")
 	if progressFn != nil {
-		progressFn(uint64(len(body)), uint64(len(body)))
+		progressFn(memex.ProgressUpdate{BlocksResolved: uint64(len(body)), BlocksTotal: uint64(len(body))})
 	}
 	return io.NopCloser(bytes.NewReader(body)), nil
 }

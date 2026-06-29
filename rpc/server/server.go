@@ -12,6 +12,7 @@ import (
 	"io"
 
 	"github.com/nnlgsakib/membuss/core/version"
+	"github.com/nnlgsakib/membuss/net/memex"
 	membusspb "github.com/nnlgsakib/membuss/proto"
 
 	"google.golang.org/grpc"
@@ -39,7 +40,7 @@ type Backend interface {
 	// progressFn is called as blocks arrive with the
 	// running total of bytes received and total bytes
 	// (total may be 0 until all blocks are known).
-	GetWithProgress(ctx context.Context, midStr string, offset, limit uint64, progressFn func(blocksResolved, blocksTotal uint64)) (io.ReadCloser, error)
+	GetWithProgress(ctx context.Context, midStr string, offset, limit uint64, progressFn func(update memex.ProgressUpdate)) (io.ReadCloser, error)
 	// Seal pins the given MID, optionally recursive.
 	Seal(ctx context.Context, midStr string, recursive bool) (SealResult, error)
 	// Unseal removes the pin on a MID.
@@ -229,8 +230,8 @@ func (s *Server) GetWithProgress(req *membusspb.GetRequest, stream membusspb.Mem
 		return status.Error(codes.InvalidArgument, "get: mid required")
 	}
 	var lastTotal uint64
-	progressFn := func(blocksResolved, blocksTotal uint64) {
-		lastTotal = blocksTotal
+	progressFn := func(update memex.ProgressUpdate) {
+		lastTotal = update.BlocksTotal
 	}
 	rc, err := s.Backend.GetWithProgress(stream.Context(), req.GetMid(), req.GetOffset(), req.GetLimit(), progressFn)
 	if err != nil {

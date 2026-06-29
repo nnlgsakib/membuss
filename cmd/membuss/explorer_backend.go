@@ -199,11 +199,15 @@ func (a *explorerAdapter) ResolveWithProgress(ctx context.Context, m mid.MID, pr
 			return nil, explorer.ContentInfo{}, explorer.ErrNotFound
 		}
 		sess, serr := memex.NewSession(memex.SessionConfig{
-			Engine:     b.memex,
-			Root:       m,
-			Providers:  provs,
-			Timeout:    30 * time.Second,
-			ProgressFn: progressFn,
+			Engine:    b.memex,
+			Root:      m,
+			Providers: provs,
+			Timeout:   30 * time.Second,
+			ProgressFn: func(update memex.ProgressUpdate) {
+				if progressFn != nil {
+					progressFn(update.BlocksResolved, update.BlocksTotal)
+				}
+			},
 		})
 		if serr == nil {
 			if rc, ferr := sess.FetchWithBackoff(ctx, memex.DefaultRetryConfig()); ferr == nil && rc != nil {
