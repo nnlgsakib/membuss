@@ -9,6 +9,7 @@ import (
 
 	"github.com/nnlgsakib/membuss/core/keyring"
 	"github.com/nnlgsakib/membuss/core/mid"
+	"github.com/nnlgsakib/membuss/core/shard"
 	"github.com/nnlgsakib/membuss/net/dht"
 	"github.com/nnlgsakib/membuss/net/host"
 )
@@ -231,5 +232,123 @@ func TestHerald_RepublishMemNS_NoRecord(t *testing.T) {
 	n := h.RunOnce(ctx)
 	if n != 0 {
 		t.Fatalf("expected 0 MIDs announced, got %d", n)
+	}
+}
+
+func TestHerald_StrategyShardsUsesRing(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	store := &fakeStore{}
+	m1 := mid.FromBytes([]byte("shard-a"))
+	m2 := mid.FromBytes([]byte("shard-b"))
+	store.Seal(m1)
+	store.Seal(m2)
+
+	ring := shard.NewHashRing()
+	ring.AddPeer("peer-A")
+	ring.AddPeer("peer-B")
+
+	prov := &fakeProvider{}
+	h, err := New(Config{
+		Store:     store,
+		DHT:       prov,
+		Strategy:  StrategyShards,
+		Interval:  time.Hour,
+		Rate:      1000,
+		Burst:     32,
+		ShardRing: ring,
+		PeerID:    "peer-A",
+		Replicas:  1,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	n := h.RunOnce(ctx)
+	if n == 0 {
+		t.Fatal("StrategyShards: RunOnce provided 0 MIDs; expected at least 1")
+	}
+	if n > 2 {
+		t.Fatalf("StrategyShards: RunOnce provided %d MIDs; max is 2", n)
+	}
+
+	provided := prov.provided
+	for _, m := range provided {
+		peers, err := ring.Assign(m, 1)
+		if err != nil {
+			t.Fatalf("Assign: %v", err)
+		}
+		if peers[0] != "peer-A" {
+			t.Fatalf("StrategyShards provided %s which belongs to %s, not peer-A", m, peers[0])
+		}
+	}
+}
+
+func TestHerald_StrategyShardsFallsBackWithoutRing(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	store := &fakeStore{}
+	store.Seal(mid.FromBytes([]byte("root-1")))
+	store.Seal(mid.FromBytes([]byte("root-2")))
+
+	prov := &fakeProvider{}
+	h, err := New(Config{
+		Store:    store,
+		DHT:      prov,
+		Strategy: StrategyShards,
+		Interval: time.Hour,
+		Rate:     1000,
+		Burst:    32,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	n := h.RunOnce(ctx)
+	if n != 2 {
+		t.Fatalf("StrategyShards without ring: RunOnce got %d, want 2 (fallback to roots)", n)
+	}
+}
+
+func TestHerald_StrategyShardsOtherPeerNotProvided(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	store := &fakeStore{}
+	m1 := mid.FromBytes([]byte("belongs-to-B"))
+	store.Seal(m1)
+
+	ring := shard.NewHashRing()
+	ring.AddPeer("peer-A")
+	ring.AddPeer("peer-B")
+
+	prov := &fakeProvider{}
+	h, err := New(Config{
+		Store:     store,
+		DHT:       prov,
+		Strategy:  StrategyShards,
+		Interval:  time.Hour,
+		Rate:      1000,
+		Burst:     32,
+		ShardRing: ring,
+		PeerID:    "peer-A",
+		Replicas:  1,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	n := h.RunOnce(ctx)
+	peers, _ := ring.Assign(m1, 1)
+	if peers[0] == "peer-A" {
+		if n != 1 {
+			t.Fatalf("expected 1 provide (MID belongs to peer-A), got %d", n)
+		}
+	} else {
+		if n != 0 {
+			t.Fatalf("expected 0 provides (MID belongs to %s, not peer-A), got %d", peers[0], n)
+		}
 	}
 }
