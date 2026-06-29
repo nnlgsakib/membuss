@@ -334,3 +334,40 @@ message DeleteResponse {
   uint64 bytes_freed = 2;
 }
 
+// --- Phase 21: .mbuss descriptor file (BitTorrent-style) ---
+
+// DescriptorBlock is one leaf block entry in a descriptor.
+message DescriptorBlock {
+  string mid = 1;
+  uint64 size = 2;
+  uint32 index = 3;
+}
+
+// DescriptorErasure captures the erasure-coding parameters
+// applied to the content (if any).
+message DescriptorErasure {
+  uint32 data_shards = 1;
+  uint32 parity_shards = 2;
+  repeated string original_mids = 3;
+  repeated string shard_mids = 4;
+}
+
+// DescriptorPayload is the protobuf payload inside a .mbuss
+// descriptor file. The file format is:
+//   magic "MEMB" (4 bytes) | version (1 byte) | payload | SHA-256 (32 bytes)
+message DescriptorPayload {
+  string root_mid = 1;
+  uint64 total_size = 2;
+  uint32 block_count = 3;
+  string name = 4;
+  string mime_type = 5;
+  int64 created_at = 6;
+  string chunker = 7;
+  uint32 chunk_size = 8;
+  repeated DescriptorBlock blocks = 9;
+  DescriptorErasure erasure = 10;
+  repeated string bootstrap_peers = 11;
+  string memns_name = 12;
+  bytes signature = 13;
+}
+

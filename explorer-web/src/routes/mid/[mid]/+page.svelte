@@ -60,6 +60,7 @@
 	let renameValue = $state('');
 	let isRenaming = $state(false);
 	let activeTab = $state<'info' | 'dag'>('info');
+	let copiedDescriptor = $state(false);
 
 	let resolverActive = $state(false);
 	let statusBadgeText = $state('Connecting');
@@ -228,6 +229,17 @@
 		});
 	}
 
+	function downloadDescriptor() {
+		const a = document.createElement('a');
+		a.href = `${base}/descriptor/${midVal}`;
+		a.download = `${midVal}.mbuss`;
+		document.body.appendChild(a);
+		a.click();
+		document.body.removeChild(a);
+		copiedDescriptor = true;
+		setTimeout(() => copiedDescriptor = false, 2000);
+	}
+
 	async function runAction(action: 'seal' | 'unseal' | 'delete') {
 		try {
 			loading = true;
@@ -280,8 +292,8 @@
 	});
 </script>
 
-<div class="flex flex-col gap-6">
-	<div class="border-b border-slate-800 pb-4 flex flex-wrap items-center justify-between gap-4">
+<div class="flex flex-col gap-5">
+	<div class="border-b border-slate-800 pb-5 flex flex-wrap items-end justify-between gap-4">
 		<div>
 			<div class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-400 font-mono tracking-wider uppercase">
 				Content Address
@@ -326,6 +338,26 @@
 			{copiedMID ? 'Copied!' : 'Copy MID'}
 		</button>
 	</div>
+
+	{#if data && !data.NotFound && !resolverActive}
+		<div class="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+			<span class="px-2 py-1 rounded bg-slate-900 border border-slate-800 text-slate-400">
+				{formatBytes(data.Size)}
+			</span>
+			<span class="px-2 py-1 rounded bg-slate-900 border border-slate-800 text-slate-400">
+				{data.Blocks} blocks
+			</span>
+			<span class="px-2 py-1 rounded bg-slate-900 border border-slate-800 text-slate-400">
+				{data.DataShards}+{data.ParityShards} erasure
+			</span>
+			<span class={`px-2 py-1 rounded border font-bold uppercase ${data.Sealed ? 'bg-emerald-950/40 border-emerald-800/30 text-emerald-400' : 'bg-amber-950/40 border-amber-800/30 text-amber-400'}`}>
+				{data.Sealed ? 'Sealed' : 'Unsealed'}
+			</span>
+			<span class="px-2 py-1 rounded bg-slate-900 border border-slate-800 text-slate-400">
+				{data.ContentType || 'application/octet-stream'}
+			</span>
+		</div>
+	{/if}
 
 	{#if loading && !data && !resolverActive}
 		<div class="space-y-6 animate-pulse">
@@ -477,177 +509,196 @@
 				</button>
 			</div>
 
-			{#if activeTab === 'info'}
-				<div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-					<div class="bg-slate-900 border border-slate-800 rounded-xl p-6 md:col-span-2 flex flex-col gap-4">
-						<h3 class="font-bold text-sm text-slate-400 font-mono  border-b border-slate-800 pb-2">
-							Block Metadata
-						</h3>
+		{#if activeTab === 'info'}
+			<div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+				<div class="bg-slate-900 border border-slate-800 rounded-xl p-6 md:col-span-2 flex flex-col gap-4">
+					<h3 class="font-bold text-sm text-slate-400 font-mono border-b border-slate-800 pb-2">
+						Block Metadata
+					</h3>
 
-						<dl class="grid grid-cols-3 gap-y-3.5 text-xs">
-							<dt class="text-slate-500 font-mono">Payload Size</dt>
-							<dd class="col-span-2 text-slate-200 font-bold font-mono">
-								{formatBytes(data.Size)} <span class="text-slate-500 font-normal font-sans">({data.Size} bytes)</span>
-							</dd>
+					<dl class="grid grid-cols-3 gap-y-3.5 text-xs">
+						<dt class="text-slate-500 font-mono">Payload Size</dt>
+						<dd class="col-span-2 text-slate-200 font-bold font-mono">
+							{formatBytes(data.Size)} <span class="text-slate-500 font-normal font-sans">({data.Size} bytes)</span>
+						</dd>
 
-							<dt class="text-slate-500 font-mono">DAG Blocks</dt>
-							<dd class="col-span-2 text-slate-200 font-bold font-mono">{data.Blocks}</dd>
+						<dt class="text-slate-500 font-mono">DAG Blocks</dt>
+						<dd class="col-span-2 text-slate-200 font-bold font-mono">{data.Blocks}</dd>
 
-							<dt class="text-slate-500 font-mono">Content Type</dt>
-							<dd class="col-span-2 text-slate-300 font-mono">{data.ContentType || 'application/octet-stream'}</dd>
+						<dt class="text-slate-500 font-mono">Content Type</dt>
+						<dd class="col-span-2 text-slate-300 font-mono">{data.ContentType || 'application/octet-stream'}</dd>
 
-							<dt class="text-slate-500 font-mono">Pin Sealer Status</dt>
-							<dd class="col-span-2 flex items-center gap-2">
-								<span class={`font-bold font-mono uppercase ${data.Sealed ? 'text-emerald-400' : 'text-amber-500'}`}>
-									{data.Sealed ? 'SEALED' : 'UNSEALED'}
-								</span>
-								<span class="text-[10px] text-slate-500 font-sans">({data.Sealers} hosts holding, {data.AnchorSealers} anchors)</span>
-							</dd>
-
-							<dt class="text-slate-500 font-mono">Merkle Codec</dt>
-							<dd class="col-span-2 text-slate-400 font-mono">0x{data.Codec.toString(16)}</dd>
-						</dl>
-
-						<div class="flex items-center gap-2 mt-4 pt-4 border-t border-slate-800/80">
-							{#if data.MemFSType === 'dir'}
-								<a href={getGatewayURL(midVal, true)} target="_blank" class="px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold text-xs transition-colors">
-									Open Gateway Directory
-								</a>
-							{:else}
-								<a href={getGatewayURL(midVal, false)} target="_blank" class="px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold text-xs transition-colors">
-									View Payload File
-								</a>
-								<a
-									href={getGatewayURL(midVal, false) + `?download=1&filename=${encodeURIComponent(data.Name || (midVal + '.bin'))}`}
-									class="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-750 font-bold text-xs transition-colors"
-								>
-									Download
-								</a>
-							{/if}
-
-							{#if data.Sealed}
-								<button onclick={() => runAction('unseal')} class="px-4 py-2 rounded-lg bg-red-950/40 hover:bg-red-950/60 text-red-400 border border-red-900/40 text-xs font-bold transition-colors ml-auto active:scale-[0.98]">
-									Unseal (Unpin)
-								</button>
-							{:else}
-								<button onclick={() => runAction('seal')} class="px-4 py-2 rounded-lg bg-emerald-950/60 hover:bg-emerald-950/80 text-emerald-400 border border-emerald-800/30 text-xs font-bold transition-colors ml-auto active:scale-[0.98]">
-									Seal (Pin)
-								</button>
-							{/if}
-							<button onclick={() => { if (confirm('Are you sure you want to delete this Content ID and all its blocks recursively from this node? This cannot be undone.')) runAction('delete'); }} class="px-4 py-2 rounded-lg bg-red-650 hover:bg-red-700 text-slate-50 border border-red-900/40 text-xs font-bold transition-colors active:scale-[0.98]">
-								Delete
-							</button>
-						</div>
-					</div>
-
-					<div class="bg-slate-900 border border-slate-800 rounded-xl p-6 flex flex-col justify-between">
-						<div>
-							<h3 class="font-bold text-sm text-slate-400 font-mono  border-b border-slate-800 pb-2">
-								Erasure Coding
-							</h3>
-
-							<dl class="grid grid-cols-2 gap-y-3.5 text-xs font-mono mt-4">
-								<dt class="text-slate-500">Shard Layout</dt>
-								<dd class="text-slate-200 font-bold text-right">{data.DataShards} data + {data.ParityShards} parity</dd>
-
-								<dt class="text-slate-500">Total Shards</dt>
-								<dd class="text-slate-200 font-bold text-right">{data.TotalShards} blocks</dd>
-
-								<dt class="text-slate-500">Node Failure Max</dt>
-								<dd class="text-slate-200 font-bold text-right">{data.ParityShards} hosts offline</dd>
-							</dl>
-						</div>
-
-						<div class="mt-6 border-t border-slate-800/80 pt-4 flex items-center justify-between text-xs">
-							<span class="text-slate-500 font-mono">Redundancy Status</span>
-							<span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-bold bg-emerald-950/40 text-emerald-400 border border-emerald-800/30">
-								{data.HealthLabel} ({data.Health})
+						<dt class="text-slate-500 font-mono">Pin Sealer Status</dt>
+						<dd class="col-span-2 flex items-center gap-2">
+							<span class={`font-bold font-mono uppercase ${data.Sealed ? 'text-emerald-400' : 'text-amber-500'}`}>
+								{data.Sealed ? 'SEALED' : 'UNSEALED'}
 							</span>
-						</div>
-					</div>
+							<span class="text-[10px] text-slate-500 font-sans">({data.Sealers} hosts holding, {data.AnchorSealers} anchors)</span>
+						</dd>
 
-					{#if data.MemFSType === 'dir'}
-						<div class="bg-slate-900 border border-slate-800 rounded-xl p-6 md:col-span-3 flex flex-col gap-4">
-							<h3 class="font-bold text-sm text-slate-300 tracking-tight">
-								Directory Contents ({data.MemFSEntries ? data.MemFSEntries.length : 0} entries)
-							</h3>
+						<dt class="text-slate-500 font-mono">Merkle Codec</dt>
+						<dd class="col-span-2 text-slate-400 font-mono">0x{data.Codec.toString(16)}</dd>
+					</dl>
 
-							{#if data.MemFSEntries && data.MemFSEntries.length > 0}
-								<div class="overflow-x-auto">
-									<table class="w-full text-left border-collapse text-sm">
-										<thead>
-											<tr class="border-b border-slate-800/60 text-slate-500 font-mono text-xs uppercase bg-slate-950/20">
-												<th class="py-2.5 px-4 font-semibold">Name</th>
-												<th class="py-2.5 px-4 font-semibold">Type</th>
-												<th class="py-2.5 px-4 font-semibold">Size</th>
-												<th class="py-2.5 px-4 font-semibold text-right">Content Address</th>
-											</tr>
-										</thead>
-										<tbody class="divide-y divide-slate-850/30">
-											{#each data.MemFSEntries as file}
-												<tr class="hover:bg-slate-850/20 transition-colors">
-													<td class="py-3 px-4">
-														<a
-															href={`${base}/mid/${file.mid}`}
-															class="font-bold text-slate-200 hover:text-cyan-400 hover:underline flex items-center gap-2"
-														>
-															{#if file.type === 'dir'}
-															<Icon icon="ph:folder" class="text-cyan-400" />
-														{:else}
-															<Icon icon="ph:file" class="text-slate-400" />
-														{/if}
-															<span>{file.name}</span>
-														</a>
-													</td>
-													<td class="py-3 px-4 font-mono text-xs text-slate-500 uppercase">{file.type}</td>
-													<td class="py-3 px-4 font-mono text-xs text-slate-400">
-														{file.type === 'dir' ? '—' : formatBytes(file.size)}
-													</td>
-													<td class="py-3 px-4 font-mono text-xs text-slate-500 text-right">
-														<a href={`${base}/mid/${file.mid}`} class="hover:text-cyan-400 hover:underline">
-															{file.mid.slice(0, 16)}...
-														</a>
-													</td>
-												</tr>
-											{/each}
-										</tbody>
-									</table>
-								</div>
-							{:else}
-								<div class="py-8 text-center text-slate-600 italic">Empty directory tree</div>
-							{/if}
-						</div>
-					{/if}
-
-					{#if data.MemFSType === 'symlink'}
-						<div class="bg-slate-900 border border-slate-800 rounded-xl p-6 md:col-span-3 flex flex-col gap-2">
-							<h3 class="font-bold text-sm text-slate-400 font-mono ">Symlink Redirect Target</h3>
-							<code class="bg-slate-950 border border-slate-850 p-3 rounded-lg font-mono text-xs text-cyan-400 select-all break-all block mt-1">
-								{data.SymlinkTarget}
-							</code>
-						</div>
-					{/if}
-
-					<div class="bg-slate-900 border border-slate-800 rounded-xl p-6 md:col-span-3 flex flex-col gap-4">
-						<h3 class="font-bold text-sm text-slate-400 font-mono  border-b border-slate-800 pb-2">
-							DHT Content Providers ({data.Providers ? data.Providers.length : 0} nodes reporting)
-						</h3>
-						{#if data.Providers && data.Providers.length > 0}
-							<ul class="flex flex-col gap-2">
-								{#each data.Providers as prov}
-									<li class="bg-slate-950/60 border border-slate-850 px-4 py-2.5 rounded-lg font-mono text-xs text-slate-350 break-all select-all flex items-center justify-between group hover:border-slate-800 transition-colors">
-										<span>{prov}</span>
-									</li>
-								{/each}
-							</ul>
+					<div class="flex items-center gap-2 mt-4 pt-4 border-t border-slate-800/80">
+						{#if data.MemFSType === 'dir'}
+							<a href={getGatewayURL(midVal, true)} target="_blank" class="px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold text-xs transition-colors">
+								Open Gateway Directory
+							</a>
 						{:else}
-							<div class="py-4 text-center text-slate-550 italic text-xs leading-none">
-								No external peer providers registered in Kademlia for this Content ID.
-							</div>
+							<a href={getGatewayURL(midVal, false)} target="_blank" class="px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold text-xs transition-colors">
+								View Payload File
+							</a>
+							<a
+								href={getGatewayURL(midVal, false) + `?download=1&filename=${encodeURIComponent(data.Name || (midVal + '.bin'))}`}
+								class="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-750 font-bold text-xs transition-colors"
+							>
+								Download
+							</a>
 						{/if}
+
+						{#if data.Sealed}
+							<button onclick={() => runAction('unseal')} class="px-4 py-2 rounded-lg bg-red-950/40 hover:bg-red-950/60 text-red-400 border border-red-900/40 text-xs font-bold transition-colors ml-auto active:scale-[0.98]">
+								Unseal (Unpin)
+							</button>
+						{:else}
+							<button onclick={() => runAction('seal')} class="px-4 py-2 rounded-lg bg-emerald-950/60 hover:bg-emerald-950/80 text-emerald-400 border border-emerald-800/30 text-xs font-bold transition-colors ml-auto active:scale-[0.98]">
+								Seal (Pin)
+							</button>
+						{/if}
+						<button onclick={() => { if (confirm('Are you sure you want to delete this Content ID and all its blocks recursively from this node? This cannot be undone.')) runAction('delete'); }} class="px-4 py-2 rounded-lg bg-red-650 hover:bg-red-700 text-slate-50 border border-red-900/40 text-xs font-bold transition-colors active:scale-[0.98]">
+							Delete
+						</button>
 					</div>
 				</div>
-			{/if}
+
+				<div class="bg-slate-900 border border-slate-800 rounded-xl p-6 flex flex-col justify-between">
+					<div>
+						<h3 class="font-bold text-sm text-slate-400 font-mono border-b border-slate-800 pb-2">
+							Erasure Coding
+						</h3>
+
+						<dl class="grid grid-cols-2 gap-y-3.5 text-xs font-mono mt-4">
+							<dt class="text-slate-500">Shard Layout</dt>
+							<dd class="text-slate-200 font-bold text-right">{data.DataShards} data + {data.ParityShards} parity</dd>
+
+							<dt class="text-slate-500">Total Shards</dt>
+							<dd class="text-slate-200 font-bold text-right">{data.TotalShards} blocks</dd>
+
+							<dt class="text-slate-500">Node Failure Max</dt>
+							<dd class="text-slate-200 font-bold text-right">{data.ParityShards} hosts offline</dd>
+						</dl>
+					</div>
+
+					<div class="mt-6 border-t border-slate-800/80 pt-4 flex items-center justify-between text-xs">
+						<span class="text-slate-500 font-mono">Redundancy Status</span>
+						<span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-bold bg-emerald-950/40 text-emerald-400 border border-emerald-800/30">
+							{data.HealthLabel} ({data.Health})
+						</span>
+					</div>
+				</div>
+
+				<div class="bg-slate-900 border border-slate-800 rounded-xl p-6 md:col-span-3 flex items-center justify-between gap-4">
+					<div class="flex items-center gap-4">
+						<div class="shrink-0 w-10 h-10 rounded-lg bg-slate-800 border border-slate-750 flex items-center justify-center">
+							<Icon icon="ph:file-arrow-down" class="text-lg text-cyan-400" />
+						</div>
+						<div>
+							<h3 class="font-bold text-sm text-slate-200">Descriptor File</h3>
+							<p class="text-[11px] text-slate-500 mt-0.5">.mbuss v1 &middot; Protobuf &middot; SHA-256 checksum</p>
+						</div>
+					</div>
+					<button
+						onclick={downloadDescriptor}
+						class="shrink-0 px-4 py-2.5 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold text-xs transition-colors active:scale-[0.98] flex items-center gap-2"
+					>
+						<Icon icon="ph:download-simple" class="text-sm" />
+						{copiedDescriptor ? 'Downloaded!' : 'Export .mbuss'}
+					</button>
+				</div>
+
+				{#if data.MemFSType === 'dir'}
+					<div class="bg-slate-900 border border-slate-800 rounded-xl p-6 md:col-span-3 flex flex-col gap-4">
+						<h3 class="font-bold text-sm text-slate-300 tracking-tight">
+							Directory Contents ({data.MemFSEntries ? data.MemFSEntries.length : 0} entries)
+						</h3>
+
+						{#if data.MemFSEntries && data.MemFSEntries.length > 0}
+							<div class="overflow-x-auto">
+								<table class="w-full text-left border-collapse text-sm">
+									<thead>
+										<tr class="border-b border-slate-800/60 text-slate-500 font-mono text-xs uppercase bg-slate-950/20">
+											<th class="py-2.5 px-4 font-semibold">Name</th>
+											<th class="py-2.5 px-4 font-semibold">Type</th>
+											<th class="py-2.5 px-4 font-semibold">Size</th>
+											<th class="py-2.5 px-4 font-semibold text-right">Content Address</th>
+										</tr>
+									</thead>
+									<tbody class="divide-y divide-slate-850/30">
+										{#each data.MemFSEntries as file}
+											<tr class="hover:bg-slate-850/20 transition-colors">
+												<td class="py-3 px-4">
+													<a
+														href={`${base}/mid/${file.mid}`}
+														class="font-bold text-slate-200 hover:text-cyan-400 hover:underline flex items-center gap-2"
+													>
+														{#if file.type === 'dir'}
+														<Icon icon="ph:folder" class="text-cyan-400" />
+													{:else}
+														<Icon icon="ph:file" class="text-slate-400" />
+													{/if}
+														<span>{file.name}</span>
+													</a>
+												</td>
+												<td class="py-3 px-4 font-mono text-xs text-slate-500 uppercase">{file.type}</td>
+												<td class="py-3 px-4 font-mono text-xs text-slate-400">
+													{file.type === 'dir' ? '—' : formatBytes(file.size)}
+												</td>
+												<td class="py-3 px-4 font-mono text-xs text-slate-500 text-right">
+													<a href={`${base}/mid/${file.mid}`} class="hover:text-cyan-400 hover:underline">
+														{file.mid.slice(0, 16)}...
+													</a>
+												</td>
+											</tr>
+										{/each}
+									</tbody>
+								</table>
+							</div>
+						{:else}
+							<div class="py-8 text-center text-slate-600 italic">Empty directory tree</div>
+						{/if}
+					</div>
+				{/if}
+
+				{#if data.MemFSType === 'symlink'}
+					<div class="bg-slate-900 border border-slate-800 rounded-xl p-6 md:col-span-3 flex flex-col gap-2">
+						<h3 class="font-bold text-sm text-slate-400 font-mono">Symlink Redirect Target</h3>
+						<code class="bg-slate-950 border border-slate-850 p-3 rounded-lg font-mono text-xs text-cyan-400 select-all break-all block mt-1">
+							{data.SymlinkTarget}
+						</code>
+					</div>
+				{/if}
+
+				<div class="bg-slate-900 border border-slate-800 rounded-xl p-6 md:col-span-3 flex flex-col gap-4">
+					<h3 class="font-bold text-sm text-slate-400 font-mono border-b border-slate-800 pb-2">
+						DHT Content Providers ({data.Providers ? data.Providers.length : 0} nodes reporting)
+					</h3>
+					{#if data.Providers && data.Providers.length > 0}
+						<ul class="flex flex-col gap-2">
+							{#each data.Providers as prov}
+								<li class="bg-slate-950/60 border border-slate-850 px-4 py-2.5 rounded-lg font-mono text-xs text-slate-350 break-all select-all flex items-center justify-between group hover:border-slate-800 transition-colors">
+									<span>{prov}</span>
+								</li>
+							{/each}
+						</ul>
+					{:else}
+						<div class="py-4 text-center text-slate-550 italic text-xs leading-none">
+							No external peer providers registered in Kademlia for this Content ID.
+						</div>
+					{/if}
+				</div>
+			</div>
+		{/if}
 
 			{#if activeTab === 'dag'}
 				<div class="bg-slate-900 border border-slate-800 rounded-xl p-6 flex flex-col gap-4 shadow-lg">

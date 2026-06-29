@@ -33,6 +33,7 @@ import (
 	"github.com/nnlgsakib/membuss/core/keyring"
 	"github.com/nnlgsakib/membuss/core/memns"
 	"github.com/nnlgsakib/membuss/core/mid"
+	"github.com/nnlgsakib/membuss/core/shard"
 	"github.com/nnlgsakib/membuss/core/store"
 	"github.com/nnlgsakib/membuss/net/dht"
 )
@@ -109,6 +110,17 @@ type Config struct {
 	// Phase 18: MemNS record re-publishing fields
 	KeyRing *keyring.KeyRing
 	MemDHT  *dht.MemDHT
+
+	// ShardRing is the rendezvous hash ring used by the
+	// shards strategy. When nil, StrategyShards falls back
+	// to StrategyRoots (all sealed MIDs).
+	ShardRing *shard.HashRing
+	// PeerID is this node's peer ID, used to check shard
+	// ownership. Required when Strategy is StrategyShards.
+	PeerID string
+	// Replicas is the number of replicas per MID for shard
+	// assignment. Default is 3.
+	Replicas int
 }
 
 // MemHerald is the long-lived reprovisioner.
@@ -147,6 +159,9 @@ func New(cfg Config) (*MemHerald, error) {
 	}
 	if cfg.Burst <= 0 {
 		cfg.Burst = DefaultBurst
+	}
+	if cfg.Replicas <= 0 {
+		cfg.Replicas = 3
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -330,12 +345,32 @@ func (h *MemHerald) collect(ctx context.Context) []mid.MID {
 		}
 		return mids
 	case StrategyShards:
-		// Shard enumeration requires a configured shard
-		// ring. Until that is wired in, fall back to
-		// roots so the herald still does useful work.
-		mids, err := h.cfg.Store.AllSealed()
+		if h.cfg.ShardRing == nil || h.cfg.PeerID == "" {
+			mids, err := h.cfg.Store.AllSealed()
+			if err != nil {
+				return nil
+			}
+			return mids
+		}
+		sealed, err := h.cfg.Store.AllSealed()
 		if err != nil {
 			return nil
+		}
+		var mids []mid.MID
+		for _, m := range sealed {
+			if m.IsZero() {
+				continue
+			}
+			peers, err := h.cfg.ShardRing.Assign(m, h.cfg.Replicas)
+			if err != nil {
+				continue
+			}
+			for _, p := range peers {
+				if p == h.cfg.PeerID {
+					mids = append(mids, m)
+					break
+				}
+			}
 		}
 		return mids
 	case StrategyRoots, "":

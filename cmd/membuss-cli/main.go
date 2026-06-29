@@ -90,6 +90,7 @@ Run "membuss-cli init" first to set up the data directory.`,
 		newInitCmd(),
 		newMemNSCmd(),
 		newKeyRingCmd(),
+		newDescriptorCmd(),
 		newVersionCmd(),
 	)
 	return root
@@ -1665,3 +1666,126 @@ func newMemNSCmd() *cobra.Command {
 	return cmd
 }
 
+// --- descriptor ---
+
+func newDescriptorCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "descriptor",
+		Short: "BitTorrent-style .mbuss descriptor file management",
+	}
+	cmd.AddCommand(newDescriptorExportCmd())
+	cmd.AddCommand(newDescriptorImportCmd())
+	cmd.AddCommand(newDescriptorMetaCmd())
+	return cmd
+}
+
+func newDescriptorExportCmd() *cobra.Command {
+	var outPath string
+	c := &cobra.Command{
+		Use:   "export <MID> [-o file.mbuss]",
+		Short: "Export a .mbuss descriptor file for a MID",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			midStr := args[0]
+			url := httpBase() + "/api/v1/descriptor/" + midStr
+			resp, err := http.Get(url)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				body, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("export: %s: %s", resp.Status, string(body))
+			}
+			data, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return err
+			}
+			if outPath == "" {
+				outPath = midStr + ".mbuss"
+			}
+			if err := os.WriteFile(outPath, data, 0644); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Exported descriptor to %s (%d bytes)\n", outPath, len(data))
+			return nil
+		},
+	}
+	c.Flags().StringVarP(&outPath, "output", "o", "", "output file path (default: <mid>.mbuss)")
+	return c
+}
+
+func newDescriptorImportCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "import <file.mbuss>",
+		Short: "Import a .mbuss descriptor file and verify all blocks are present",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := args[0]
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			url := httpBase() + "/api/v1/descriptor/import"
+			resp, err := http.Post(url, "application/octet-stream", bytes.NewReader(data))
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				body, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("import: %s: %s", resp.Status, string(body))
+			}
+			var env struct {
+				OK   bool `json:"ok"`
+				Data struct {
+					MID string `json:"mid"`
+				} `json:"data"`
+				Error string `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+				return err
+			}
+			if !env.OK {
+				return fmt.Errorf("import: %s", env.Error)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Imported descriptor: MID %s\n", env.Data.MID)
+			return nil
+		},
+	}
+}
+
+func newDescriptorMetaCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "meta <MID>",
+		Short: "Show descriptor metadata for a MID (without block list)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			midStr := args[0]
+			url := httpBase() + "/api/v1/descriptor/" + midStr + "/meta"
+			resp, err := http.Get(url)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				body, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("meta: %s: %s", resp.Status, string(body))
+			}
+			var env struct {
+				OK   bool                   `json:"ok"`
+				Data map[string]interface{} `json:"data"`
+				Error string                 `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+				return err
+			}
+			if !env.OK {
+				return fmt.Errorf("meta: %s", env.Error)
+			}
+			enc := json.NewEncoder(cmd.OutOrStdout())
+			enc.SetIndent("", "  ")
+			return enc.Encode(env.Data)
+		},
+	}
+}

@@ -78,7 +78,9 @@ func (s *MemStore) Seal(root mid.MID, recursive bool) error {
 var ErrSealWalkIncomplete = errors.New("store: seal walk incomplete")
 
 // Unseal removes the seal record for the given MID and recursively
-// unseals any child MemFS nodes.
+// unseals any child MemFS nodes. Missing blocks (e.g. forward-looking
+// seals for content not yet fetched) are silently skipped. Returns
+// the first error encountered during child seal deletion.
 func (s *MemStore) Unseal(root mid.MID) error {
 	if s.db == nil {
 		return errors.New("store: closed")
@@ -97,15 +99,22 @@ func (s *MemStore) Unseal(root mid.MID) error {
 		return err
 	}
 
-	_ = Walk(s, root, func(m mid.MID, _ bool) error {
+	walkErr := Walk(s, root, func(m mid.MID, _ bool) error {
 		if m.Codec() == mid.CodecMemFS {
-			_ = s.db.Update(func(txn *badger.Txn) error {
-				_ = txn.Delete(sealKey(m))
-				return nil
-			})
+			if err := s.db.Update(func(txn *badger.Txn) error {
+				return txn.Delete(sealKey(m))
+			}); err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
+				return fmt.Errorf("store: unseal child %s: %w", m.String(), err)
+			}
 		}
 		return nil
 	})
+	// Tolerate missing blocks (forward-looking seal pattern):
+	// the Walk fails with "block not found" but the root seal
+	// is already deleted above, which is the important part.
+	if walkErr != nil && !errors.Is(walkErr, ErrNotFound) {
+		return walkErr
+	}
 	return nil
 }
 
@@ -293,8 +302,11 @@ func (s *MemStore) GCWithMinAge(ctx context.Context, minAge time.Duration) (uint
 				continue
 			}
 			if minAgeTs > 0 {
-				if uint64(item.Version()) >= minAgeTs {
-					continue
+				m, merr := mid.FromMultihash(mid.CodecRaw, raw)
+				if merr == nil {
+					if ts, terr := readTimestamp(txn, m); terr == nil && ts >= minAgeTs {
+						continue
+					}
 				}
 			}
 			toDelete = append(toDelete, pendingDelete{

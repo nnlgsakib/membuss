@@ -236,7 +236,7 @@ func (b *daemonBackend) Get(ctx context.Context, midStr string, offset, limit ui
 // is called as blocks arrive with the running total of bytes
 // received and total bytes (total may be 0 until all blocks
 // are known).
-func (b *daemonBackend) GetWithProgress(ctx context.Context, midStr string, offset, limit uint64, progressFn func(blocksResolved, blocksTotal uint64)) (io.ReadCloser, error) {
+func (b *daemonBackend) GetWithProgress(ctx context.Context, midStr string, offset, limit uint64, progressFn func(update memex.ProgressUpdate)) (io.ReadCloser, error) {
 	root, err := mid.Parse(midStr)
 	if err != nil {
 		return nil, fmt.Errorf("get: parse mid: %w", err)

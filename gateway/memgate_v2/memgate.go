@@ -62,6 +62,12 @@ type Backend interface {
 	MemFSPathInfo(ctx context.Context, m mid.MID, path string) (MemFSInfo, error)
 	// MemFSPathList returns entries of a directory under root at path.
 	MemFSPathList(ctx context.Context, m mid.MID, path string) ([]MemFSEntry, error)
+
+	// --- Phase 21: Descriptor support ---
+
+	// Descriptor returns the .mbuss descriptor bytes for the
+	// given MID.
+	Descriptor(ctx context.Context, m mid.MID) ([]byte, error)
 }
 
 // MemFSInfo is the metadata returned by Backend.MemFSInfo.
@@ -473,6 +479,8 @@ func (m *MemGate) handleGet(w http.ResponseWriter, r *http.Request) {
 		m.handleDAGJSON(w, r, root)
 	case "raw":
 		m.handleRawBlock(w, r, root)
+	case "descriptor":
+		m.handleDescriptor(w, r, root)
 	default:
 		m.handleResolved(w, r, root, midStr)
 	}
@@ -633,6 +641,21 @@ func (m *MemGate) handleRawBlock(w http.ResponseWriter, r *http.Request, root mi
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.Header().Set("X-Membuss-MID", root.String())
 	w.Header().Set("ETag", `"`+etagVal+`"`)
+	w.Header().Set("Cache-Control", "public, immutable, max-age=31536000")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+// handleDescriptor serves the .mbuss descriptor file for a MID.
+func (m *MemGate) handleDescriptor(w http.ResponseWriter, r *http.Request, root mid.MID) {
+	data, err := m.cfg.Backend.Descriptor(r.Context(), root)
+	if err != nil {
+		http.Error(w, "descriptor: "+err.Error(), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.mbuss", root.String()))
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.Header().Set("Cache-Control", "public, immutable, max-age=31536000")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)

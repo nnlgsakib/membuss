@@ -125,6 +125,10 @@ func (b *memBackend) MemFSPathList(ctx context.Context, m mid.MID, path string) 
 	return nil, errNotFound
 }
 
+func (b *memBackend) Descriptor(ctx context.Context, m mid.MID) ([]byte, error) {
+	return nil, errNotFound
+}
+
 var errNotFound = &notFoundError{}
 
 type notFoundError struct{}

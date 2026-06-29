@@ -21,6 +21,20 @@ import (
 	membusspb "github.com/nnlgsakib/membuss/proto"
 )
 
+// ProgressUpdate reports both block-level and byte-level progress
+// during a Fetch call. BlocksResolved/BlocksTotal track DAG
+// resolution. BytesDelivered/BytesTotal track content bytes
+// written to the reader. Throughput is bytes/sec. ETA is
+// estimated seconds remaining (0 if unknown).
+type ProgressUpdate struct {
+	BlocksResolved uint64
+	BlocksTotal    uint64
+	BytesDelivered uint64
+	BytesTotal     uint64
+	Throughput     float64
+	ETA            float64
+}
+
 // SessionConfig configures a MemexSession.
 type SessionConfig struct {
 	Engine        *Engine
@@ -28,7 +42,34 @@ type SessionConfig struct {
 	Providers     []peer.AddrInfo
 	ParallelPeers int
 	Timeout       time.Duration
-	ProgressFn    func(blocksResolved, blocksTotal uint64)
+	ProgressFn    func(update ProgressUpdate)
+
+	// PipelineDepth controls the maximum number of in-flight
+	// want requests per provider stream. When the pipeline is
+	// full, writeLoop waits for readLoop to resolve or cancel
+	// requests before sending more. Zero uses DefaultPipelineDepth.
+	PipelineDepth int
+
+	// StreamsPerProvider controls how many concurrent libp2p
+	// streams are opened to each provider peer. Multiple
+	// streams allow true parallel block transfers — while one
+	// stream is receiving a large block, other streams can
+	// transfer different blocks concurrently. Higher values
+	// increase throughput at the cost of more open streams.
+	// Zero uses DefaultStreamsPerProvider.
+	StreamsPerProvider int
+}
+
+// pipelineState tracks in-flight request count for one provider
+// stream and provides a channel for writeLoop to wait when the
+// pipeline is full.
+type pipelineState struct {
+	inFlight int
+	maxDepth int
+	// capCh is a buffered channel used as a semaphore. readLoop
+	// sends on it when blocks are resolved (freeing capacity).
+	// writeLoop receives from it to know when to send more.
+	capCh chan struct{}
 }
 
 type sessionEvent struct {
@@ -46,6 +87,18 @@ type Session struct {
 	resolved    map[string]struct{}
 	wantlist    map[string]mid.MID
 	streamChans []chan sessionEvent
+
+	// resolvedCh is a buffered channel used to wake the closer
+	// goroutine immediately when a block is resolved, instead
+	// of polling on a 5ms ticker.
+	resolvedCh chan struct{}
+
+	// walkerDone signals that the DAG walker goroutine has
+	// finished writing content to the pipe. The closer
+	// goroutine waits on this before exiting to ensure all
+	// descendant blocks are enqueued while the walker is
+	// still traversing the DAG.
+	walkerDone chan struct{}
 }
 
 // NewSession returns a Session ready to fetch cfg.Root.
@@ -60,11 +113,33 @@ func NewSession(cfg SessionConfig) (*Session, error) {
 		return nil, errors.New("memex session: no providers")
 	}
 	return &Session{
-		cfg:      cfg,
-		enqueued: make(map[string]struct{}),
-		resolved: make(map[string]struct{}),
-		wantlist: make(map[string]mid.MID),
+		cfg:        cfg,
+		enqueued:   make(map[string]struct{}),
+		resolved:   make(map[string]struct{}),
+		wantlist:   make(map[string]mid.MID),
+		resolvedCh: make(chan struct{}, 1),
+		walkerDone: make(chan struct{}),
 	}, nil
+}
+
+// countingWriter wraps an io.Writer and tracks total bytes
+// written. Used to measure byte-level progress during streaming
+// assembly.
+type countingWriter struct {
+	w     io.Writer
+	n     uint64
+	start time.Time
+}
+
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	cw.n += uint64(n)
+	return n, err
+}
+
+// Progress returns bytes written and elapsed time.
+func (cw *countingWriter) Progress() (bytes uint64, elapsed time.Duration) {
+	return cw.n, time.Since(cw.start)
 }
 
 // Fetch drives the session to completion. It returns an
@@ -90,26 +165,22 @@ func (s *Session) Fetch(ctx context.Context) (io.Reader, error) {
 		fanout = len(s.cfg.Providers)
 	}
 
-	// Re-initialize state for this Fetch attempt
 	s.mu.Lock()
 	s.enqueued = make(map[string]struct{})
 	s.resolved = make(map[string]struct{})
 	s.wantlist = make(map[string]mid.MID)
 	s.streamChans = nil
+	select {
+	case <-s.resolvedCh:
+	default:
+	}
 	s.mu.Unlock()
 
-	// Phase 13: filter the provider list through the
-	// bloom manager. A provider whose stored filter
-	// reports "definitely absent" for the root is
-	// excluded; unknown peers are kept.
 	filtered := s.selectPeersForMID(s.cfg.Root)
 	if len(filtered) == 0 {
 		return nil, errors.New("memex session: no provider after bloom filter")
 	}
-	// Replace the fan-out's provider list for the rest
-	// of this session.
 	liveProviders := filtered
-	// Honor the user-requested fanout bound.
 	if fanout > len(liveProviders) {
 		fanout = len(liveProviders)
 	}
@@ -117,37 +188,23 @@ func (s *Session) Fetch(ctx context.Context) (io.Reader, error) {
 	fctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Seed with the root.
 	s.checkAndEnqueue(fctx, s.cfg.Root)
 
-	// runProvider opens one stream per peer slot. Each
-	// stream runs a reader and a writer until the session
-	// ends.
-	var wg sync.WaitGroup
-	wg.Add(fanout)
+	var pwg sync.WaitGroup
+	pwg.Add(fanout)
 	for i := 0; i < fanout; i++ {
 		provider := liveProviders[i]
 		go func() {
-			defer wg.Done()
+			defer pwg.Done()
 			_ = s.runProvider(fctx, provider)
 		}()
 	}
 
-	// Closer: walks the DAG, enqueueing children as parents
-	// become resolved.
 	seenWalked := make(map[string]struct{})
-
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		t := time.NewTicker(5 * time.Millisecond)
-		defer t.Stop()
 		for {
-			if ctx.Err() != nil {
-				return
-			}
-			// Drain any newly-resolved MIDs and enqueue
-			// their children.
 			var toWalk []string
 			s.mu.Lock()
 			for k := range s.resolved {
@@ -182,16 +239,15 @@ func (s *Session) Fetch(ctx context.Context) (io.Reader, error) {
 			select {
 			case <-fctx.Done():
 				return
-			case <-t.C:
+			case <-s.resolvedCh:
 			}
 		}
 	}()
 
 	<-done
 	cancel()
-	wg.Wait()
+	pwg.Wait()
 
-	// Final assembly.
 	if !s.allResolved() {
 		return nil, errors.New("memex session: not all blocks resolved")
 	}
@@ -201,6 +257,197 @@ func (s *Session) Fetch(ctx context.Context) (io.Reader, error) {
 		return nil, fmt.Errorf("memex session: resolve: %w", err)
 	}
 	return rc, nil
+}
+
+// FetchStream is like Fetch but streams content as blocks
+// arrive. The caller can start reading before all blocks are
+// fetched. Blocks that haven't arrived yet cause the walker
+// to block until they do — providers fetch them concurrently.
+// Progress is reported via ProgressFn with byte-level metrics.
+func (s *Session) FetchStream(ctx context.Context) (io.Reader, error) {
+	timeout := s.cfg.Timeout
+	if timeout <= 0 {
+		timeout = DefaultSessionTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	fanout := s.cfg.ParallelPeers
+	if fanout <= 0 {
+		fanout = MaxParallelPeers
+	}
+	if fanout > MaxParallelPeers {
+		fanout = MaxParallelPeers
+	}
+	if fanout > len(s.cfg.Providers) {
+		fanout = len(s.cfg.Providers)
+	}
+
+	s.mu.Lock()
+	s.enqueued = make(map[string]struct{})
+	s.resolved = make(map[string]struct{})
+	s.wantlist = make(map[string]mid.MID)
+	s.streamChans = nil
+	select {
+	case <-s.resolvedCh:
+	default:
+	}
+	select {
+	case <-s.walkerDone:
+	default:
+	}
+	s.mu.Unlock()
+
+	filtered := s.selectPeersForMID(s.cfg.Root)
+	if len(filtered) == 0 {
+		return nil, errors.New("memex session: no provider after bloom filter")
+	}
+	liveProviders := filtered
+	if fanout > len(liveProviders) {
+		fanout = len(liveProviders)
+	}
+
+	fctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	s.checkAndEnqueue(fctx, s.cfg.Root)
+
+	var pwg sync.WaitGroup
+	pwg.Add(fanout)
+	for i := 0; i < fanout; i++ {
+		provider := liveProviders[i]
+		go func() {
+			defer pwg.Done()
+			_ = s.runProvider(fctx, provider)
+		}()
+	}
+
+	seenWalked := make(map[string]struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			var toWalk []string
+			s.mu.Lock()
+			for k := range s.resolved {
+				if _, seen := seenWalked[k]; seen {
+					continue
+				}
+				seenWalked[k] = struct{}{}
+				toWalk = append(toWalk, k)
+			}
+			s.mu.Unlock()
+
+			for _, midStr := range toWalk {
+				if err := s.enqueueChildren(ctx, midStr); err != nil {
+					return
+				}
+			}
+
+			s.mu.Lock()
+			hasUnwalked := false
+			for k := range s.resolved {
+				if _, seen := seenWalked[k]; !seen {
+					hasUnwalked = true
+					break
+				}
+			}
+			allRes := len(s.enqueued) == len(s.resolved)
+			s.mu.Unlock()
+
+			if allRes && !hasUnwalked {
+				select {
+				case <-fctx.Done():
+					return
+				case <-s.walkerDone:
+					return
+				}
+			}
+			select {
+			case <-fctx.Done():
+				return
+			case <-s.walkerDone:
+				continue
+			case <-s.resolvedCh:
+			}
+		}
+	}()
+
+	pipeReader, pipeWriter := io.Pipe()
+	cw := &countingWriter{w: pipeWriter, start: time.Now()}
+
+	var progressDone chan struct{}
+	if s.cfg.ProgressFn != nil {
+		progressDone = make(chan struct{})
+		go func() {
+			defer close(progressDone)
+			t := time.NewTicker(100 * time.Millisecond)
+			defer t.Stop()
+			for {
+				select {
+				case <-fctx.Done():
+					return
+				case <-s.walkerDone:
+					return
+				case <-t.C:
+					bytes, elapsed := cw.Progress()
+					s.mu.Lock()
+					resolved := uint64(len(s.resolved))
+					total := uint64(len(s.enqueued))
+					s.mu.Unlock()
+					var throughput float64
+					if elapsed.Seconds() > 0 {
+						throughput = float64(bytes) / elapsed.Seconds()
+					}
+					s.cfg.ProgressFn(ProgressUpdate{
+						BlocksResolved: resolved,
+						BlocksTotal:    total,
+						BytesDelivered: bytes,
+						Throughput:     throughput,
+					})
+				}
+			}
+		}()
+	}
+
+	go func() {
+		resolver := dag.NewResolver(asBlockstore(s.cfg.Engine.bs))
+		_, err := resolver.Resolve(s.cfg.Root, nil)
+		if err != nil {
+			_ = pipeWriter.CloseWithError(err)
+		} else {
+			_ = pipeWriter.Close()
+		}
+		close(s.walkerDone)
+	}()
+
+	<-s.walkerDone
+	cancel()
+	pwg.Wait()
+
+	if s.cfg.ProgressFn != nil {
+		bytes, elapsed := cw.Progress()
+		s.mu.Lock()
+		resolved := uint64(len(s.resolved))
+		total := uint64(len(s.enqueued))
+		s.mu.Unlock()
+		var throughput float64
+		if elapsed.Seconds() > 0 {
+			throughput = float64(bytes) / elapsed.Seconds()
+		}
+		s.cfg.ProgressFn(ProgressUpdate{
+			BlocksResolved: resolved,
+			BlocksTotal:    total,
+			BytesDelivered: bytes,
+			BytesTotal:     bytes,
+			Throughput:     throughput,
+		})
+	}
+	if progressDone != nil {
+		<-progressDone
+	}
+
+	return pipeReader, nil
 }
 
 // checkAndEnqueue checks if the given block is already locally present,
@@ -219,7 +466,10 @@ func (s *Session) checkAndEnqueue(ctx context.Context, id mid.MID) {
 	if err == nil && has {
 		s.resolved[midStr] = struct{}{}
 		if s.cfg.ProgressFn != nil {
-			s.cfg.ProgressFn(uint64(len(s.resolved)), uint64(len(s.enqueued)))
+			s.cfg.ProgressFn(ProgressUpdate{
+				BlocksResolved: uint64(len(s.resolved)),
+				BlocksTotal:    uint64(len(s.enqueued)),
+			})
 		}
 	} else {
 		s.wantlist[midStr] = id
@@ -242,7 +492,10 @@ func (s *Session) markResolved(id mid.MID) {
 	delete(s.wantlist, midStr)
 
 	if s.cfg.ProgressFn != nil {
-		s.cfg.ProgressFn(uint64(len(s.resolved)), uint64(len(s.enqueued)))
+		s.cfg.ProgressFn(ProgressUpdate{
+			BlocksResolved: uint64(len(s.resolved)),
+			BlocksTotal:    uint64(len(s.enqueued)),
+		})
 	}
 
 	// Notify active slots to cancel the want
@@ -251,6 +504,13 @@ func (s *Session) markResolved(id mid.MID) {
 		case ch <- sessionEvent{isCancel: true, mid: id}:
 		default:
 		}
+	}
+
+	// Wake the closer goroutine immediately so it can
+	// enqueue children of the newly resolved block.
+	select {
+	case s.resolvedCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -337,9 +597,37 @@ func (s *Session) enqueueChildren(ctx context.Context, midStr string) error {
 	return nil
 }
 
-// runProvider opens a single Memex stream to provider, then
-// runs a read loop and a write loop concurrently.
+// runProvider opens one or more Memex streams to provider
+// (controlled by StreamsPerProvider) and runs a read/write
+// loop pair on each stream concurrently. Multiple streams
+// allow true parallel block transfers: while one stream is
+// receiving a large block, other streams can transfer
+// different blocks concurrently.
 func (s *Session) runProvider(ctx context.Context, provider peer.AddrInfo) error {
+	streamsPerPeer := s.cfg.StreamsPerProvider
+	if streamsPerPeer <= 0 {
+		streamsPerPeer = DefaultStreamsPerProvider
+	}
+	if streamsPerPeer > MaxStreamsPerProvider {
+		streamsPerPeer = MaxStreamsPerProvider
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(streamsPerPeer)
+	for i := 0; i < streamsPerPeer; i++ {
+		go func() {
+			defer wg.Done()
+			_ = s.runStream(ctx, provider, i)
+		}()
+	}
+	wg.Wait()
+	return nil
+}
+
+// runStream opens a single Memex stream to provider and runs
+// a read loop and a write loop concurrently. streamIdx is
+// used for logging/diagnostics only.
+func (s *Session) runStream(ctx context.Context, provider peer.AddrInfo, streamIdx int) error {
 	stream, err := s.cfg.Engine.openStream(ctx, provider.ID)
 	type dialNotifier interface {
 		NotifyDialResult(peer.ID, error)
@@ -348,7 +636,7 @@ func (s *Session) runProvider(ctx context.Context, provider peer.AddrInfo) error
 		dn.NotifyDialResult(provider.ID, err)
 	}
 	if err != nil {
-		return fmt.Errorf("memex session: open %s: %w", provider.ID, err)
+		return fmt.Errorf("memex session: open %s stream %d: %w", provider.ID, streamIdx, err)
 	}
 	defer stream.Close()
 
@@ -361,6 +649,16 @@ func (s *Session) runProvider(ctx context.Context, provider peer.AddrInfo) error
 		eventChan <- sessionEvent{isCancel: false, mid: m}
 	}
 	s.mu.Unlock()
+
+	// Create pipeline state for this stream.
+	depth := s.cfg.PipelineDepth
+	if depth <= 0 {
+		depth = DefaultPipelineDepth
+	}
+	ps := &pipelineState{
+		maxDepth: depth,
+		capCh:    make(chan struct{}, depth),
+	}
 
 	defer func() {
 		s.mu.Lock()
@@ -377,23 +675,23 @@ func (s *Session) runProvider(ctx context.Context, provider peer.AddrInfo) error
 	pctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	var wg sync.WaitGroup
-	wg.Add(2)
+	var swg sync.WaitGroup
+	swg.Add(2)
 	go func() {
-		defer wg.Done()
+		defer swg.Done()
 		defer cancel()
-		_ = s.readLoop(pctx, stream)
+		_ = s.readLoop(pctx, stream, ps)
 	}()
 	go func() {
-		defer wg.Done()
+		defer swg.Done()
 		defer cancel()
-		_ = s.writeLoop(pctx, stream, eventChan)
+		_ = s.writeLoop(pctx, stream, eventChan, ps)
 	}()
-	wg.Wait()
+	swg.Wait()
 	return nil
 }
 
-func (s *Session) readLoop(ctx context.Context, stream network.Stream) error {
+func (s *Session) readLoop(ctx context.Context, stream network.Stream, ps *pipelineState) error {
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -407,6 +705,7 @@ func (s *Session) readLoop(ctx context.Context, stream network.Stream) error {
 		if err := proto.Unmarshal(buf, &msg); err != nil {
 			return fmt.Errorf("memex session: unmarshal: %w", err)
 		}
+		resolvedCount := 0
 		for _, b := range msg.Blocks {
 			if b == nil || b.Mid == "" {
 				continue
@@ -419,6 +718,14 @@ func (s *Session) readLoop(ctx context.Context, stream network.Stream) error {
 				continue
 			}
 			s.markResolved(id)
+			resolvedCount++
+		}
+		// Signal writeLoop that capacity opened up.
+		for i := 0; i < resolvedCount; i++ {
+			select {
+			case ps.capCh <- struct{}{}:
+			default:
+			}
 		}
 		if len(msg.ObjectInfos) > 0 {
 			s.storeObjectInfos(msg.ObjectInfos)
@@ -458,23 +765,61 @@ func (s *Session) storeObjectInfos(infos map[string]*membusspb.ObjectInfo) {
 	}
 }
 
-func (s *Session) writeLoop(ctx context.Context, stream network.Stream, eventChan <-chan sessionEvent) error {
+func (s *Session) writeLoop(ctx context.Context, stream network.Stream, eventChan <-chan sessionEvent, ps *pipelineState) error {
 	const (
 		maxBatchSize = 32
 		flushTimeout = 5 * time.Millisecond
 	)
 
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case ev, ok := <-eventChan:
-			if !ok {
-				return nil
-			}
+	var pending []sessionEvent
 
-			// Start a batch.
-			var msg membusspb.MemexMessage
+	for {
+		// Drain pending events first.
+		var firstEv sessionEvent
+		var gotFirst bool
+		if len(pending) > 0 {
+			firstEv = pending[0]
+			pending = pending[1:]
+			gotFirst = true
+		} else {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case ev, ok := <-eventChan:
+				if !ok {
+					return nil
+				}
+				firstEv = ev
+				gotFirst = true
+			}
+		}
+
+		if !gotFirst {
+			continue
+		}
+
+		// Wait for pipeline capacity before sending wants.
+		if !firstEv.isCancel {
+			for ps.inFlight >= ps.maxDepth {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-ps.capCh:
+					ps.inFlight--
+				case ev, ok := <-eventChan:
+					if !ok {
+						return nil
+					}
+					pending = append(pending, ev)
+				}
+			}
+		}
+
+		// Build batch.
+		var msg membusspb.MemexMessage
+		newWantCount := 0
+
+		addEvent := func(ev sessionEvent) {
 			if ev.isCancel {
 				msg.Cancel = append(msg.Cancel, ev.mid.String())
 			} else {
@@ -482,47 +827,61 @@ func (s *Session) writeLoop(ctx context.Context, stream network.Stream, eventCha
 					Mid:          ev.mid.String(),
 					SendDontHave: true,
 				})
+				newWantCount++
 			}
+		}
 
-			batchCount := 1
-			timer := time.NewTimer(flushTimeout)
-			closed := false
+		addEvent(firstEv)
 
-		batchLoop:
-			for batchCount < maxBatchSize && !closed {
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					return ctx.Err()
-				case <-timer.C:
-					// Batch timer fired, flush now.
+		batchCount := 1
+		timer := time.NewTimer(flushTimeout)
+		closed := false
+
+	batchLoop:
+		for batchCount < maxBatchSize && !closed {
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+				break batchLoop
+			case nextEv, nextOk := <-eventChan:
+				if !nextOk {
+					closed = true
 					break batchLoop
-				case nextEv, nextOk := <-eventChan:
-					if !nextOk {
-						closed = true
+				}
+
+				// If it's a want, check pipeline capacity.
+				if !nextEv.isCancel {
+					if ps.inFlight+newWantCount >= ps.maxDepth {
+						pending = append(pending, nextEv)
 						break batchLoop
 					}
-					if nextEv.isCancel {
-						msg.Cancel = append(msg.Cancel, nextEv.mid.String())
-					} else {
-						msg.Wants = append(msg.Wants, &membusspb.WantEntry{
-							Mid:          nextEv.mid.String(),
-							SendDontHave: true,
-						})
-					}
-					batchCount++
 				}
-			}
-			timer.Stop()
 
-			_ = stream.SetWriteDeadline(time.Now().Add(DefaultPeerTimeout))
-			if err := writeFrame(stream, &msg); err != nil {
-				return err
+				addEvent(nextEv)
+				batchCount++
 			}
+		}
+		timer.Stop()
 
+		if len(msg.Wants) == 0 && len(msg.Cancel) == 0 {
 			if closed {
 				return nil
 			}
+			continue
+		}
+
+		_ = stream.SetWriteDeadline(time.Now().Add(DefaultPeerTimeout))
+		if err := writeFrame(stream, &msg); err != nil {
+			return err
+		}
+
+		// Record in-flight wants.
+		ps.inFlight += newWantCount
+
+		if closed {
+			return nil
 		}
 	}
 }
@@ -640,19 +999,26 @@ func (s *Session) FetchWithBackoff(ctx context.Context, cfg RetryConfig) (io.Rea
 
 // isRetryableMemexErr reports whether err is a transient
 // failure (network error, partial resolution) that is worth
-// retrying. We treat the "not all blocks resolved" error and
-// any "open stream" / "dial" / "deadline" error as retryable.
+// retrying. We treat the "not all blocks resolved" error,
+// libp2p stream/connection errors, and context deadline
+// errors as retryable.
 func isRetryableMemexErr(err error) bool {
 	if err == nil {
 		return false
+	}
+	// Check for specific libp2p error types.
+	if errors.Is(err, network.ErrReset) {
+		return true
 	}
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "not all blocks resolved"):
 		return true
-	case strings.Contains(msg, "open "):
+	case strings.Contains(msg, "open stream"):
 		return true
 	case strings.Contains(msg, "context deadline"):
+		return true
+	case strings.Contains(msg, "connection refused"):
 		return true
 	case strings.Contains(msg, "no provider"):
 		return false

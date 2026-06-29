@@ -643,6 +643,18 @@ func (b *memBackend) ConnectPeer(ctx context.Context, multiaddr string) error {
 	return fmt.Errorf("connect: test backend stub")
 }
 
+func (b *memBackend) DescriptorExport(ctx context.Context, midStr string) ([]byte, error) {
+	return nil, fmt.Errorf("descriptor: test backend stub")
+}
+
+func (b *memBackend) DescriptorMeta(ctx context.Context, midStr string) (map[string]interface{}, error) {
+	return nil, fmt.Errorf("descriptor: test backend stub")
+}
+
+func (b *memBackend) DescriptorImport(ctx context.Context, data []byte) (string, error) {
+	return "", fmt.Errorf("descriptor: test backend stub")
+}
+
 func TestUpload(t *testing.T) {
 	srv, _ := newTestServer(t)
 

@@ -217,7 +217,10 @@ func (s *MemStore) Put(m mid.MID, data []byte) error {
 	}
 	key := blockKey(m)
 	if err := s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(key, append([]byte(nil), data...))
+		if err := txn.Set(key, append([]byte(nil), data...)); err != nil {
+			return err
+		}
+		return putTimestamp(txn, m)
 	}); err != nil {
 		return err
 	}
@@ -242,7 +245,10 @@ func (s *MemStore) PutDAG(m mid.MID, data []byte) error {
 	}
 	key := dagKey(m)
 	if err := s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(key, append([]byte(nil), data...))
+		if err := txn.Set(key, append([]byte(nil), data...)); err != nil {
+			return err
+		}
+		return putTimestamp(txn, m)
 	}); err != nil {
 		return err
 	}

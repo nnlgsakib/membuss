@@ -4,12 +4,15 @@
 	import { formatBytes } from '$lib/api';
 	import Icon from '@iconify/svelte';
 
-	let activeTab = $state<'file' | 'folder'>('file');
+	let activeTab = $state<'file' | 'folder' | 'descriptor'>('file');
 	let folderName = $state('');
 	
 	// File states
 	let selectedFile = $state<File | null>(null);
 	let selectedFiles = $state<FileList | null>(null);
+	let descriptorFile = $state<File | null>(null);
+	let descriptorStatus = $state<'idle' | 'importing' | 'done' | 'error'>('idle');
+	let descriptorError = $state('');
 	
 	// Upload Progress states
 	let uploadActive = $state(false);
@@ -48,6 +51,39 @@
 			}
 		} else {
 			selectedFiles = null;
+		}
+	}
+
+	function handleDescriptorChange(e: Event) {
+		const target = e.target as HTMLInputElement;
+		if (target.files && target.files.length > 0) {
+			descriptorFile = target.files[0];
+			descriptorStatus = 'idle';
+			descriptorError = '';
+		} else {
+			descriptorFile = null;
+		}
+	}
+
+	async function handleDescriptorSubmit(e: Event) {
+		e.preventDefault();
+		if (!descriptorFile) return;
+		descriptorStatus = 'importing';
+		descriptorError = '';
+		try {
+			const formData = new FormData();
+			formData.append('file', descriptorFile);
+			const res = await fetch(`${base}/descriptor/import`, { method: 'POST', body: formData });
+			if (!res.ok) {
+				const txt = await res.text();
+				throw new Error(txt || `HTTP ${res.status}`);
+			}
+			descriptorStatus = 'done';
+			const url = new URL(res.url, window.location.origin);
+			goto(url.pathname);
+		} catch (err) {
+			descriptorStatus = 'error';
+			descriptorError = err instanceof Error ? err.message : 'Import failed';
 		}
 	}
 
@@ -201,7 +237,17 @@
 					: 'border-transparent text-slate-500 hover:text-slate-350'
 			}`}
 		>
-			Upload Folder Structure (MemFS)
+			Upload Folder (MemFS)
+		</button>
+		<button
+			onclick={() => activeTab = 'descriptor'}
+			class={`px-6 py-3 font-semibold text-sm transition-all border-b-2 -mb-[2px] ${
+				activeTab === 'descriptor'
+					? 'border-cyan-500 text-cyan-400 font-bold'
+					: 'border-transparent text-slate-500 hover:text-slate-350'
+			}`}
+		>
+			Import .mbuss
 		</button>
 	</div>
 
@@ -297,6 +343,60 @@
 					class="w-full py-3 bg-cyan-500 hover:bg-cyan-600 disabled:bg-slate-800 text-slate-950 disabled:text-slate-600 font-bold text-sm rounded-xl transition-all duration-300 active:scale-[0.98]"
 				>
 					Ingest Directory
+				</button>
+			</form>
+		{:else if activeTab === 'descriptor'}
+			<form onsubmit={handleDescriptorSubmit} class="flex flex-col gap-6">
+				<div class="flex flex-col gap-2">
+					<label class="text-xs font-mono text-slate-450">Select .mbuss Descriptor File</label>
+					<div class="border-2 border-dashed border-slate-800 hover:border-slate-700/80 rounded-xl p-8 flex flex-col items-center justify-center gap-3 relative transition-all group bg-slate-950/20">
+						<span class="text-4xl group-hover:scale-110 transition-transform text-slate-400"><Icon icon="ph:file-arrow-down" /></span>
+						<div class="text-sm font-semibold text-slate-300">
+							{#if descriptorFile}
+								<span class="text-cyan-400">{descriptorFile.name}</span>
+								<span class="text-slate-500 text-xs block font-mono font-normal mt-1">({formatBytes(descriptorFile.size)})</span>
+							{:else}
+								<span>Select a .mbuss descriptor to import</span>
+							{/if}
+						</div>
+						<p class="text-xs text-slate-650 max-w-xs text-center">
+							Import a .mbuss descriptor file to verify and register content metadata on this node.
+						</p>
+						<input
+							type="file"
+							accept=".mbuss"
+							required
+							disabled={descriptorStatus === 'importing'}
+							onchange={handleDescriptorChange}
+							class="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+						/>
+					</div>
+				</div>
+
+				{#if descriptorStatus === 'error'}
+					<div class="bg-red-950/20 border border-red-800/40 text-red-400 px-4 py-3 rounded-lg text-xs font-mono">
+						{descriptorError}
+					</div>
+				{/if}
+
+				{#if descriptorStatus === 'done'}
+					<div class="bg-emerald-950/20 border border-emerald-800/40 text-emerald-400 px-4 py-3 rounded-lg text-xs font-mono">
+						Descriptor imported successfully! Redirecting...
+					</div>
+				{/if}
+
+				<button
+					type="submit"
+					disabled={!descriptorFile || descriptorStatus === 'importing'}
+					class="w-full py-3 bg-cyan-500 hover:bg-cyan-600 disabled:bg-slate-800 text-slate-950 disabled:text-slate-600 font-bold text-sm rounded-xl transition-all duration-300 active:scale-[0.98] flex items-center justify-center gap-2"
+				>
+					{#if descriptorStatus === 'importing'}
+						<div class="w-4 h-4 border-2 border-slate-950/30 border-t-slate-950 rounded-full animate-spin"></div>
+						Verifying...
+					{:else}
+						<Icon icon="ph:download-simple" class="text-base" />
+						Import Descriptor
+					{/if}
 				</button>
 			</form>
 		{/if}

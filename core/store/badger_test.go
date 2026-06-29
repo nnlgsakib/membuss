@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/dgraph-io/badger/v4"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/nnlgsakib/membuss/core/mid"
@@ -541,6 +543,236 @@ func TestMemStoreValueLogGC(t *testing.T) {
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestMemStoreGCMinAgeKeepsRecentBlocks(t *testing.T) {
+	s := newTestStore(t)
+
+	// Seal one block (will survive any GC).
+	sealed := mid.FromBytes([]byte("sealed-block"))
+	if err := s.Put(sealed, []byte("sealed-block")); err != nil {
+		t.Fatalf("Put sealed: %v", err)
+	}
+	if err := s.Seal(sealed, false); err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+
+	// Write an unsealed block (should be kept by minAge).
+	recent := mid.FromBytes([]byte("recent-block"))
+	if err := s.Put(recent, []byte("recent-block")); err != nil {
+		t.Fatalf("Put recent: %v", err)
+	}
+
+	// Run GC with a large minAge — the unsealed block was just
+	// written so its stored timestamp is newer than now - minAge.
+	freed, err := s.GCWithMinAge(context.Background(), 24*time.Hour)
+	if err != nil {
+		t.Fatalf("GCWithMinAge: %v", err)
+	}
+	if freed != 0 {
+		t.Fatalf("GCWithMinAge freed %d bytes; expected 0 (recent block should be kept)", freed)
+	}
+
+	// Both blocks must still exist.
+	if ok, _ := s.Has(recent); !ok {
+		t.Fatal("recent unsealed block was deleted by GCWithMinAge")
+	}
+	if ok, _ := s.Has(sealed); !ok {
+		t.Fatal("sealed block was deleted by GCWithMinAge")
+	}
+
+	// Now run GC *without* minAge — the unsealed block should be removed.
+	freed, err = s.GC(context.Background())
+	if err != nil {
+		t.Fatalf("GC: %v", err)
+	}
+	if freed == 0 {
+		t.Fatal("GC freed 0 bytes; expected to remove the unsealed block")
+	}
+	if ok, _ := s.Has(recent); ok {
+		t.Fatal("unsealed block survived GC without minAge")
+	}
+	if ok, _ := s.Has(sealed); !ok {
+		t.Fatal("sealed block was deleted by GC without minAge")
+	}
+}
+
+func TestMemStoreGCMinAgeZeroDeletesAll(t *testing.T) {
+	s := newTestStore(t)
+
+	// Write an unsealed block.
+	m := mid.FromBytes([]byte("throwaway"))
+	if err := s.Put(m, []byte("throwaway")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// GC with minAge=0 (disabled) should delete it.
+	freed, err := s.GC(context.Background())
+	if err != nil {
+		t.Fatalf("GC: %v", err)
+	}
+	if freed == 0 {
+		t.Fatal("GC with minAge=0 freed 0 bytes")
+	}
+	if ok, _ := s.Has(m); ok {
+		t.Fatal("unsealed block survived GC with minAge=0")
+	}
+}
+
+func TestMemStoreTimestampsWrittenOnPut(t *testing.T) {
+	s := newTestStore(t)
+	m := mid.FromBytes([]byte("ts-test"))
+	if err := s.Put(m, []byte("ts-test")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// Verify a timestamp was stored.
+	var ts uint64
+	err := s.db.View(func(txn *badger.Txn) error {
+		var err error
+		ts, err = readTimestamp(txn, m)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("readTimestamp: %v", err)
+	}
+	if ts == 0 {
+		t.Fatal("timestamp not written; got 0")
+	}
+
+	// Timestamp should be close to now.
+	now := uint64(time.Now().Unix())
+	if ts > now+2 || ts < now-2 {
+		t.Fatalf("timestamp %d not close to now %d", ts, now)
+	}
+}
+
+func TestMemStoreTimestampsWrittenOnPutDAG(t *testing.T) {
+	s := newTestStore(t)
+	m := mid.FromBytes([]byte("ts-dag-test"))
+	if err := s.PutDAG(m, []byte("ts-dag-test")); err != nil {
+		t.Fatalf("PutDAG: %v", err)
+	}
+
+	var ts uint64
+	err := s.db.View(func(txn *badger.Txn) error {
+		var err error
+		ts, err = readTimestamp(txn, m)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("readTimestamp: %v", err)
+	}
+	if ts == 0 {
+		t.Fatal("timestamp not written for DAG node; got 0")
+	}
+}
+
+func TestWalkCycleDetection(t *testing.T) {
+	s := newTestStore(t)
+
+	// Build a DAG with diamond structure where the same child
+	// appears from multiple parents. Without cycle detection
+	// this would visit the shared child twice.
+	//
+	//   root -> A, B
+	//   A   -> shared
+	//   B   -> shared
+
+	sharedData := []byte("shared-child")
+	shared := mid.FromBytes(sharedData)
+	if err := s.Put(shared, sharedData); err != nil {
+		t.Fatalf("Put shared: %v", err)
+	}
+
+	// A has an extra link so its hash differs from B.
+	sharedData2 := []byte("extra-for-A")
+	shared2 := mid.FromBytes(sharedData2)
+	if err := s.Put(shared2, sharedData2); err != nil {
+		t.Fatalf("Put shared2: %v", err)
+	}
+
+	nodeA := &membusspb.DAGNode{Links: []string{shared.String(), shared2.String()}}
+	rawA, err := proto.Marshal(nodeA)
+	if err != nil {
+		t.Fatalf("marshal A: %v", err)
+	}
+	dagA := mid.FromBytes(rawA)
+	if err := s.PutDAG(dagA, rawA); err != nil {
+		t.Fatalf("PutDAG A: %v", err)
+	}
+
+	nodeB := &membusspb.DAGNode{Links: []string{shared.String()}}
+	rawB, err := proto.Marshal(nodeB)
+	if err != nil {
+		t.Fatalf("marshal B: %v", err)
+	}
+	dagB := mid.FromBytes(rawB)
+	if err := s.PutDAG(dagB, rawB); err != nil {
+		t.Fatalf("PutDAG B: %v", err)
+	}
+
+	rootNode := &membusspb.DAGNode{Links: []string{dagA.String(), dagB.String()}}
+	rawRoot, err := proto.Marshal(rootNode)
+	if err != nil {
+		t.Fatalf("marshal root: %v", err)
+	}
+	root := mid.FromBytes(rawRoot)
+	if err := s.PutDAG(root, rawRoot); err != nil {
+		t.Fatalf("PutDAG root: %v", err)
+	}
+
+	// Without cycle detection, shared would be visited twice.
+	visited := make(map[string]int)
+	err = Walk(s, root, func(m mid.MID, leaf bool) error {
+		visited[m.String()]++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	// root, dagA, dagB, shared, shared2 = 5 unique nodes.
+	if len(visited) != 5 {
+		t.Fatalf("Walk visited %d unique nodes, want 5", len(visited))
+	}
+	// shared must be visited exactly once.
+	if visited[shared.String()] != 1 {
+		t.Fatalf("shared visited %d times, want 1", visited[shared.String()])
+	}
+}
+
+func TestWalkSelfCycle(t *testing.T) {
+	s := newTestStore(t)
+
+	// A DAG that links to itself.
+	selfData := []byte("self-ref-payload")
+	selfMID := mid.FromBytes(selfData)
+	if err := s.Put(selfMID, selfData); err != nil {
+		t.Fatalf("Put selfMID: %v", err)
+	}
+
+	node := &membusspb.DAGNode{Links: []string{selfMID.String()}}
+	data, err := proto.Marshal(node)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	dag := mid.FromBytes(data)
+	if err := s.PutDAG(dag, data); err != nil {
+		t.Fatalf("PutDAG: %v", err)
+	}
+
+	visited := 0
+	err = Walk(s, dag, func(m mid.MID, leaf bool) error {
+		visited++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	// dag + selfMID = 2 nodes visited.
+	if visited != 2 {
+		t.Fatalf("Walk visited %d nodes, want 2", visited)
 	}
 }
 

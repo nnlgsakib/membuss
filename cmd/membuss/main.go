@@ -391,7 +391,6 @@ func main() {
 			os.Exit(1)
 		}
 		relayAnnouncer.Start(ctx)
-		defer func() { _ = relayAnnouncer }()
 		fmt.Fprintf(os.Stdout, "  relay_service:  enabled\n")
 	}
 

@@ -9,6 +9,7 @@
   <div class="upload-tabs">
     <div class="upload-tab active" onclick="switchTab('file')">Upload File</div>
     <div class="upload-tab" onclick="switchTab('folder')">Upload Folder</div>
+    <div class="upload-tab" onclick="switchTab('descriptor')">Import .mbuss</div>
   </div>
 
   <div class="upload-content">
@@ -45,6 +46,23 @@
           <input type="text" id="folder-name" name="folder_name" placeholder="Leave empty to use uploaded folder name" style="width:100%; padding:10px; background:var(--bg-primary); border:1px solid var(--border-color); color:var(--text-primary); border-radius:6px; font-size:13px; font-family:var(--font-sans); transition:border-color 0.2s;">
         </div>
         <button class="btn primary" type="submit" style="width:100%; padding: 10px;">Upload Folder</button>
+      </form>
+    </div>
+
+    <!-- Descriptor Import Pane -->
+    <div id="pane-descriptor" class="upload-pane">
+      <form id="form-descriptor" method="POST" action="/explorer/descriptor/import" enctype="multipart/form-data">
+        <div class="form-group">
+          <label>Select a .mbuss descriptor file</label>
+          <div class="file-input-wrapper">
+            <span class="upload-icon">📦</span>
+            <span class="upload-text"><strong>Choose a .mbuss file</strong> to import content metadata</span>
+            <input type="file" id="descriptor-file" name="file" accept=".mbuss" onchange="showFilename(this, 'file-name-descriptor')" required>
+            <div id="file-name-descriptor" class="file-name-display"></div>
+          </div>
+        </div>
+        <p class="muted" style="margin: 12px 0; font-size: 12px;">Imports a descriptor to verify and register content metadata on this node. All blocks must be present locally.</p>
+        <button class="btn primary" type="submit" style="width:100%; padding: 10px;">Import Descriptor</button>
       </form>
     </div>
   </div>
@@ -342,20 +360,25 @@
       p.classList.remove('active');
     });
 
+    var tabs = document.querySelectorAll('.upload-tab');
     if (type === 'file') {
-      document.querySelectorAll('.upload-tab')[0].classList.add('active');
+      tabs[0].classList.add('active');
       document.getElementById('pane-file').classList.add('active');
-      
-      // Make inputs required/not-required based on active tab
       document.getElementById('file').required = true;
       document.getElementById('files').required = false;
-    } else {
-      document.querySelectorAll('.upload-tab')[1].classList.add('active');
+      document.getElementById('descriptor-file').required = false;
+    } else if (type === 'folder') {
+      tabs[1].classList.add('active');
       document.getElementById('pane-folder').classList.add('active');
-      
-      // Make inputs required/not-required based on active tab
       document.getElementById('file').required = false;
       document.getElementById('files').required = true;
+      document.getElementById('descriptor-file').required = false;
+    } else if (type === 'descriptor') {
+      tabs[2].classList.add('active');
+      document.getElementById('pane-descriptor').classList.add('active');
+      document.getElementById('file').required = false;
+      document.getElementById('files').required = false;
+      document.getElementById('descriptor-file').required = true;
     }
   }
 
