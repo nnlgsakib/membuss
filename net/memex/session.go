@@ -73,6 +73,11 @@ type Session struct {
 	resolved    map[string]struct{}
 	wantlist    map[string]mid.MID
 	streamChans []chan sessionEvent
+
+	// resolvedCh is a buffered channel used to wake the closer
+	// goroutine immediately when a block is resolved, instead
+	// of polling on a 5ms ticker.
+	resolvedCh chan struct{}
 }
 
 // NewSession returns a Session ready to fetch cfg.Root.
@@ -87,10 +92,11 @@ func NewSession(cfg SessionConfig) (*Session, error) {
 		return nil, errors.New("memex session: no providers")
 	}
 	return &Session{
-		cfg:      cfg,
-		enqueued: make(map[string]struct{}),
-		resolved: make(map[string]struct{}),
-		wantlist: make(map[string]mid.MID),
+		cfg:        cfg,
+		enqueued:   make(map[string]struct{}),
+		resolved:   make(map[string]struct{}),
+		wantlist:   make(map[string]mid.MID),
+		resolvedCh: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -123,6 +129,11 @@ func (s *Session) Fetch(ctx context.Context) (io.Reader, error) {
 	s.resolved = make(map[string]struct{})
 	s.wantlist = make(map[string]mid.MID)
 	s.streamChans = nil
+	// Drain any stale signal from a previous Fetch.
+	select {
+	case <-s.resolvedCh:
+	default:
+	}
 	s.mu.Unlock()
 
 	// Phase 13: filter the provider list through the
@@ -161,18 +172,14 @@ func (s *Session) Fetch(ctx context.Context) (io.Reader, error) {
 	}
 
 	// Closer: walks the DAG, enqueueing children as parents
-	// become resolved.
+	// become resolved. It wakes immediately when markResolved
+	// signals on resolvedCh, eliminating the 5ms polling delay.
 	seenWalked := make(map[string]struct{})
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		t := time.NewTicker(5 * time.Millisecond)
-		defer t.Stop()
 		for {
-			if ctx.Err() != nil {
-				return
-			}
 			// Drain any newly-resolved MIDs and enqueue
 			// their children.
 			var toWalk []string
@@ -206,10 +213,13 @@ func (s *Session) Fetch(ctx context.Context) (io.Reader, error) {
 			if allRes && !hasUnwalked {
 				return
 			}
+			// Wait for a signal that a new block was resolved.
+			// Multiple rapid resolves may coalesce into one
+			// signal; the loop above drains them all.
 			select {
 			case <-fctx.Done():
 				return
-			case <-t.C:
+			case <-s.resolvedCh:
 			}
 		}
 	}()
@@ -278,6 +288,13 @@ func (s *Session) markResolved(id mid.MID) {
 		case ch <- sessionEvent{isCancel: true, mid: id}:
 		default:
 		}
+	}
+
+	// Wake the closer goroutine immediately so it can
+	// enqueue children of the newly resolved block.
+	select {
+	case s.resolvedCh <- struct{}{}:
+	default:
 	}
 }
 
