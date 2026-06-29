@@ -640,19 +640,26 @@ func (s *Session) FetchWithBackoff(ctx context.Context, cfg RetryConfig) (io.Rea
 
 // isRetryableMemexErr reports whether err is a transient
 // failure (network error, partial resolution) that is worth
-// retrying. We treat the "not all blocks resolved" error and
-// any "open stream" / "dial" / "deadline" error as retryable.
+// retrying. We treat the "not all blocks resolved" error,
+// libp2p stream/connection errors, and context deadline
+// errors as retryable.
 func isRetryableMemexErr(err error) bool {
 	if err == nil {
 		return false
+	}
+	// Check for specific libp2p error types.
+	if errors.Is(err, network.ErrReset) {
+		return true
 	}
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "not all blocks resolved"):
 		return true
-	case strings.Contains(msg, "open "):
+	case strings.Contains(msg, "open stream"):
 		return true
 	case strings.Contains(msg, "context deadline"):
+		return true
+	case strings.Contains(msg, "connection refused"):
 		return true
 	case strings.Contains(msg, "no provider"):
 		return false
