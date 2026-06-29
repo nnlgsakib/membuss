@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/dgraph-io/badger/v4"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/nnlgsakib/membuss/core/mid"
@@ -541,6 +543,129 @@ func TestMemStoreValueLogGC(t *testing.T) {
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestMemStoreGCMinAgeKeepsRecentBlocks(t *testing.T) {
+	s := newTestStore(t)
+
+	// Seal one block (will survive any GC).
+	sealed := mid.FromBytes([]byte("sealed-block"))
+	if err := s.Put(sealed, []byte("sealed-block")); err != nil {
+		t.Fatalf("Put sealed: %v", err)
+	}
+	if err := s.Seal(sealed, false); err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+
+	// Write an unsealed block (should be kept by minAge).
+	recent := mid.FromBytes([]byte("recent-block"))
+	if err := s.Put(recent, []byte("recent-block")); err != nil {
+		t.Fatalf("Put recent: %v", err)
+	}
+
+	// Run GC with a large minAge — the unsealed block was just
+	// written so its stored timestamp is newer than now - minAge.
+	freed, err := s.GCWithMinAge(context.Background(), 24*time.Hour)
+	if err != nil {
+		t.Fatalf("GCWithMinAge: %v", err)
+	}
+	if freed != 0 {
+		t.Fatalf("GCWithMinAge freed %d bytes; expected 0 (recent block should be kept)", freed)
+	}
+
+	// Both blocks must still exist.
+	if ok, _ := s.Has(recent); !ok {
+		t.Fatal("recent unsealed block was deleted by GCWithMinAge")
+	}
+	if ok, _ := s.Has(sealed); !ok {
+		t.Fatal("sealed block was deleted by GCWithMinAge")
+	}
+
+	// Now run GC *without* minAge — the unsealed block should be removed.
+	freed, err = s.GC(context.Background())
+	if err != nil {
+		t.Fatalf("GC: %v", err)
+	}
+	if freed == 0 {
+		t.Fatal("GC freed 0 bytes; expected to remove the unsealed block")
+	}
+	if ok, _ := s.Has(recent); ok {
+		t.Fatal("unsealed block survived GC without minAge")
+	}
+	if ok, _ := s.Has(sealed); !ok {
+		t.Fatal("sealed block was deleted by GC without minAge")
+	}
+}
+
+func TestMemStoreGCMinAgeZeroDeletesAll(t *testing.T) {
+	s := newTestStore(t)
+
+	// Write an unsealed block.
+	m := mid.FromBytes([]byte("throwaway"))
+	if err := s.Put(m, []byte("throwaway")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// GC with minAge=0 (disabled) should delete it.
+	freed, err := s.GC(context.Background())
+	if err != nil {
+		t.Fatalf("GC: %v", err)
+	}
+	if freed == 0 {
+		t.Fatal("GC with minAge=0 freed 0 bytes")
+	}
+	if ok, _ := s.Has(m); ok {
+		t.Fatal("unsealed block survived GC with minAge=0")
+	}
+}
+
+func TestMemStoreTimestampsWrittenOnPut(t *testing.T) {
+	s := newTestStore(t)
+	m := mid.FromBytes([]byte("ts-test"))
+	if err := s.Put(m, []byte("ts-test")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// Verify a timestamp was stored.
+	var ts uint64
+	err := s.db.View(func(txn *badger.Txn) error {
+		var err error
+		ts, err = readTimestamp(txn, m)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("readTimestamp: %v", err)
+	}
+	if ts == 0 {
+		t.Fatal("timestamp not written; got 0")
+	}
+
+	// Timestamp should be close to now.
+	now := uint64(time.Now().Unix())
+	if ts > now+2 || ts < now-2 {
+		t.Fatalf("timestamp %d not close to now %d", ts, now)
+	}
+}
+
+func TestMemStoreTimestampsWrittenOnPutDAG(t *testing.T) {
+	s := newTestStore(t)
+	m := mid.FromBytes([]byte("ts-dag-test"))
+	if err := s.PutDAG(m, []byte("ts-dag-test")); err != nil {
+		t.Fatalf("PutDAG: %v", err)
+	}
+
+	var ts uint64
+	err := s.db.View(func(txn *badger.Txn) error {
+		var err error
+		ts, err = readTimestamp(txn, m)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("readTimestamp: %v", err)
+	}
+	if ts == 0 {
+		t.Fatal("timestamp not written for DAG node; got 0")
 	}
 }
 

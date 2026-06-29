@@ -293,8 +293,11 @@ func (s *MemStore) GCWithMinAge(ctx context.Context, minAge time.Duration) (uint
 				continue
 			}
 			if minAgeTs > 0 {
-				if uint64(item.Version()) >= minAgeTs {
-					continue
+				m, merr := mid.FromMultihash(mid.CodecRaw, raw)
+				if merr == nil {
+					if ts, terr := readTimestamp(txn, m); terr == nil && ts >= minAgeTs {
+						continue
+					}
 				}
 			}
 			toDelete = append(toDelete, pendingDelete{

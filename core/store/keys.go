@@ -1,6 +1,12 @@
 ﻿package store
 
-import "github.com/nnlgsakib/membuss/core/mid"
+import (
+	"encoding/binary"
+	"time"
+
+	"github.com/dgraph-io/badger/v4"
+	"github.com/nnlgsakib/membuss/core/mid"
+)
 
 // Key-prefix bytes. The leading '/' mirrors FUSE-style namespace
 // separators and keeps the four categories visually distinct in
@@ -11,6 +17,37 @@ const (
 	prefixSeal  = "/s/"
 	prefixMeta  = "/m/"
 )
+
+// timestampKey returns the BadgerDB meta key for a creation
+// timestamp. Stored in the /m/ namespace so GC already skips it.
+func timestampKey(m mid.MID) []byte {
+	return metaKey("ts/" + m.String())
+}
+
+// putTimestamp writes a wall-clock creation timestamp atomically.
+func putTimestamp(txn *badger.Txn, m mid.MID) error {
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], uint64(time.Now().Unix()))
+	return txn.Set(timestampKey(m), buf[:])
+}
+
+// readTimestamp returns the stored creation timestamp for a key.
+// Returns 0, nil if no timestamp is recorded (pre-existing block).
+func readTimestamp(txn *badger.Txn, m mid.MID) (uint64, error) {
+	item, err := txn.Get(timestampKey(m))
+	if err != nil {
+		if err == badger.ErrKeyNotFound {
+			return 0, nil
+		}
+		return 0, err
+	}
+	var buf [8]byte
+	err = item.Value(func(v []byte) error {
+		copy(buf[:], v)
+		return nil
+	})
+	return binary.BigEndian.Uint64(buf[:]), err
+}
 
 // blockKey returns the BadgerDB key for a raw block.
 func blockKey(m mid.MID) []byte {
