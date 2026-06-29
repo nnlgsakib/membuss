@@ -521,6 +521,35 @@ func (b *daemonBackend) GC(ctx context.Context, all bool) (serverpkg.GCInfo, err
 	return serverpkg.GCInfo{BytesFreed: freed, BlocksKept: 0}, nil
 }
 
+// Delete recursively removes the given MID and its children from the store.
+func (b *daemonBackend) Delete(ctx context.Context, midStr string) (serverpkg.DeleteResult, error) {
+	if b.store == nil {
+		return serverpkg.DeleteResult{}, errors.New("delete: no store")
+	}
+	m, err := mid.Parse(midStr)
+	if err != nil {
+		return serverpkg.DeleteResult{}, fmt.Errorf("delete: parse mid: %w", err)
+	}
+
+	type recursiveDeleter interface {
+		DeleteRecursive(m mid.MID) (uint64, uint64, error)
+	}
+
+	if rd, ok := b.store.(recursiveDeleter); ok {
+		deleted, freed, err := rd.DeleteRecursive(m)
+		if err != nil {
+			return serverpkg.DeleteResult{}, err
+		}
+		return serverpkg.DeleteResult{
+			BlocksDeleted: deleted,
+			BytesFreed:    freed,
+		}, nil
+	}
+
+	return serverpkg.DeleteResult{}, errors.New("delete: store does not support recursive deletion")
+}
+
+
 // AnchorStatus returns the anchor engine's stats. If the
 // anchor engine is not running, returns zero-valued info
 // with the host's PeerID.

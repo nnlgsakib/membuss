@@ -71,6 +71,10 @@ dht_mode: <<DHT_MODE>>
 # Short-circuit the last hops of the provide walk (IPFS default).
 dht_optimistic_provide: <<DHT_OPTIMISTIC_PROVIDE>>
 
+# Enable libp2p mDNS discovery so nodes on the same local network
+# can automatically find and connect to each other.
+enable_mdns: <<ENABLE_MDNS>>
+
 # -----------------------------------------------------------------------------
 # Anchor / Relay
 # -----------------------------------------------------------------------------
@@ -254,6 +258,7 @@ func writeTemplate(cfg *Config) (string, error) {
 		"<<LOG_LEVEL>>",                    cfg.LogLevel,
 		"<<DHT_MODE>>",                    cfg.DHTMode,
 		"<<DHT_OPTIMISTIC_PROVIDE>>",         boolString(cfg.DHTOptimisticProvide),
+		"<<ENABLE_MDNS>>",                  boolString(cfg.EnableMDNS),
 		"<<MID_VERSION>>",                  cfg.MIDVersion,
 		"<<ENABLE_GEOLOCATION>>",           boolString(cfg.EnableGeolocation),
 		"<<GEOLOCATION_DB>>",               cfg.GeolocationDB,

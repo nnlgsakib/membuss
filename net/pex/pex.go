@@ -32,15 +32,19 @@
 package pex
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/rand"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/crypto"
 	libp2pcore "github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -311,6 +315,9 @@ func (p *PEX) upsertLocked(ai peer.AddrInfo, relayAddrs []multiaddr.Multiaddr, s
 		prevReach := cur.info.Reachability
 		prevDial := cur.info.LastDialSuccess
 		prevRelay := append([]multiaddr.Multiaddr(nil), cur.relayAddrs...)
+		prevSig := cur.info.Signature
+		prevPubKey := cur.info.PubKey
+		prevSeq := cur.info.Seq
 		cur.addrInfo = ai
 		cur.info = &membusspb.PeerInfo{
 			PeerId:           ai.ID.String(),
@@ -319,6 +326,9 @@ func (p *PEX) upsertLocked(ai peer.AddrInfo, relayAddrs []multiaddr.Multiaddr, s
 			Reachability:     prevReach,
 			LastDialSuccess:  prevDial,
 			RelayAddrs:       addrsToStrings(append(prevRelay, relayAddrs...)),
+			Signature:        prevSig,
+			PubKey:           prevPubKey,
+			Seq:              prevSeq,
 		}
 		cur.relayAddrs = append(append([]multiaddr.Multiaddr(nil), prevRelay...), relayAddrs...)
 		return
@@ -390,9 +400,20 @@ func (p *PEX) snapshot() []*membusspb.PeerInfo {
 func (p *PEX) filterForGossip(selfID peer.ID) []*membusspb.PeerInfo {
 	now := p.now().Unix()
 	cutoff := now - int64(freshnessWindow.Seconds())
-	out := make([]*membusspb.PeerInfo, 0, len(p.peers))
+	out := make([]*membusspb.PeerInfo, 0, len(p.peers)+1)
+
+	// Phase 20: Append our own signed PeerInfo record
+	selfInfo, err := p.buildSelfPeerInfo()
+	if err == nil {
+		out = append(out, selfInfo)
+	}
+
 	for _, e := range p.peers {
 		if e.info.PeerId == selfID.String() {
+			continue
+		}
+		// Phase 20: Skip other records if they are unsigned
+		if len(e.info.Signature) == 0 {
 			continue
 		}
 		if e.info.LastSeen < cutoff {
@@ -575,6 +596,12 @@ func (p *PEX) mergeFromMessage(infos []*membusspb.PeerInfo, seen int64) {
 		if info == nil {
 			continue
 		}
+
+		// Phase 20: verify cryptographic signature
+		if err := p.verifyPeerInfoSignature(info); err != nil {
+			continue
+		}
+
 		ai, ok := decodePeerInfo(info)
 		if !ok {
 			continue
@@ -589,15 +616,32 @@ func (p *PEX) mergeFromMessage(infos []*membusspb.PeerInfo, seen int64) {
 		}
 		p.mu.Lock()
 		wasKnown := p.peers[ai.ID] != nil
-		p.upsertLocked(ai, relay, seen, true)
-		// After upsert, restore the reachability /
-		// last_dial_success fields from the wire
-		// payload (upsertLocked already merged
-		// relay_addrs and addrs but not those).
-		if cur, exists := p.peers[ai.ID]; exists {
+		if wasKnown && p.peers[ai.ID].info.Seq >= info.Seq {
+			p.mu.Unlock()
+			continue
+		}
+		if wasKnown {
+			cur := p.peers[ai.ID]
+			cur.addrInfo = ai
+			cur.info.Addrs = addrsToStrings(ai.Addrs)
+			cur.info.LastSeen = seen
 			cur.info.Reachability = info.Reachability
 			cur.info.LastDialSuccess = info.LastDialSuccess
 			cur.relayAddrs = relay
+			cur.info.RelayAddrs = info.RelayAddrs
+			cur.info.Signature = info.Signature
+			cur.info.PubKey = info.PubKey
+			cur.info.Seq = info.Seq
+		} else {
+			p.upsertLocked(ai, relay, seen, true)
+			if cur, exists := p.peers[ai.ID]; exists {
+				cur.info.Reachability = info.Reachability
+				cur.info.LastDialSuccess = info.LastDialSuccess
+				cur.relayAddrs = relay
+				cur.info.Signature = info.Signature
+				cur.info.PubKey = info.PubKey
+				cur.info.Seq = info.Seq
+			}
 		}
 		p.mu.Unlock()
 
@@ -890,4 +934,130 @@ func (p *PEX) checkPeers(ctx context.Context) {
 			p.reconnectAsync(target.pid, target.addrInfo, target.relayAddrs, target.reach)
 		}
 	}
+}
+
+// CanonicalPeerInfoBytes computes the canonical representation of PeerInfo for signing.
+func CanonicalPeerInfoBytes(info *membusspb.PeerInfo) []byte {
+	var buf bytes.Buffer
+	buf.WriteString(info.PeerId)
+	buf.WriteByte(0)
+	for _, a := range info.Addrs {
+		buf.WriteString(a)
+		buf.WriteByte(0)
+	}
+	buf.WriteByte(1)
+	for _, ra := range info.RelayAddrs {
+		buf.WriteString(ra)
+		buf.WriteByte(0)
+	}
+	buf.WriteByte(2)
+	_ = binary.Write(&buf, binary.BigEndian, int32(info.Reachability))
+	_ = binary.Write(&buf, binary.BigEndian, info.Seq)
+	return buf.Bytes()
+}
+
+// buildSelfPeerInfo constructs and signs the local node's PeerInfo.
+func (p *PEX) buildSelfPeerInfo() (*membusspb.PeerInfo, error) {
+	privKey := p.host.Peerstore().PrivKey(p.host.ID())
+	if privKey == nil {
+		return nil, errors.New("pex: private key not found in peerstore")
+	}
+	pubKey := privKey.GetPublic()
+	pubKeyBytes, err := crypto.MarshalPublicKey(pubKey)
+	if err != nil {
+		return nil, err
+	}
+
+	addrs := p.host.Addrs()
+	addrStrs := make([]string, len(addrs))
+	for i, a := range addrs {
+		addrStrs[i] = a.String()
+	}
+
+	var finalAddrs []string
+	var relayAddrs []string
+	for _, s := range addrStrs {
+		if strings.Contains(s, "/p2p-circuit") {
+			relayAddrs = append(relayAddrs, s)
+		} else {
+			finalAddrs = append(finalAddrs, s)
+		}
+	}
+
+	reach := membusspb.Reachability_UNKNOWN
+	if len(finalAddrs) > 0 {
+		reach = membusspb.Reachability_PUBLIC
+	} else if len(relayAddrs) > 0 {
+		reach = membusspb.Reachability_RELAY_ONLY
+	}
+
+	info := &membusspb.PeerInfo{
+		PeerId:       p.host.ID().String(),
+		Addrs:        finalAddrs,
+		RelayAddrs:   relayAddrs,
+		LastSeen:     p.now().Unix(),
+		Reachability: reach,
+		Seq:          p.now().Unix(),
+		PubKey:       pubKeyBytes,
+	}
+
+	canonical := CanonicalPeerInfoBytes(info)
+	sig, err := privKey.Sign(canonical)
+	if err != nil {
+		return nil, err
+	}
+	info.Signature = sig
+	return info, nil
+}
+
+// verifyPeerInfoSignature validates the cryptographic signature of the PeerInfo record.
+func (p *PEX) verifyPeerInfoSignature(info *membusspb.PeerInfo) error {
+	if len(info.Signature) == 0 {
+		return errors.New("pex: unsigned peer record")
+	}
+	if len(info.PubKey) == 0 {
+		return errors.New("pex: missing public key in peer record")
+	}
+
+	// 1. Verify peer_id matches pub_key
+	pid, err := peer.Decode(info.PeerId)
+	if err != nil {
+		return fmt.Errorf("pex: invalid peer ID %q: %w", info.PeerId, err)
+	}
+
+	pubKey, err := crypto.UnmarshalPublicKey(info.PubKey)
+	if err != nil {
+		return fmt.Errorf("pex: invalid public key: %w", err)
+	}
+
+	derivedID, err := peer.IDFromPublicKey(pubKey)
+	if err != nil {
+		return fmt.Errorf("pex: failed to derive peer ID from public key: %w", err)
+	}
+
+	if derivedID != pid {
+		return errors.New("pex: peer ID does not match public key")
+	}
+
+	// 2. Verify signature on canonical bytes
+	canonical := CanonicalPeerInfoBytes(info)
+	ok, err := pubKey.Verify(canonical, info.Signature)
+	if err != nil {
+		return fmt.Errorf("pex: signature verification error: %w", err)
+	}
+	if !ok {
+		return errors.New("pex: invalid signature")
+	}
+
+	// 3. Verify freshness (not in future, and not older than freshnessWindow)
+	now := p.now().Unix()
+	const clockSkew = 5 * 60 // 5 minutes tolerance
+	if info.Seq > now+clockSkew {
+		return errors.New("pex: record timestamp is in the future")
+	}
+	if info.Seq < now-int64(freshnessWindow.Seconds()) {
+		return errors.New("pex: record is expired")
+	}
+
+	return nil
 }

@@ -163,6 +163,20 @@ func (a *apiAdapter) GC(ctx context.Context) (api.GCInfo, error) {
 	}, nil
 }
 
+// Delete recursively removes the given MID and its children from the store.
+func (a *apiAdapter) Delete(ctx context.Context, midStr string) (api.DeleteResult, error) {
+	b := a.b
+	res, err := b.Delete(ctx, midStr)
+	if err != nil {
+		return api.DeleteResult{}, err
+	}
+	return api.DeleteResult{
+		BlocksDeleted: res.BlocksDeleted,
+		BytesFreed:    res.BytesFreed,
+	}, nil
+}
+
+
 // NodeInfo returns the local node's identity.
 func (a *apiAdapter) NodeInfo() api.NodeInfo {
 	b := a.b

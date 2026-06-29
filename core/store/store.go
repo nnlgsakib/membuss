@@ -13,7 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/nnlgsakib/membuss/core/mid"
+	membusspb "github.com/nnlgsakib/membuss/proto"
 )
 
 // ErrNotFound is returned by Get and Delete when the requested
@@ -248,3 +251,106 @@ func (m *Memstore) GC(ctx context.Context) (uint64, error) {
 func (m *Memstore) GCWithMinAge(ctx context.Context, minAge time.Duration) (uint64, error) {
 	return 0, nil
 }
+
+// DeleteRecursive removes the given root MID and all its reachable children from the store.
+// It also unseals them. It returns the number of blocks deleted and the number of bytes freed.
+func (m *Memstore) DeleteRecursive(root mid.MID) (uint64, uint64, error) {
+	if root.IsZero() {
+		return 0, 0, errors.New("store: zero MID")
+	}
+
+	_ = m.Unseal(root)
+
+	reachable := make(map[string]mid.MID)
+	var collect func(id mid.MID)
+	collect = func(id mid.MID) {
+		if id.IsZero() {
+			return
+		}
+		ids := id.String()
+		if _, seen := reachable[ids]; seen {
+			return
+		}
+
+		m.mu.RLock()
+		data, exists := m.blocks[ids]
+		m.mu.RUnlock()
+		if !exists {
+			return
+		}
+
+		reachable[ids] = id
+
+		var childMIDs []mid.MID
+		if id.Codec() == mid.CodecMemFS {
+			var node membusspb.MemFSNode
+			if uerr := proto.Unmarshal(data, &node); uerr == nil {
+				switch node.Type {
+				case membusspb.MemFSType_FILE:
+					for _, b := range node.Blocks {
+						if b == nil || len(b.Mid) == 0 {
+							continue
+						}
+						var codec uint64 = mid.CodecMemFS
+						if b.Size > 0 {
+							codec = mid.CodecRaw
+						}
+						child, err := mid.FromMultihash(codec, b.Mid)
+						if err == nil {
+							childMIDs = append(childMIDs, child)
+						}
+					}
+				case membusspb.MemFSType_DIR:
+					for _, e := range node.Entries {
+						if e == nil || len(e.Mid) == 0 {
+							continue
+						}
+						var codec uint64 = mid.CodecMemFS
+						if e.Type == membusspb.MemFSType_RAW {
+							codec = mid.CodecRaw
+						}
+						child, err := mid.FromMultihash(codec, e.Mid)
+						if err == nil {
+							childMIDs = append(childMIDs, child)
+						}
+					}
+				}
+			}
+		} else {
+			var node membusspb.DAGNode
+			if uerr := proto.Unmarshal(data, &node); uerr == nil && len(node.Links) > 0 {
+				for _, s := range node.Links {
+					child, err := mid.Parse(s)
+					if err == nil {
+						childMIDs = append(childMIDs, child)
+					}
+				}
+			}
+		}
+
+		for _, child := range childMIDs {
+			collect(child)
+		}
+	}
+
+	collect(root)
+
+	var blocksDeleted uint64
+	var bytesFreed uint64
+
+	m.mu.Lock()
+	m.metaMu.Lock()
+	for ids := range reachable {
+		if data, ok := m.blocks[ids]; ok {
+			bytesFreed += uint64(len(data))
+			delete(m.blocks, ids)
+			blocksDeleted++
+		}
+		delete(m.meta, ids)
+	}
+	m.metaMu.Unlock()
+	m.mu.Unlock()
+
+	return blocksDeleted, bytesFreed, nil
+}
+

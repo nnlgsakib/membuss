@@ -5,6 +5,7 @@ go 1.25.10
 require (
 	github.com/bits-and-blooms/bloom/v3 v3.7.1
 	github.com/dgraph-io/badger/v4 v4.9.2
+	github.com/gabriel-vasile/mimetype v1.4.13
 	github.com/go-chi/chi/v5 v5.3.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/ipfs/go-cid v0.6.1

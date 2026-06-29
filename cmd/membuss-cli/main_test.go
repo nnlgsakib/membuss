@@ -96,6 +96,11 @@ func (f *fakeBackend) GC(ctx context.Context, all bool) (serverpkg.GCInfo, error
 	return serverpkg.GCInfo{BytesFreed: 4096, BlocksKept: 12}, nil
 }
 
+func (f *fakeBackend) Delete(ctx context.Context, midStr string) (serverpkg.DeleteResult, error) {
+	return serverpkg.DeleteResult{BlocksDeleted: 1, BytesFreed: 4096}, nil
+}
+
+
 func (f *fakeBackend) AnchorStatus() serverpkg.AnchorInfo {
 	return f.anchor
 }

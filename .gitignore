@@ -59,4 +59,11 @@ skills-lock.json
 .agents/skills/
 .opencode/
 
+# Roadmap docs
+info.txt
+
+# Local dev / MCP configs
+.mcp.json
+test-react-app/
+
 

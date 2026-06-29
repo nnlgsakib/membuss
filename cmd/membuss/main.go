@@ -25,6 +25,7 @@ package main
 import (
 	"context"
 	cryptoTLS "crypto/tls"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -42,9 +43,10 @@ import (
 
 	"github.com/nnlgsakib/membuss/api"
 	explorerPkg "github.com/nnlgsakib/membuss/gateway/explorer"
-	memgate "github.com/nnlgsakib/membuss/gateway/memgate"
+	memgate "github.com/nnlgsakib/membuss/gateway/memgate_v2"
 
 	badgerds "github.com/ipfs/go-ds-badger4"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 
@@ -192,6 +194,7 @@ func main() {
 		if pi.ID == "" {
 			return
 		}
+		logger.Info("mDNS peer discovered", "peer_id", pi.ID.String(), "addrs", pi.Addrs)
 		dhtBootstrapMu.Lock()
 		defer dhtBootstrapMu.Unlock()
 		if _, ok := dhtSeen[pi.ID]; ok {
@@ -226,7 +229,7 @@ func main() {
 		DataDir:            cfg.DataDir,
 		UserAgent:          "membuss/" + *build,
 		StaticRelays:       bootstrapPeers,
-		MDNS:               os.Getenv("MEMBUSS_MDNS") == "true",
+		MDNS:               cfg.EnableMDNS || os.Getenv("MEMBUSS_MDNS") == "true",
 		OnPeerFound:        addToBootstrap,
 		// --- Phase 11: NAT traversal ---
 		RelayService:         cfg.RelayService,
@@ -240,7 +243,6 @@ func main() {
 		logger.Error("host", "err", err.Error())
 		os.Exit(1)
 	}
-	defer h.Close()
 	fmt.Fprintf(os.Stdout, "  peer_id:        %s\n", h.ID())
 	fmt.Fprintf(os.Stdout, "  listen_addrs:   %v\n", h.Addrs())
 	// Phase 11: wait for AutoNAT to resolve reachability.
@@ -302,6 +304,7 @@ func main() {
 		}
 	}
 	defer mdht.Close()
+	defer h.Close()
 
 	// 4) PEX.
 	px, err := pex.New(pex.Config{Host: h, PersistPath: filepath.Join(cfg.DataDir, "pex.db")})
@@ -465,7 +468,7 @@ func main() {
 	if cfg.EnableGeolocation && geoDB != "" {
 		geo = explorerPkg.NewGeoResolver(geoDB)
 	}
-	gateSrv, err := startGateway(cfg.GatewayAddr, newMemgateAdapter(backend), newExplorerAdapter(backend, cfg.AnchorMode, kr, memnsRes), geo, cfg.GatewayRateLimitPerMin, cfg.GatewayTLS, memnsRes, cfg.DataDir)
+	gateSrv, err := startGateway(cfg.GatewayAddr, newMemgateAdapter(backend), newExplorerAdapter(backend, cfg.AnchorMode, kr, memnsRes), geo, cfg.GatewayRateLimitPerMin, cfg.GatewayTLS, memnsRes, cfg.DataDir, cfg.LogLevel)
 	if err != nil {
 		logger.Error("gateway", "err", err.Error())
 		os.Exit(1)
@@ -473,12 +476,96 @@ func main() {
 	fmt.Fprintf(os.Stdout, "  gateway_addr:   %s\n", gateSrv.Addr())
 
 	// 10) Node API: local control plane over HTTP/JSON.
-	apiSrv, err := startNodeAPI(cfg.APIAddr, newAPIAdapter(backend), mtrx, cfg.APIKey, cfg.APITLS, kr, memnsRes, cfg.DataDir)
+	apiSrv, err := startNodeAPI(cfg.APIAddr, newAPIAdapter(backend), mtrx, cfg.APIKey, cfg.APITLS, kr, memnsRes, cfg.DataDir, cfg.LogLevel)
 	if err != nil {
 		logger.Error("api", "err", err.Error())
 		os.Exit(1)
 	}
 	fmt.Fprintf(os.Stdout, "  api_addr:       %s\n", apiSrv.Addr())
+
+	// Local discovery loop: write our own peer.info, and periodically scan siblings to auto-connect.
+	var peerInfoPath string
+	if cfg.DataDir != "" && !*inMemory {
+		peerInfoPath = filepath.Join(cfg.DataDir, "peer.info")
+		pinfo := struct {
+			PeerID string   `json:"peer_id"`
+			Addrs  []string `json:"addrs"`
+		}{
+			PeerID: h.ID().String(),
+		}
+		for _, a := range h.Addrs() {
+			pinfo.Addrs = append(pinfo.Addrs, a.String())
+		}
+		if data, err := json.Marshal(pinfo); err == nil {
+			_ = os.WriteFile(peerInfoPath, data, 0644)
+		}
+		defer func() {
+			_ = os.Remove(peerInfoPath)
+		}()
+
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					parent := filepath.Dir(cfg.DataDir)
+					entries, err := os.ReadDir(parent)
+					if err != nil {
+						continue
+					}
+					for _, entry := range entries {
+						if !entry.IsDir() {
+							continue
+						}
+						siblingPath := filepath.Join(parent, entry.Name())
+						if filepath.Clean(siblingPath) == filepath.Clean(cfg.DataDir) {
+							continue
+						}
+						infoPath := filepath.Join(siblingPath, "peer.info")
+						data, err := os.ReadFile(infoPath)
+						if err != nil {
+							continue
+						}
+						var siblingInfo struct {
+							PeerID string   `json:"peer_id"`
+							Addrs  []string `json:"addrs"`
+						}
+						if err := json.Unmarshal(data, &siblingInfo); err != nil {
+							continue
+						}
+						pid, err := peer.Decode(siblingInfo.PeerID)
+						if err != nil {
+							continue
+						}
+						var addrs []multiaddr.Multiaddr
+						for _, aStr := range siblingInfo.Addrs {
+							if ma, err := multiaddr.NewMultiaddr(aStr); err == nil {
+								addrs = append(addrs, ma)
+							}
+						}
+						if len(addrs) > 0 {
+							ai := peer.AddrInfo{
+								ID:    pid,
+								Addrs: addrs,
+							}
+							if h.Host.Network().Connectedness(pid) != network.Connected {
+								go func(info peer.AddrInfo) {
+									dialCtx, dialCancel := context.WithTimeout(ctx, 10*time.Second)
+									defer dialCancel()
+									if err := h.Host.Connect(dialCtx, info); err == nil {
+										logger.Info("connected to sibling local peer via peer.info discovery", "peer_id", info.ID.String())
+									}
+								}(ai)
+							}
+						}
+					}
+				}
+			}
+		}()
+	}
 
 	// Graceful shutdown: wait for SIGINT/SIGTERM, then
 	// drain in the order: HTTP servers (gateway, api),
@@ -488,6 +575,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigCh
 	logger.Info("shutdown requested", "signal", sig.String())
+	cancel() // Stop all background routines using the main context
 
 	shutdownCtx, scancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer scancel()
@@ -498,7 +586,23 @@ func main() {
 	if err := apiSrv.ShutdownCtx(shutdownCtx); err != nil {
 		logger.Warn("api shutdown", "err", err.Error())
 	}
-	grpcSrv.GracefulStop()
+
+	// Stop gRPC server with timeout. GracefulStop blocks until all connections
+	// are closed, which can hang indefinitely if a client keeps a stream open.
+	grpcStopped := make(chan struct{})
+	go func() {
+		grpcSrv.GracefulStop()
+		close(grpcStopped)
+	}()
+
+	select {
+	case <-grpcStopped:
+		logger.Info("grpc shutdown complete")
+	case <-shutdownCtx.Done():
+		logger.Warn("grpc graceful shutdown timed out; force stopping")
+		grpcSrv.Stop()
+	}
+
 	if err := mx.StopWait(shutdownCtx); err != nil {
 		logger.Warn("memex stop", "err", err.Error())
 	}
@@ -542,7 +646,60 @@ func openStore(cfg *config.Config, inMemory bool) (store.Store, error) {
 	if inMemory {
 		return store.NewMemStore(store.Options{InMemory: true, Bloom: bloom})
 	}
-	return store.NewMemStore(store.Options{Path: cfg.DataDir, Bloom: bloom})
+
+	// Migrate any legacy BadgerDB files from dataDir root to dataDir/datastore
+	if err := migrateBadgerFiles(cfg.DataDir); err != nil {
+		return nil, fmt.Errorf("store migration: %w", err)
+	}
+
+	return store.NewMemStore(store.Options{Path: filepath.Join(cfg.DataDir, "datastore"), Bloom: bloom})
+}
+
+// migrateBadgerFiles moves BadgerDB files from the root of dataDir to the
+// dataDir/datastore subdirectory to keep the root directory clean.
+func migrateBadgerFiles(dataDir string) error {
+	datastoreDir := filepath.Join(dataDir, "datastore")
+	if err := os.MkdirAll(datastoreDir, 0755); err != nil {
+		return err
+	}
+
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return err
+	}
+
+	badgerNames := map[string]bool{
+		"MANIFEST":    true,
+		"KEYREGISTRY": true,
+		"DISCARD":     true,
+		"LOCK":        true,
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		shouldMove := false
+
+		if badgerNames[name] {
+			shouldMove = true
+		} else {
+			ext := filepath.Ext(name)
+			if ext == ".sst" || ext == ".vlog" {
+				shouldMove = true
+			}
+		}
+
+		if shouldMove {
+			oldPath := filepath.Join(dataDir, name)
+			newPath := filepath.Join(datastoreDir, name)
+			if err := os.Rename(oldPath, newPath); err != nil {
+				return fmt.Errorf("migrate badger file %s: %w", name, err)
+			}
+		}
+	}
+	return nil
 }
 
 // parsePeers converts a list of "peerID+multiaddr" strings
@@ -616,18 +773,20 @@ func newServerGRPC() *serverGRPC {
 }
 
 func (s *serverGRPC) GracefulStop() { s.gsrv.GracefulStop() }
+func (s *serverGRPC) Stop()         { s.gsrv.Stop() }
 
 // startGateway brings up the public Mem-Gate HTTP server.
 // rateLimitPerMin is the per-IP request budget enforced on
 // every public request. tls enables HTTPS when its
 // CertFile/KeyFile are set.
-func startGateway(addr string, b memgate.Backend, exp *explorerAdapter, geo *explorerPkg.GeoResolver, rateLimitPerMin int, tlsCfg config.TLSConfig, memnsRes *memns.Resolver, dataDir string) (*httpServer, error) {
+func startGateway(addr string, b memgate.Backend, exp *explorerAdapter, geo *explorerPkg.GeoResolver, rateLimitPerMin int, tlsCfg config.TLSConfig, memnsRes *memns.Resolver, dataDir string, logLevel string) (*httpServer, error) {
 	mg, err := memgate.New(memgate.Config{
 		Backend:         b,
 		MaxCacheBytes:   64 << 20, // 64 MiB LRU
 		ExplorerHandler: buildExplorer(exp, geo),
 		RateLimitPerMin: rateLimitPerMin,
 		MemNSResolver:   memnsRes,
+		LogLevel:        logLevel,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("memgate: %w", err)
@@ -638,7 +797,7 @@ func startGateway(addr string, b memgate.Backend, exp *explorerAdapter, geo *exp
 // startNodeAPI brings up the local Node control API. mtrx
 // exposes Prometheus at /metrics; apiKey enables X-Membuss-Key
 // auth on every /api/v1 endpoint; tls enables HTTPS.
-func startNodeAPI(addr string, b api.Backend, mtrx *metrics.Metrics, apiKey string, tlsCfg config.TLSConfig, keyring *keyring.KeyRing, memnsRes *memns.Resolver, dataDir string) (*httpServer, error) {
+func startNodeAPI(addr string, b api.Backend, mtrx *metrics.Metrics, apiKey string, tlsCfg config.TLSConfig, keyring *keyring.KeyRing, memnsRes *memns.Resolver, dataDir string, logLevel string) (*httpServer, error) {
 	nodeAPI, err := api.New(api.Config{
 		Backend:        b,
 		MaxUploadBytes: 1 << 30, // 1 GiB
@@ -646,6 +805,7 @@ func startNodeAPI(addr string, b api.Backend, mtrx *metrics.Metrics, apiKey stri
 		Metrics:        mtrx,
 		KeyRing:        keyring,
 		MemNSResolver:  memnsRes,
+		LogLevel:       logLevel,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("nodeapi: %w", err)

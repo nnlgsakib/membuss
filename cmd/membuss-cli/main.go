@@ -78,6 +78,7 @@ Run "membuss-cli init" first to set up the data directory.`,
 		newGetCmd(),
 		newSealCmd(),
 		newUnsealCmd(),
+		newDeleteCmd(),
 		newStatCmd(),
 		newLsCmd(),
 		newPeersCmd(),
@@ -214,8 +215,35 @@ func newGetCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return withConn(func(mc membusspb.MembussNodeClient, _ membusspb.NodeClient) error {
-				ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
+				ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Minute)
 				defer cancel()
+
+				// Probe if it is a directory via HTTP ls API
+				lsURL := httpBase() + "/api/v1/ls/" + args[0]
+				var isDir bool
+				var dirName string
+				if resp, err := http.Get(lsURL); err == nil {
+					defer resp.Body.Close()
+					if resp.StatusCode == 200 {
+						isDir = true
+						if statResp, err := mc.Stat(ctx, &membusspb.StatRequest{Mid: args[0]}); err == nil {
+							dirName = statResp.Name
+						}
+					}
+				}
+
+				if isDir {
+					targetDir := outPath
+					if targetDir == "" || targetDir == "-" {
+						targetDir = dirName
+						if targetDir == "" {
+							targetDir = args[0]
+						}
+					}
+					fmt.Fprintf(cmd.ErrOrStderr(), "Downloading directory structure to %s...\n", targetDir)
+					return downloadDirRecursive(ctx, mc, args[0], targetDir, cmd.ErrOrStderr())
+				}
+
 				stream, err := mc.Get(ctx, &membusspb.GetRequest{
 					Mid:    args[0],
 					Offset: offset,
@@ -292,6 +320,81 @@ func newGetCmd() *cobra.Command {
 	return c
 }
 
+func downloadDirRecursive(ctx context.Context, mc membusspb.MembussNodeClient, midStr, localPath string, errWriter io.Writer) error {
+	if err := os.MkdirAll(localPath, 0o755); err != nil {
+		return err
+	}
+
+	resp, err := http.Get(httpBase() + "/api/v1/ls/" + midStr)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("ls %s: %s", midStr, string(body))
+	}
+
+	var env struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Entries []struct {
+				Name string `json:"name"`
+				MID  string `json:"mid"`
+				Type string `json:"type"`
+				Size uint64 `json:"size"`
+			} `json:"entries"`
+		} `json:"data"`
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		return err
+	}
+	if !env.OK {
+		return fmt.Errorf("ls %s: %s", midStr, env.Error)
+	}
+
+	for _, e := range env.Data.Entries {
+		childPath := filepath.Join(localPath, e.Name)
+		if e.Type == "dir" {
+			if err := downloadDirRecursive(ctx, mc, e.MID, childPath, errWriter); err != nil {
+				return err
+			}
+		} else {
+			fmt.Fprintf(errWriter, "Downloading %s -> %s\n", e.Name, childPath)
+			if err := downloadFile(ctx, mc, e.MID, childPath); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func downloadFile(ctx context.Context, mc membusspb.MembussNodeClient, midStr, localPath string) error {
+	stream, err := mc.Get(ctx, &membusspb.GetRequest{Mid: midStr})
+	if err != nil {
+		return err
+	}
+	f, err := os.Create(localPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	for {
+		frame, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := f.Write(frame.Data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // --- seal / unseal ---
 
 func newSealCmd() *cobra.Command {
@@ -339,6 +442,29 @@ func newUnsealCmd() *cobra.Command {
 		},
 	}
 }
+
+func newDeleteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "delete <MID>",
+		Short: "Delete a MID and all its reachable blocks recursively from the local node",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return withConn(func(mc membusspb.MembussNodeClient, _ membusspb.NodeClient) error {
+				ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+				defer cancel()
+				resp, err := mc.Delete(ctx, &membusspb.DeleteRequest{Mid: args[0]})
+				if err != nil {
+					return err
+				}
+				tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+				fmt.Fprintf(tw, "deleted_blocks\t%d\n", resp.BlocksDeleted)
+				fmt.Fprintf(tw, "bytes_freed\t%d\n", resp.BytesFreed)
+				return tw.Flush()
+			})
+		},
+	}
+}
+
 
 // --- stat ---
 

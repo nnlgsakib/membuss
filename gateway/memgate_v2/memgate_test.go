@@ -1,7 +1,4 @@
-// Tests for the Mem-Gate HTTP gateway. The tests use a
-// memBackend (an in-memory Backend) and httptest to drive
-// the chi router.
-package memgate
+package memgate_v2
 
 import (
 	"bytes"
@@ -21,14 +18,11 @@ import (
 	"github.com/nnlgsakib/membuss/core/store"
 )
 
-// memBackend is an in-memory Backend. It serves a single
-// (mid, content) pair; Resolve/RawBlock/DAGNodeJSON/Stat all
-// return that content.
 type memBackend struct {
-	mu      sync.Mutex
-	content map[string][]byte
-	sealed  map[string]bool
-	stat    map[string]ContentInfo
+	mu       sync.Mutex
+	content  map[string][]byte
+	sealed   map[string]bool
+	stat     map[string]ContentInfo
 	failPing bool
 }
 
@@ -87,8 +81,8 @@ func (b *memBackend) DAGNodeJSON(ctx context.Context, m mid.MID) ([]byte, error)
 		return nil, errNotFound
 	}
 	out := map[string]any{
-		"mid":  m.String(),
-		"size": len(data),
+		"mid":   m.String(),
+		"size":  len(data),
 		"links": []string{},
 	}
 	return json.Marshal(out)
@@ -111,11 +105,6 @@ func (b *memBackend) Ping(ctx context.Context) error {
 	return nil
 }
 
-// --- Phase 17: MemFS stubs on memBackend ---
-
-// MemFSInfo is unimplemented on the test backend: it always
-// returns notFound so the existing handler tests do not
-// accidentally exercise the MemFS path.
 func (b *memBackend) MemFSInfo(ctx context.Context, m mid.MID) (MemFSInfo, error) {
 	return MemFSInfo{}, errNotFound
 }
@@ -151,9 +140,6 @@ func newTestGate(t *testing.T, b Backend) *MemGate {
 	return mg
 }
 
-// putRandom ingests data via the memBackend and returns the
-// resulting MID (computed in-test rather than going through
-// the full MID pipeline).
 func putRandom(b *memBackend, data []byte) mid.MID {
 	m := mid.FromBytes(data)
 	b.put(m, data, http.DetectContentType(data))
@@ -413,12 +399,10 @@ func TestLRU_BasicGetPut(t *testing.T) {
 	if data, ok := l.get("a"); !ok || string(data) != "hello" {
 		t.Errorf("get a: %q ok=%v", data, ok)
 	}
-	// touch updates recency
 	l.put("b", []byte("world"))
 	if _, ok := l.get("a"); !ok {
 		t.Errorf("a evicted unexpectedly")
 	}
-	// Force eviction by exceeding cap. We need total > 100.
 	l.put("c", make([]byte, 200))
 	if _, ok := l.get("a"); ok {
 		t.Errorf("a should be evicted")
@@ -489,7 +473,6 @@ func TestDetectContentType_EmptyData(t *testing.T) {
 }
 
 func TestDetectContentType_HTMLByExtension(t *testing.T) {
-	// Sanity: filepath.Ext strips the leading dot, mime picks it.
 	_ = mime.TypeByExtension
 	ct := DetectContentType("mem1.html", []byte("x"), "")
 	if !strings.HasPrefix(ct, "text/html") {
@@ -497,17 +480,9 @@ func TestDetectContentType_HTMLByExtension(t *testing.T) {
 	}
 }
 
-// TestDownloadDisposition verifies the Phase 19
-// Content-Disposition behavior:
-//   - Default: inline + filename so the browser can
-//     render text/html and still fall back to a sensible
-//     filename when the user chooses "Save As".
-//   - ?download=1: attachment + filename.
 func TestDownloadDisposition(t *testing.T) {
 	be := newMemBackend()
 	m := mid.FromBytes([]byte("hello world"))
-	// Phase 19: the uploader captured a filename + mime type.
-	// The default Content-Disposition should surface them.
 	be.putWithMeta(m, []byte("hello world"), "text/plain", "hello world.txt", "text/plain; charset=utf-8")
 	mg, err := New(Config{Backend: be, MaxCacheBytes: 1 << 20})
 	if err != nil {
@@ -517,9 +492,6 @@ func TestDownloadDisposition(t *testing.T) {
 	defer srv.Close()
 	url := srv.URL + "/mem/" + m.String()
 
-	// 1) Default: inline with filename set to the original
-	// name. Browsers render the body and still surface the
-	// name in "Save As" / downloads UI.
 	resp, err := http.Get(url)
 	if err != nil {
 		t.Fatal(err)
@@ -533,7 +505,6 @@ func TestDownloadDisposition(t *testing.T) {
 		t.Fatalf("default Content-Disposition should include uploader filename: %q", disp)
 	}
 
-	// 2) ?download=1: header set to attachment, default filename.
 	resp2, err := http.Get(url + "?download=1")
 	if err != nil {
 		t.Fatal(err)
@@ -543,13 +514,10 @@ func TestDownloadDisposition(t *testing.T) {
 	if !strings.HasPrefix(disp2, "attachment;") {
 		t.Fatalf("download=1 Content-Disposition: got %q, want attachment prefix", disp2)
 	}
-	// Phase 19: when the uploader supplied a name, it is the
-	// preferred filename (over the MID-derived default).
 	if !strings.Contains(disp2, "hello world.txt") {
 		t.Fatalf("download=1 Content-Disposition should include uploader filename: %q", disp2)
 	}
 
-	// 3) ?download=1&filename=foo.txt: header honours the override.
 	custom := "myreport.txt"
 	resp3, err := http.Get(url + "?download=1&filename=" + custom)
 	if err != nil {
@@ -562,12 +530,6 @@ func TestDownloadDisposition(t *testing.T) {
 	}
 }
 
-// --- Phase 17: MemFS integration tests ---
-
-// memfsBackend is a memBackend extended with MemFS support
-// backed by an in-memory core/memfs.Builder. It lets us
-// exercise the full /mem/{mid}/... HTTP surface against a
-// real (if synthetic) tree.
 type memfsBackend struct {
 	*memBackend
 	resolver *memfs.Resolver
@@ -702,7 +664,6 @@ func (b *memfsBackend) MemFSPathList(ctx context.Context, m mid.MID, subPath str
 	return out, nil
 }
 
-// memFSTypeString mirrors the production adapter's helper.
 func memFSTypeString(t memfs.MemFSType) string {
 	switch t {
 	case memfs.TypeFile:
@@ -783,9 +744,9 @@ func TestMemFS_PathGet(t *testing.T) {
 	defer bs.Close()
 	b := memfs.NewBuilder(bs)
 	root, err := b.AddDirectoryFromFS(fstest.MapFS{
-		"hello.txt":          &fstest.MapFile{Data: []byte("Hello, world!")},
-		"assets/style.css":   &fstest.MapFile{Data: []byte("body { color: blue; }")},
-		"assets/index.js":    &fstest.MapFile{Data: []byte("console.log(1)")},
+		"hello.txt":        &fstest.MapFile{Data: []byte("Hello, world!")},
+		"assets/style.css": &fstest.MapFile{Data: []byte("body { color: blue; }")},
+		"assets/index.js":  &fstest.MapFile{Data: []byte("console.log(1)")},
 	}, ".")
 	if err != nil {
 		t.Fatalf("add dir: %v", err)
@@ -801,7 +762,7 @@ func TestMemFS_PathGet(t *testing.T) {
 	}{
 		{"/hello.txt", "Hello, world!", "text/plain; charset=utf-8"},
 		{"/assets/style.css", "body { color: blue; }", "text/css; charset=utf-8"},
-		{"/assets/index.js", "console.log(1)", "application/javascript; charset=utf-8"},
+		{"/assets/index.js", "console.log(1)", "text/javascript; charset=utf-8"},
 	}
 
 	for _, tc := range cases {
@@ -831,8 +792,8 @@ func TestMemFS_SubdirList(t *testing.T) {
 	defer bs.Close()
 	b := memfs.NewBuilder(bs)
 	root, err := b.AddDirectoryFromFS(fstest.MapFS{
-		"assets/style.css":   &fstest.MapFile{Data: []byte("body { color: blue; }")},
-		"assets/index.js":    &fstest.MapFile{Data: []byte("console.log(1)")},
+		"assets/style.css": &fstest.MapFile{Data: []byte("body { color: blue; }")},
+		"assets/index.js":  &fstest.MapFile{Data: []byte("console.log(1)")},
 	}, ".")
 	if err != nil {
 		t.Fatalf("add dir: %v", err)
@@ -841,10 +802,9 @@ func TestMemFS_SubdirList(t *testing.T) {
 	srv := httptest.NewServer(newTestGate(t, be).Router())
 	defer srv.Close()
 
-	// 1. Directory subpath without trailing slash redirect test
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse // don't follow redirects
+			return http.ErrUseLastResponse
 		},
 	}
 	resp, err := client.Get(srv.URL + "/mem/" + root.MID.String() + "/assets")
@@ -860,7 +820,6 @@ func TestMemFS_SubdirList(t *testing.T) {
 		t.Errorf("expected redirect location ending with /assets/, got %q", loc)
 	}
 
-	// 2. Directory subpath with trailing slash listing test
 	resp2, err := http.Get(srv.URL + "/mem/" + root.MID.String() + "/assets/")
 	if err != nil {
 		t.Fatal(err)
@@ -875,7 +834,6 @@ func TestMemFS_SubdirList(t *testing.T) {
 		t.Errorf("expected index.js and style.css in directory list, got body: %q", bodyStr)
 	}
 
-	// Check that relative hrefs are correct
 	if !strings.Contains(bodyStr, `href="style.css"`) {
 		t.Errorf("expected relative link href=\"style.css\", got: %q", bodyStr)
 	}
@@ -897,7 +855,6 @@ func TestHttpCachingAndMemoryCache(t *testing.T) {
 		resolver:   memfs.NewResolver(bs),
 		bs:         bs,
 	}
-	// Ingest root directory bytes and metadata into memBackend so Resolve works
 	rawDir, _ := bs.Get(root.MID)
 	be.memBackend.put(root.MID, rawDir, "application/octet-stream")
 
@@ -907,7 +864,6 @@ func TestHttpCachingAndMemoryCache(t *testing.T) {
 
 	client := &http.Client{}
 
-	// Test 1: Resolve MID Cache & ETag Validation
 	req, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String(), nil)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -922,7 +878,6 @@ func TestHttpCachingAndMemoryCache(t *testing.T) {
 		t.Fatal("expected ETag header")
 	}
 
-	// Conditional request should return 304 Not Modified
 	reqCond, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String(), nil)
 	reqCond.Header.Set("If-None-Match", etag)
 	respCond, err := client.Do(reqCond)
@@ -934,7 +889,6 @@ func TestHttpCachingAndMemoryCache(t *testing.T) {
 		t.Fatalf("expected 304, got %d", respCond.StatusCode)
 	}
 
-	// Test 2: DAG Node JSON Cache & ETag Validation
 	reqJSON, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String()+"?format=dag-json", nil)
 	respJSON, err := client.Do(reqJSON)
 	if err != nil {
@@ -954,7 +908,6 @@ func TestHttpCachingAndMemoryCache(t *testing.T) {
 		t.Fatalf("expected 304 for conditional DAG-JSON, got %d", respCondJSON.StatusCode)
 	}
 
-	// Test 3: Raw Block Cache & ETag Validation
 	reqRaw, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String()+"?format=raw", nil)
 	respRaw, err := client.Do(reqRaw)
 	if err != nil {
@@ -974,7 +927,6 @@ func TestHttpCachingAndMemoryCache(t *testing.T) {
 		t.Fatalf("expected 304 for conditional raw block, got %d", respCondRaw.StatusCode)
 	}
 
-	// Test 4: MemFS Path Cache & ETag Validation
 	reqPath, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String()+"/hello.txt", nil)
 	respPath, err := client.Do(reqPath)
 	if err != nil {
@@ -1142,5 +1094,73 @@ func TestStreamedRangeRequests_MemFS(t *testing.T) {
 	gotBytes, _ := io.ReadAll(resp.Body)
 	if string(gotBytes) != "klmnop" {
 		t.Errorf("expected body 'klmnop', got %q", string(gotBytes))
+	}
+}
+
+func TestSubdomainResolution(t *testing.T) {
+	b := newMemBackend()
+	body := []byte("hello subdomain!")
+	m := putRandom(b, body)
+
+	mg := newTestGate(t, b)
+	srv := httptest.NewServer(mg.Handler())
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/", nil)
+	req.Host = m.String() + ".localhost"
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(got, body) {
+		t.Errorf("body mismatch: got %q, want %q", string(got), string(body))
+	}
+}
+
+func TestRefererResolution(t *testing.T) {
+	bs, _ := store.NewMemStore(store.Options{InMemory: true})
+	defer bs.Close()
+	builder := memfs.NewBuilder(bs)
+	root, err := builder.AddDirectoryFromFS(fstest.MapFS{
+		"assets/index.js": &fstest.MapFile{Data: []byte("console.log(1)")},
+	}, ".")
+	if err != nil {
+		t.Fatalf("add dir: %v", err)
+	}
+
+	be := &memfsBackend{
+		memBackend: newMemBackend(),
+		resolver:   memfs.NewResolver(bs),
+		bs:         bs,
+	}
+
+	mg := newTestGate(t, be)
+	srv := httptest.NewServer(mg.Handler())
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/assets/index.js", nil)
+	req.Header.Set("Referer", srv.URL+"/mem/"+root.MID.String()+"/")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+
+	got, _ := io.ReadAll(resp.Body)
+	if string(got) != "console.log(1)" {
+		t.Errorf("body mismatch: got %q, want 'console.log(1)'", string(got))
 	}
 }

@@ -69,3 +69,22 @@ func TestNewDiscard(t *testing.T) {
 	}
 	log.Info("nothing") // must not panic
 }
+
+func TestNew_FiltersMdnsWarning(t *testing.T) {
+	var buf bytes.Buffer
+	log := New(&buf, "info")
+	
+	// This log message should be dropped by the filterHandler
+	log.Warn("[WARN] mdns: Failed to set multicast interface: setsockopt: An invalid argument was supplied.")
+	
+	// This normal log message should not be dropped
+	log.Info("normal log message")
+
+	out := buf.String()
+	if strings.Contains(out, "Failed to set multicast interface") {
+		t.Errorf("mDNS setsockopt warning should be filtered out: %q", out)
+	}
+	if !strings.Contains(out, "normal log message") {
+		t.Errorf("normal log message should not be filtered out: %q", out)
+	}
+}

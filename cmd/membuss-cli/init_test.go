@@ -5,9 +5,11 @@
 package main
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -111,12 +113,23 @@ func TestRunInit_ForceRegeneratesIdentity(t *testing.T) {
 		t.Fatalf("first runInit: %v", err)
 	}
 
+	// Write a dummy file to verify force cleanup
+	dummyFile := filepath.Join(datadir, "dummy.txt")
+	if err := os.WriteFile(dummyFile, []byte("dummy"), 0600); err != nil {
+		t.Fatalf("failed to write dummy file: %v", err)
+	}
+
 	second, err := runInit(datadir, true)
 	if err != nil {
 		t.Fatalf("second runInit --force: %v", err)
 	}
 	if first.PeerID == second.PeerID {
 		t.Fatalf("expected different PeerID after --force, both = %s", first.PeerID)
+	}
+
+	// Verify the dummy file was deleted by --force
+	if _, err := os.Stat(dummyFile); !os.IsNotExist(err) {
+		t.Errorf("expected dummy file to be deleted by --force, but stat got: %v", err)
 	}
 
 	// The new key must be loadable and round-trip through
@@ -182,6 +195,122 @@ func TestPrintInitSummary_Output(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary missing %q\n---\n%s\n---", want, out)
+		}
+	}
+}
+
+func TestRunInit_PortAutoAdjustment(t *testing.T) {
+	// Bind listeners on default ports matching their config bind IPs
+	binds := []struct {
+		host string
+		port int
+	}{
+		{"0.0.0.0", 4001},
+		{"0.0.0.0", 4002},
+		{"127.0.0.1", 5001},
+		{"127.0.0.1", 8080},
+		{"127.0.0.1", 50051},
+	}
+	listeners := make([]net.Listener, 0, len(binds))
+	for _, b := range binds {
+		l, err := net.Listen("tcp", net.JoinHostPort(b.host, strconv.Itoa(b.port)))
+		if err == nil {
+			listeners = append(listeners, l)
+		} else {
+			t.Logf("failed to bind mock listener to %s:%d: %v", b.host, b.port, err)
+		}
+	}
+	defer func() {
+		for _, l := range listeners {
+			_ = l.Close()
+		}
+	}()
+
+	datadir := filepath.Join(t.TempDir(), "membuss")
+	res, err := runInit(datadir, false)
+	if err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	cfg, err := config.LoadConfig(datadir)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	// Verify that ports were auto-adjusted and are different from default blocked ports
+	_, apiPortStr, _ := net.SplitHostPort(cfg.APIAddr)
+	if apiPortStr == "5001" {
+		t.Error("expected API port to be adjusted from 5001, but it remained 5001")
+	}
+
+	_, gatewayPortStr, _ := net.SplitHostPort(cfg.GatewayAddr)
+	if gatewayPortStr == "8080" {
+		t.Error("expected Gateway port to be adjusted from 8080, but it remained 8080")
+	}
+
+	_, grpcPortStr, _ := net.SplitHostPort(cfg.GRPCAddr)
+	if grpcPortStr == "50051" {
+		t.Error("expected GRPC port to be adjusted from 50051, but it remained 50051")
+	}
+
+	// Also verify ListenAddrs
+	for _, ma := range cfg.ListenAddrs {
+		if strings.Contains(ma, "/tcp/4001") {
+			t.Error("expected listen TCP port to be adjusted from 4001")
+		}
+		if strings.Contains(ma, "/tcp/4002") {
+			t.Error("expected listen WS TCP port to be adjusted from 4002")
+		}
+	}
+}
+
+func TestRunInit_PortAvoidanceFromSiblingConfig(t *testing.T) {
+	parentDir := t.TempDir()
+
+	// Initialize first sibling node
+	node1 := filepath.Join(parentDir, "node1")
+	res1, err := runInit(node1, false)
+	if err != nil {
+		t.Fatalf("runInit node1: %v", err)
+	}
+	if res1 == nil {
+		t.Fatal("expected non-nil result for node1")
+	}
+
+	cfg1, err := config.LoadConfig(node1)
+	if err != nil {
+		t.Fatalf("LoadConfig node1: %v", err)
+	}
+
+	// Initialize second sibling node
+	node2 := filepath.Join(parentDir, "node2")
+	res2, err := runInit(node2, false)
+	if err != nil {
+		t.Fatalf("runInit node2: %v", err)
+	}
+	if res2 == nil {
+		t.Fatal("expected non-nil result for node2")
+	}
+
+	cfg2, err := config.LoadConfig(node2)
+	if err != nil {
+		t.Fatalf("LoadConfig node2: %v", err)
+	}
+
+	// Extract ports for both nodes
+	ports1 := make(map[int]bool)
+	collectPortsFromConfig(cfg1, ports1)
+
+	ports2 := make(map[int]bool)
+	collectPortsFromConfig(cfg2, ports2)
+
+	// Verify there is absolutely no overlap between ports1 and ports2
+	for p := range ports2 {
+		if ports1[p] {
+			t.Errorf("found overlapping port %d in both nodes", p)
 		}
 	}
 }

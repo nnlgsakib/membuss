@@ -268,6 +268,11 @@ func (b *memBackend) Rename(ctx context.Context, m mid.MID, name string) error {
 	return nil
 }
 
+func (b *memBackend) Delete(ctx context.Context, m mid.MID) (uint64, uint64, error) {
+	return 1, 1024, nil
+}
+
+
 // --- helpers ---
 
 func newTestServer(t *testing.T) (*httptest.Server, *memBackend) {
@@ -480,6 +485,20 @@ func TestSealUnseal(t *testing.T) {
 	}
 }
 
+func TestDelete(t *testing.T) {
+	srv, b := newTestServer(t)
+	m := mid.FromBytes([]byte("test"))
+	b.put(m, []byte("test"))
+	resp, _ := postForm(t, srv, "/mid/"+m.String()+"/delete", nil)
+	if resp.StatusCode != 303 {
+		t.Errorf("delete status: %d want 303", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "/explorer/" {
+		t.Errorf("delete redirect: %q want /explorer/", loc)
+	}
+}
+
+
 func TestPeers(t *testing.T) {
 	srv, _ := newTestServer(t)
 	resp, body := get(t, srv, "/peers")
@@ -600,6 +619,18 @@ func (b *memBackend) KeyringKeys(ctx context.Context) ([]KeyringKeyInfo, error) 
 	return nil, nil
 }
 
+func (b *memBackend) KeyringGenerate(ctx context.Context, name, keyType string) (KeyringKeyInfo, error) {
+	return KeyringKeyInfo{}, nil
+}
+
+func (b *memBackend) KeyringDelete(ctx context.Context, name string) error {
+	return nil
+}
+
+func (b *memBackend) MemNSPublish(ctx context.Context, keyName, value string, ttl uint32, message string) (MemNSRecordInfo, error) {
+	return MemNSRecordInfo{}, nil
+}
+
 func (b *memBackend) ResolveMemNSRecord(ctx context.Context, name string) (MemNSRecordInfo, error) {
 	return MemNSRecordInfo{}, fmt.Errorf("memns: test backend stub")
 }
@@ -682,3 +713,54 @@ func TestUploadFolder(t *testing.T) {
 		t.Errorf("expected redirect (303), got status: %d", resp.StatusCode)
 	}
 }
+
+func TestUploadFolder_SanitizedPaths(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+
+	// In browser sanitization, filenames are stripped of path component,
+	// and parallel "paths" are sent to preserve hierarchy.
+	files := []struct {
+		filename string
+		path     string
+		content  string
+	}{
+		{filename: "file1.txt", path: "myfolder/sub/file1.txt", content: "content1"},
+		{filename: "file2.txt", path: "myfolder/sub2/file2.txt", content: "content2"},
+	}
+
+	for _, f := range files {
+		fw, err := mw.CreateFormFile("files", f.filename)
+		if err != nil {
+			t.Fatalf("CreateFormFile: %v", err)
+		}
+		if _, err := fw.Write([]byte(f.content)); err != nil {
+			t.Fatalf("Write file: %v", err)
+		}
+	}
+	for _, f := range files {
+		if err := mw.WriteField("paths", f.path); err != nil {
+			t.Fatalf("WriteField paths: %v", err)
+		}
+	}
+	mw.Close()
+
+	req, err := http.NewRequest("POST", srv.URL+"/upload", &buf)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatalf("Do request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("expected redirect (303), got status: %d", resp.StatusCode)
+	}
+}
+

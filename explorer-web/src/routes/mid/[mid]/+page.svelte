@@ -2,6 +2,7 @@
 	import { onMount, onDestroy, untrack } from 'svelte';
 	import { page } from '$app/state';
 	import { base } from '$app/paths';
+	import { goto } from '$app/navigation';
 	import { apiFetch, formatBytes } from '$lib/api';
 	import Icon from '@iconify/svelte';
 	import DagNode from '$lib/components/DagNode.svelte';
@@ -44,6 +45,17 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let copiedMID = $state(false);
+
+	function getGatewayURL(mid: string, isDir: boolean): string {
+		if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
+			const portStr = window.location.port ? `:${window.location.port}` : '';
+			if (isDir) {
+				return `${window.location.protocol}//${mid}.localhost${portStr}/`;
+			}
+		}
+		const gateBase = base.replace('/explorer', '');
+		return `${gateBase}/mem/${mid}${isDir ? '/' : ''}`;
+	}
 
 	let renameValue = $state('');
 	let isRenaming = $state(false);
@@ -216,14 +228,18 @@
 		});
 	}
 
-	async function runAction(action: 'seal' | 'unseal') {
+	async function runAction(action: 'seal' | 'unseal' | 'delete') {
 		try {
 			loading = true;
 			const res = await fetch(`${base}/mid/${midVal}/${action}`, {
 				method: 'POST'
 			});
 			if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
-			fetchMIDData(midVal);
+			if (action === 'delete') {
+				goto(`${base}/`);
+			} else {
+				fetchMIDData(midVal);
+			}
 		} catch (err) {
 			alert(`Action failed: ${err instanceof Error ? err.message : err}`);
 			loading = false;
@@ -494,15 +510,15 @@
 
 						<div class="flex items-center gap-2 mt-4 pt-4 border-t border-slate-800/80">
 							{#if data.MemFSType === 'dir'}
-								<a href={`${base.replace('/explorer', '')}/mem/${midVal}/`} target="_blank" class="px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold text-xs transition-colors">
+								<a href={getGatewayURL(midVal, true)} target="_blank" class="px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold text-xs transition-colors">
 									Open Gateway Directory
 								</a>
 							{:else}
-								<a href={`${base.replace('/explorer', '')}/mem/${midVal}`} target="_blank" class="px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold text-xs transition-colors">
+								<a href={getGatewayURL(midVal, false)} target="_blank" class="px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold text-xs transition-colors">
 									View Payload File
 								</a>
 								<a
-									href={`${base.replace('/explorer', '')}/mem/${midVal}?download=1&filename=${encodeURIComponent(data.Name || (midVal + '.bin'))}`}
+									href={getGatewayURL(midVal, false) + `?download=1&filename=${encodeURIComponent(data.Name || (midVal + '.bin'))}`}
 									class="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-750 font-bold text-xs transition-colors"
 								>
 									Download
@@ -518,6 +534,9 @@
 									Seal (Pin)
 								</button>
 							{/if}
+							<button onclick={() => { if (confirm('Are you sure you want to delete this Content ID and all its blocks recursively from this node? This cannot be undone.')) runAction('delete'); }} class="px-4 py-2 rounded-lg bg-red-650 hover:bg-red-700 text-slate-50 border border-red-900/40 text-xs font-bold transition-colors active:scale-[0.98]">
+								Delete
+							</button>
 						</div>
 					</div>
 

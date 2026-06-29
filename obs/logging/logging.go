@@ -8,6 +8,7 @@
 package logging
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"strings"
@@ -38,7 +39,26 @@ func New(w io.Writer, levelStr string) *slog.Logger {
 		w = io.Discard
 	}
 	h := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: ParseLevel(levelStr)})
-	return slog.New(h).With("membuss", "daemon")
+	return slog.New(&filterHandler{Handler: h}).With("membuss", "daemon")
+}
+
+type filterHandler struct {
+	slog.Handler
+}
+
+func (h *filterHandler) Handle(ctx context.Context, r slog.Record) error {
+	if strings.Contains(r.Message, "Failed to set multicast interface") {
+		return nil
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func (h *filterHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &filterHandler{Handler: h.Handler.WithAttrs(attrs)}
+}
+
+func (h *filterHandler) WithGroup(name string) slog.Handler {
+	return &filterHandler{Handler: h.Handler.WithGroup(name)}
 }
 
 // NewDiscard returns a logger that drops every record. Useful in

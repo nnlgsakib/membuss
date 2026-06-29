@@ -1678,6 +1678,9 @@ type PeerInfo struct {
 	LastSeen        int64                  `protobuf:"varint,4,opt,name=last_seen,json=lastSeen,proto3" json:"last_seen,omitempty"`
 	Reachability    Reachability           `protobuf:"varint,5,opt,name=reachability,proto3,enum=membuss.v1.Reachability" json:"reachability,omitempty"`   // Phase 12
 	LastDialSuccess bool                   `protobuf:"varint,6,opt,name=last_dial_success,json=lastDialSuccess,proto3" json:"last_dial_success,omitempty"` // Phase 12
+	Signature       []byte                 `protobuf:"bytes,7,opt,name=signature,proto3" json:"signature,omitempty"`                                       // Phase 20
+	PubKey          []byte                 `protobuf:"bytes,8,opt,name=pub_key,json=pubKey,proto3" json:"pub_key,omitempty"`                               // Phase 20
+	Seq             int64                  `protobuf:"varint,9,opt,name=seq,proto3" json:"seq,omitempty"`                                                  // Phase 20
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -1752,6 +1755,27 @@ func (x *PeerInfo) GetLastDialSuccess() bool {
 		return x.LastDialSuccess
 	}
 	return false
+}
+
+func (x *PeerInfo) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
+	}
+	return nil
+}
+
+func (x *PeerInfo) GetPubKey() []byte {
+	if x != nil {
+		return x.PubKey
+	}
+	return nil
+}
+
+func (x *PeerInfo) GetSeq() int64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
 }
 
 // PEXMessage is the body of a /membuss/pex/1.0.0 gossip frame.
@@ -2372,6 +2396,102 @@ func (x *MemFSMeta) GetAttrs() map[string]string {
 	return nil
 }
 
+type DeleteRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Mid           string                 `protobuf:"bytes,1,opt,name=mid,proto3" json:"mid,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteRequest) Reset() {
+	*x = DeleteRequest{}
+	mi := &file_membuss_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteRequest) ProtoMessage() {}
+
+func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_membuss_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteRequest.ProtoReflect.Descriptor instead.
+func (*DeleteRequest) Descriptor() ([]byte, []int) {
+	return file_membuss_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *DeleteRequest) GetMid() string {
+	if x != nil {
+		return x.Mid
+	}
+	return ""
+}
+
+type DeleteResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	BlocksDeleted uint64                 `protobuf:"varint,1,opt,name=blocks_deleted,json=blocksDeleted,proto3" json:"blocks_deleted,omitempty"`
+	BytesFreed    uint64                 `protobuf:"varint,2,opt,name=bytes_freed,json=bytesFreed,proto3" json:"bytes_freed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteResponse) Reset() {
+	*x = DeleteResponse{}
+	mi := &file_membuss_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteResponse) ProtoMessage() {}
+
+func (x *DeleteResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_membuss_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteResponse.ProtoReflect.Descriptor instead.
+func (*DeleteResponse) Descriptor() ([]byte, []int) {
+	return file_membuss_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *DeleteResponse) GetBlocksDeleted() uint64 {
+	if x != nil {
+		return x.BlocksDeleted
+	}
+	return 0
+}
+
+func (x *DeleteResponse) GetBytesFreed() uint64 {
+	if x != nil {
+		return x.BytesFreed
+	}
+	return 0
+}
+
 var File_membuss_proto protoreflect.FileDescriptor
 
 const file_membuss_proto_rawDesc = "" +
@@ -2487,7 +2607,7 @@ const file_membuss_proto_rawDesc = "" +
 	"\rparity_shards\x18\x03 \x01(\rR\fparityShards\x12\x1d\n" +
 	"\n" +
 	"shard_mids\x18\x04 \x03(\tR\tshardMids\x12#\n" +
-	"\roriginal_size\x18\x05 \x01(\x04R\foriginalSize\"\xe1\x01\n" +
+	"\roriginal_size\x18\x05 \x01(\x04R\foriginalSize\"\xaa\x02\n" +
 	"\bPeerInfo\x12\x17\n" +
 	"\apeer_id\x18\x01 \x01(\tR\x06peerId\x12\x14\n" +
 	"\x05addrs\x18\x02 \x03(\tR\x05addrs\x12\x1f\n" +
@@ -2495,7 +2615,10 @@ const file_membuss_proto_rawDesc = "" +
 	"relayAddrs\x12\x1b\n" +
 	"\tlast_seen\x18\x04 \x01(\x03R\blastSeen\x12<\n" +
 	"\freachability\x18\x05 \x01(\x0e2\x18.membuss.v1.ReachabilityR\freachability\x12*\n" +
-	"\x11last_dial_success\x18\x06 \x01(\bR\x0flastDialSuccess\"8\n" +
+	"\x11last_dial_success\x18\x06 \x01(\bR\x0flastDialSuccess\x12\x1c\n" +
+	"\tsignature\x18\a \x01(\fR\tsignature\x12\x17\n" +
+	"\apub_key\x18\b \x01(\fR\x06pubKey\x12\x10\n" +
+	"\x03seq\x18\t \x01(\x03R\x03seq\"8\n" +
 	"\n" +
 	"PEXMessage\x12*\n" +
 	"\x05peers\x18\x01 \x03(\v2\x14.membuss.v1.PeerInfoR\x05peers\"_\n" +
@@ -2548,7 +2671,13 @@ const file_membuss_proto_rawDesc = "" +
 	"\n" +
 	"AttrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*D\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"!\n" +
+	"\rDeleteRequest\x12\x10\n" +
+	"\x03mid\x18\x01 \x01(\tR\x03mid\"X\n" +
+	"\x0eDeleteResponse\x12%\n" +
+	"\x0eblocks_deleted\x18\x01 \x01(\x04R\rblocksDeleted\x12\x1f\n" +
+	"\vbytes_freed\x18\x02 \x01(\x04R\n" +
+	"bytesFreed*D\n" +
 	"\fReachability\x12\v\n" +
 	"\aUNKNOWN\x10\x00\x12\n" +
 	"\n" +
@@ -2563,7 +2692,7 @@ const file_membuss_proto_rawDesc = "" +
 	"\aSYMLINK\x10\x03\x12\f\n" +
 	"\bMETADATA\x10\x042A\n" +
 	"\x04Node\x129\n" +
-	"\x04Ping\x12\x17.membuss.v1.PingRequest\x1a\x18.membuss.v1.PingResponse2\xbd\x04\n" +
+	"\x04Ping\x12\x17.membuss.v1.PingRequest\x1a\x18.membuss.v1.PingResponse2\xfe\x04\n" +
 	"\vMembussNode\x126\n" +
 	"\x03Add\x12\x16.membuss.v1.AddRequest\x1a\x17.membuss.v1.AddResponse\x125\n" +
 	"\x03Get\x12\x16.membuss.v1.GetRequest\x1a\x14.membuss.v1.GetChunk0\x01\x129\n" +
@@ -2573,7 +2702,8 @@ const file_membuss_proto_rawDesc = "" +
 	"\x05Peers\x12\x18.membuss.v1.PeersRequest\x1a\x19.membuss.v1.PeersResponse\x12B\n" +
 	"\aDHTPeek\x12\x1a.membuss.v1.DHTPeekRequest\x1a\x1b.membuss.v1.DHTPeekResponse\x123\n" +
 	"\x02GC\x12\x15.membuss.v1.GCRequest\x1a\x16.membuss.v1.GCResponse\x12Q\n" +
-	"\fAnchorStatus\x12\x1f.membuss.v1.AnchorStatusRequest\x1a .membuss.v1.AnchorStatusResponseB.Z,github.com/nnlgsakib/membuss/proto;membusspbb\x06proto3"
+	"\fAnchorStatus\x12\x1f.membuss.v1.AnchorStatusRequest\x1a .membuss.v1.AnchorStatusResponse\x12?\n" +
+	"\x06Delete\x12\x19.membuss.v1.DeleteRequest\x1a\x1a.membuss.v1.DeleteResponseB.Z,github.com/nnlgsakib/membuss/proto;membusspbb\x06proto3"
 
 var (
 	file_membuss_proto_rawDescOnce sync.Once
@@ -2588,7 +2718,7 @@ func file_membuss_proto_rawDescGZIP() []byte {
 }
 
 var file_membuss_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_membuss_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
+var file_membuss_proto_msgTypes = make([]protoimpl.MessageInfo, 40)
 var file_membuss_proto_goTypes = []any{
 	(Reachability)(0),            // 0: membuss.v1.Reachability
 	(MemFSType)(0),               // 1: membuss.v1.MemFSType
@@ -2628,8 +2758,10 @@ var file_membuss_proto_goTypes = []any{
 	(*MemFSBlock)(nil),           // 35: membuss.v1.MemFSBlock
 	(*DirEntry)(nil),             // 36: membuss.v1.DirEntry
 	(*MemFSMeta)(nil),            // 37: membuss.v1.MemFSMeta
-	nil,                          // 38: membuss.v1.MemexMessage.ObjectInfosEntry
-	nil,                          // 39: membuss.v1.MemFSMeta.AttrsEntry
+	(*DeleteRequest)(nil),        // 38: membuss.v1.DeleteRequest
+	(*DeleteResponse)(nil),       // 39: membuss.v1.DeleteResponse
+	nil,                          // 40: membuss.v1.MemexMessage.ObjectInfosEntry
+	nil,                          // 41: membuss.v1.MemFSMeta.AttrsEntry
 }
 var file_membuss_proto_depIdxs = []int32{
 	14, // 0: membuss.v1.StatResponse.erasure:type_name -> membuss.v1.ErasureInfo
@@ -2639,13 +2771,13 @@ var file_membuss_proto_depIdxs = []int32{
 	28, // 4: membuss.v1.PEXMessage.peers:type_name -> membuss.v1.PeerInfo
 	30, // 5: membuss.v1.MemexMessage.wants:type_name -> membuss.v1.WantEntry
 	24, // 6: membuss.v1.MemexMessage.blocks:type_name -> membuss.v1.Block
-	38, // 7: membuss.v1.MemexMessage.object_infos:type_name -> membuss.v1.MemexMessage.ObjectInfosEntry
+	40, // 7: membuss.v1.MemexMessage.object_infos:type_name -> membuss.v1.MemexMessage.ObjectInfosEntry
 	1,  // 8: membuss.v1.MemFSNode.type:type_name -> membuss.v1.MemFSType
 	35, // 9: membuss.v1.MemFSNode.blocks:type_name -> membuss.v1.MemFSBlock
 	36, // 10: membuss.v1.MemFSNode.entries:type_name -> membuss.v1.DirEntry
 	37, // 11: membuss.v1.MemFSNode.meta:type_name -> membuss.v1.MemFSMeta
 	1,  // 12: membuss.v1.DirEntry.type:type_name -> membuss.v1.MemFSType
-	39, // 13: membuss.v1.MemFSMeta.attrs:type_name -> membuss.v1.MemFSMeta.AttrsEntry
+	41, // 13: membuss.v1.MemFSMeta.attrs:type_name -> membuss.v1.MemFSMeta.AttrsEntry
 	32, // 14: membuss.v1.MemexMessage.ObjectInfosEntry.value:type_name -> membuss.v1.ObjectInfo
 	2,  // 15: membuss.v1.Node.Ping:input_type -> membuss.v1.PingRequest
 	4,  // 16: membuss.v1.MembussNode.Add:input_type -> membuss.v1.AddRequest
@@ -2657,18 +2789,20 @@ var file_membuss_proto_depIdxs = []int32{
 	18, // 22: membuss.v1.MembussNode.DHTPeek:input_type -> membuss.v1.DHTPeekRequest
 	20, // 23: membuss.v1.MembussNode.GC:input_type -> membuss.v1.GCRequest
 	22, // 24: membuss.v1.MembussNode.AnchorStatus:input_type -> membuss.v1.AnchorStatusRequest
-	3,  // 25: membuss.v1.Node.Ping:output_type -> membuss.v1.PingResponse
-	5,  // 26: membuss.v1.MembussNode.Add:output_type -> membuss.v1.AddResponse
-	7,  // 27: membuss.v1.MembussNode.Get:output_type -> membuss.v1.GetChunk
-	9,  // 28: membuss.v1.MembussNode.Seal:output_type -> membuss.v1.SealResponse
-	11, // 29: membuss.v1.MembussNode.Unseal:output_type -> membuss.v1.UnsealResponse
-	13, // 30: membuss.v1.MembussNode.Stat:output_type -> membuss.v1.StatResponse
-	17, // 31: membuss.v1.MembussNode.Peers:output_type -> membuss.v1.PeersResponse
-	19, // 32: membuss.v1.MembussNode.DHTPeek:output_type -> membuss.v1.DHTPeekResponse
-	21, // 33: membuss.v1.MembussNode.GC:output_type -> membuss.v1.GCResponse
-	23, // 34: membuss.v1.MembussNode.AnchorStatus:output_type -> membuss.v1.AnchorStatusResponse
-	25, // [25:35] is the sub-list for method output_type
-	15, // [15:25] is the sub-list for method input_type
+	38, // 25: membuss.v1.MembussNode.Delete:input_type -> membuss.v1.DeleteRequest
+	3,  // 26: membuss.v1.Node.Ping:output_type -> membuss.v1.PingResponse
+	5,  // 27: membuss.v1.MembussNode.Add:output_type -> membuss.v1.AddResponse
+	7,  // 28: membuss.v1.MembussNode.Get:output_type -> membuss.v1.GetChunk
+	9,  // 29: membuss.v1.MembussNode.Seal:output_type -> membuss.v1.SealResponse
+	11, // 30: membuss.v1.MembussNode.Unseal:output_type -> membuss.v1.UnsealResponse
+	13, // 31: membuss.v1.MembussNode.Stat:output_type -> membuss.v1.StatResponse
+	17, // 32: membuss.v1.MembussNode.Peers:output_type -> membuss.v1.PeersResponse
+	19, // 33: membuss.v1.MembussNode.DHTPeek:output_type -> membuss.v1.DHTPeekResponse
+	21, // 34: membuss.v1.MembussNode.GC:output_type -> membuss.v1.GCResponse
+	23, // 35: membuss.v1.MembussNode.AnchorStatus:output_type -> membuss.v1.AnchorStatusResponse
+	39, // 36: membuss.v1.MembussNode.Delete:output_type -> membuss.v1.DeleteResponse
+	26, // [26:37] is the sub-list for method output_type
+	15, // [15:26] is the sub-list for method input_type
 	15, // [15:15] is the sub-list for extension type_name
 	15, // [15:15] is the sub-list for extension extendee
 	0,  // [0:15] is the sub-list for field type_name
@@ -2685,7 +2819,7 @@ func file_membuss_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_membuss_proto_rawDesc), len(file_membuss_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   38,
+			NumMessages:   40,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

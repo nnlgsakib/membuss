@@ -1,11 +1,10 @@
-﻿package pex
+package pex
 
 import (
 	"testing"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/multiformats/go-multiaddr"
 
 	membusspb "github.com/nnlgsakib/membuss/proto"
 )
@@ -30,36 +29,29 @@ func TestPEX_FilterForGossip_BasicShape(t *testing.T) {
 	// 10 PUBLIC peers
 	publicIDs := make([]peer.ID, 0, 10)
 	for i := 0; i < 10; i++ {
-		pid := makeTestPeer(t)
+		pid := addSignedTestPeer(t, p, membusspb.Reachability_PUBLIC, nil, nil)
 		publicIDs = append(publicIDs, pid)
-		ai := peer.AddrInfo{ID: pid, Addrs: []multiaddr.Multiaddr{}}
-		p.AddPeerWithReachability(ai, membusspb.Reachability_PUBLIC, nil)
 	}
 
 	// 5 PRIVATE peers with last_dial_success=false (should be
 	// excluded from the outgoing list).
 	privateUnreachIDs := make([]peer.ID, 0, 5)
 	for i := 0; i < 5; i++ {
-		pid := makeTestPeer(t)
+		pid := addSignedTestPeer(t, p, membusspb.Reachability_PRIVATE, nil, nil)
 		privateUnreachIDs = append(privateUnreachIDs, pid)
-		ai := peer.AddrInfo{ID: pid, Addrs: []multiaddr.Multiaddr{}}
-		p.AddPeerWithReachability(ai, membusspb.Reachability_PRIVATE, nil)
 		p.MarkDialResult(pid, false)
 	}
 
 	// 3 RELAY_ONLY peers
 	relayOnlyIDs := make([]peer.ID, 0, 3)
 	for i := 0; i < 3; i++ {
-		pid := makeTestPeer(t)
+		pid := addSignedTestPeer(t, p, membusspb.Reachability_RELAY_ONLY, nil, nil)
 		relayOnlyIDs = append(relayOnlyIDs, pid)
-		relayMA, _ := multiaddr.NewMultiaddr("/ip4/1.2.3.4/tcp/4001/p2p/" + pid.String())
-		ai := peer.AddrInfo{ID: pid, Addrs: []multiaddr.Multiaddr{relayMA}}
-		p.AddPeerWithReachability(ai, membusspb.Reachability_RELAY_ONLY, []multiaddr.Multiaddr{relayMA})
 	}
 
 	gossip := p.FilterForGossip()
-	if len(gossip) != 13 {
-		t.Fatalf("gossip list = %d entries, want 13 (10 public + 3 relay-only)", len(gossip))
+	if len(gossip) != 14 {
+		t.Fatalf("gossip list = %d entries, want 14 (10 public + 3 relay-only + 1 self)", len(gossip))
 	}
 
 	// Build a set of included peer IDs for O(1) lookup.
@@ -69,6 +61,12 @@ func TestPEX_FilterForGossip_BasicShape(t *testing.T) {
 	for _, info := range gossip {
 		included[info.PeerId] = info
 	}
+
+	// Verify and remove self from check map
+	if _, ok := included[h.ID().String()]; !ok {
+		t.Fatalf("self missing from gossip list")
+	}
+	delete(included, h.ID().String())
 
 	// All 10 PUBLIC must be present with their addrs intact.
 	for _, pid := range publicIDs {
@@ -124,8 +122,7 @@ func TestPEX_FilterForGossip_StaleEntryDropped(t *testing.T) {
 		t.Fatalf("pex: %v", err)
 	}
 
-	pid := makeTestPeer(t)
-	p.AddPeerWithReachability(peer.AddrInfo{ID: pid}, membusspb.Reachability_PUBLIC, nil)
+	pid := addSignedTestPeer(t, p, membusspb.Reachability_PUBLIC, nil, nil)
 
 	// Move the clock past the freshness window.
 	clock = base.Add(freshnessWindow + time.Hour)
@@ -154,8 +151,7 @@ func TestPEX_FilterForGossip_PrivateReachableKept(t *testing.T) {
 		t.Fatalf("pex: %v", err)
 	}
 
-	pid := makeTestPeer(t)
-	p.AddPeerWithReachability(peer.AddrInfo{ID: pid}, membusspb.Reachability_PRIVATE, nil)
+	pid := addSignedTestPeer(t, p, membusspb.Reachability_PRIVATE, nil, nil)
 	p.MarkDialResult(pid, true)
 
 	gossip := p.FilterForGossip()
@@ -193,17 +189,27 @@ func TestPEX_FilterForGossip_SelfSkipped(t *testing.T) {
 		t.Fatalf("pex: %v", err)
 	}
 
-	// Add ourselves (the filter must reject).
+	// Add ourselves (the filter must reject the table entry).
 	p.AddPeerWithReachability(peer.AddrInfo{ID: h.ID()}, membusspb.Reachability_PUBLIC, nil)
 	// Add a real peer so the table is non-empty.
-	other := makeTestPeer(t)
-	p.AddPeerWithReachability(peer.AddrInfo{ID: other}, membusspb.Reachability_PUBLIC, nil)
+	_ = addSignedTestPeer(t, p, membusspb.Reachability_PUBLIC, nil, nil)
 
 	gossip := p.FilterForGossip()
+	if len(gossip) != 2 {
+		t.Fatalf("expected 2 gossip entries, got %d", len(gossip))
+	}
+
+	var selfInfo *membusspb.PeerInfo
 	for _, info := range gossip {
 		if info.PeerId == h.ID().String() {
-			t.Fatal("self leaked into gossip")
+			selfInfo = info
 		}
+	}
+	if selfInfo == nil {
+		t.Fatal("self missing from gossip")
+	}
+	if len(selfInfo.Signature) == 0 {
+		t.Fatal("self in gossip is unsigned")
 	}
 }
 

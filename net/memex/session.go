@@ -459,32 +459,74 @@ func (s *Session) storeObjectInfos(infos map[string]*membusspb.ObjectInfo) {
 }
 
 func (s *Session) writeLoop(ctx context.Context, stream network.Stream, eventChan <-chan sessionEvent) error {
+	const (
+		maxBatchSize = 32
+		flushTimeout = 5 * time.Millisecond
+	)
+
 	for {
 		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case ev, ok := <-eventChan:
 			if !ok {
 				return nil
 			}
-			_ = stream.SetWriteDeadline(time.Now().Add(DefaultPeerTimeout))
+
+			// Start a batch.
 			var msg membusspb.MemexMessage
 			if ev.isCancel {
-				msg.Cancel = []string{ev.mid.String()}
+				msg.Cancel = append(msg.Cancel, ev.mid.String())
 			} else {
-				msg.Wants = []*membusspb.WantEntry{{
+				msg.Wants = append(msg.Wants, &membusspb.WantEntry{
 					Mid:          ev.mid.String(),
 					SendDontHave: true,
-				}}
+				})
 			}
+
+			batchCount := 1
+			timer := time.NewTimer(flushTimeout)
+			closed := false
+
+		batchLoop:
+			for batchCount < maxBatchSize && !closed {
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return ctx.Err()
+				case <-timer.C:
+					// Batch timer fired, flush now.
+					break batchLoop
+				case nextEv, nextOk := <-eventChan:
+					if !nextOk {
+						closed = true
+						break batchLoop
+					}
+					if nextEv.isCancel {
+						msg.Cancel = append(msg.Cancel, nextEv.mid.String())
+					} else {
+						msg.Wants = append(msg.Wants, &membusspb.WantEntry{
+							Mid:          nextEv.mid.String(),
+							SendDontHave: true,
+						})
+					}
+					batchCount++
+				}
+			}
+			timer.Stop()
+
+			_ = stream.SetWriteDeadline(time.Now().Add(DefaultPeerTimeout))
 			if err := writeFrame(stream, &msg); err != nil {
 				return err
 			}
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-			// Idle tick.
+
+			if closed {
+				return nil
+			}
 		}
 	}
 }
+
 
 // asBlockstore adapts the engine's Blockstore into the
 // dag.NewResolver interface.

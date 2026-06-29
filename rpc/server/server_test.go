@@ -98,6 +98,11 @@ func (m *memBackend) GC(ctx context.Context, all bool) (GCInfo, error) {
 	return GCInfo{BytesFreed: 1024, BlocksKept: 5}, nil
 }
 
+func (m *memBackend) Delete(ctx context.Context, midStr string) (DeleteResult, error) {
+	return DeleteResult{BlocksDeleted: 1, BytesFreed: 1024}, nil
+}
+
+
 func (m *memBackend) AnchorStatus() AnchorInfo {
 	return m.anchor
 }

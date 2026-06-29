@@ -9,9 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net/http"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -21,7 +18,7 @@ import (
 	"github.com/nnlgsakib/membuss/core/mid"
 	"github.com/nnlgsakib/membuss/core/store"
 	"github.com/nnlgsakib/membuss/net/memex"
-	memgate "github.com/nnlgsakib/membuss/gateway/memgate"
+	memgate "github.com/nnlgsakib/membuss/gateway/memgate_v2"
 	membusspb "github.com/nnlgsakib/membuss/proto"
 )
 
@@ -141,25 +138,26 @@ func (a *memgateAdapter) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser,
 		Sealed:     sealed,
 		Name:       oi.Name,
 		MimeType:   mimeType,
-		// ContentType is the legacy / extension-based
-		// fallback. The handleGet handler prefers
-		// MimeType when both are set.
-		ContentType: detectContentType(m.String(), nil, mimeType),
+		ContentType: memgate.DetectContentType(m.String(), nil, mimeType),
 	}, nil
 }
 
 // RawBlock returns the raw bytes of a single block (no DAG
 // walk).
 func (a *memgateAdapter) RawBlock(ctx context.Context, m mid.MID) ([]byte, error) {
-	b := a.b
-	has, err := b.store.Has(m)
+	fbs := &fetchingBlockstore{
+		Blockstore: a.b.store,
+		b:          a.b,
+		ctx:        ctx,
+	}
+	data, err := fbs.Get(m)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, errMGNotFound
+		}
 		return nil, err
 	}
-	if !has {
-		return nil, errMGNotFound
-	}
-	return b.store.Get(m)
+	return data, nil
 }
 
 // DAGNodeJSON returns the DAG node at m serialized as JSON.
@@ -275,7 +273,7 @@ func (a *memgateAdapter) Stat(ctx context.Context, m mid.MID) (memgate.ContentIn
 		Sealed:      sealed,
 		Name:        oi.Name,
 		MimeType:    mimeType,
-		ContentType: detectContentType(m.String(), nil, mimeType),
+		ContentType: memgate.DetectContentType(m.String(), nil, mimeType),
 	}, nil
 }
 
@@ -363,6 +361,45 @@ func (a *memgateAdapter) MemFSList(ctx context.Context, m mid.MID) ([]memgate.Me
 	return out, nil
 }
 
+// MemFSPathInfo returns metadata about a path under the given root.
+func (a *memgateAdapter) MemFSPathInfo(ctx context.Context, m mid.MID, subPath string) (memgate.MemFSInfo, error) {
+	r := a.memfsResolver(ctx)
+	node, err := r.ResolvePath(ctx, m, subPath)
+	if err != nil {
+		return memgate.MemFSInfo{}, errMGNotFound
+	}
+	return memgate.MemFSInfo{
+		MID:   node.MustMID().String(),
+		Type:  memFSTypeString(node.GetType()),
+		Size:  node.TotalSize(),
+		Mode:  uint32(node.Mode()),
+		MTime: node.MTime().Unix(),
+		Mime:  node.MimeType(),
+	}, nil
+}
+
+// MemFSPathList returns entries of a directory under root at subPath.
+func (a *memgateAdapter) MemFSPathList(ctx context.Context, m mid.MID, subPath string) ([]memgate.MemFSEntry, error) {
+	r := a.memfsResolver(ctx)
+	node, err := r.ResolvePath(ctx, m, subPath)
+	if err != nil {
+		return nil, errMGNotFound
+	}
+	if !node.IsDir() {
+		return nil, errMGNotFound
+	}
+	out := make([]memgate.MemFSEntry, 0, node.EntryCount())
+	for _, e := range node.EntriesValue() {
+		out = append(out, memgate.MemFSEntry{
+			Name: e.Name,
+			MID:  e.Mid.String(),
+			Type: memFSTypeString(e.Type),
+			Size: e.Size,
+		})
+	}
+	return out, nil
+}
+
 // memFSTypeString returns a short label for a MemFSType.
 func memFSTypeString(t memfs.MemFSType) string {
 	switch t {
@@ -381,42 +418,4 @@ func memFSTypeString(t memfs.MemFSType) string {
 
 var errMGNotFound = errors.New("not found")
 
-// detectContentType is exported so the memgate handler can
-// use it. It prefers the ContentType the client provided as
-// a hint, then sniffs the bytes, and finally falls back to
-// "application/octet-stream".
-func detectContentType(midStr string, data []byte, hint string) string {
-	if hint != "" {
-		return hint
-	}
-	if ext := filepath.Ext(midStr); ext != "" {
-		if ct := mimeByExt(ext); ct != "" {
-			return ct
-		}
-	}
-	if len(data) > 0 {
-		return http.DetectContentType(data)
-	}
-	return "application/octet-stream"
-}
 
-func mimeByExt(ext string) string {
-	switch strings.ToLower(ext) {
-	case ".html", ".htm":
-		return "text/html; charset=utf-8"
-	case ".json":
-		return "application/json"
-	case ".txt":
-		return "text/plain; charset=utf-8"
-	case ".png":
-		return "image/png"
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".gif":
-		return "image/gif"
-	case ".pdf":
-		return "application/pdf"
-	default:
-		return ""
-	}
-}

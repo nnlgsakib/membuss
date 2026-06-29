@@ -90,7 +90,7 @@
 				sealed: item.Sealed,
 				size: item.Size || 0,
 				mime: item.MimeType || 'application/octet-stream',
-				type: 'file'
+				type: item.MimeType === 'inode/directory' ? 'dir' : 'file'
 			}));
 
 			fileList = mapped;
@@ -110,7 +110,6 @@
 			});
 			if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
 			
-			// Modify local state immediately before full list query
 			file.sealed = !file.sealed;
 			loadFiles();
 		} catch (err) {
@@ -118,10 +117,33 @@
 		}
 	}
 
+	async function deleteFile(file: LocalFile) {
+		if (!confirm(`Are you sure you want to delete "${file.name}" and all its blocks recursively from this node? This cannot be undone.`)) {
+			return;
+		}
+		try {
+			const res = await fetch(`${base}/mid/${file.mid}/delete`, {
+				method: 'POST'
+			});
+			if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
+			
+			// Remove from local list immediately
+			fileList = fileList.filter(f => f.mid !== file.mid);
+		} catch (err) {
+			alert(`Delete failed: ${err instanceof Error ? err.message : err}`);
+		}
+	}
+
 	// Copy gateway link to share
 	function shareFile(file: LocalFile) {
-		const gateBase = window.location.origin;
-		const shareUrl = `${gateBase}/mem/${file.mid}${file.type === 'dir' ? '/' : ''}`;
+		let shareUrl = '';
+		if (file.type === 'dir' && window.location.hostname === 'localhost') {
+			const portStr = window.location.port ? `:${window.location.port}` : '';
+			shareUrl = `${window.location.protocol}//${file.mid}.localhost${portStr}/`;
+		} else {
+			const gateBase = window.location.origin;
+			shareUrl = `${gateBase}/mem/${file.mid}${file.type === 'dir' ? '/' : ''}`;
+		}
 		navigator.clipboard.writeText(shareUrl).then(() => {
 			copiedId = file.mid;
 			setTimeout(() => {
@@ -231,7 +253,8 @@
 			formData.append('file', files[0]);
 		} else {
 			for (let i = 0; i < files.length; i++) {
-				formData.append('files', files[i], files[i].webkitRelativePath || files[i].name);
+				formData.append('files', files[i]);
+				formData.append('paths', files[i].webkitRelativePath || files[i].name);
 			}
 			if (customFolderName) {
 				formData.append('folder_name', customFolderName);
@@ -595,6 +618,14 @@
 										>
 											Inspect
 										</a>
+
+										<!-- Delete recursively -->
+										<button 
+											onclick={() => deleteFile(file)}
+											class="text-red-500 hover:text-red-400 font-bold hover:underline"
+										>
+											Delete
+										</button>
 									</div>
 								</td>
 							</tr>

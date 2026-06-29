@@ -27,7 +27,7 @@ import (
 	"github.com/nnlgsakib/membuss/core/mid"
 	"github.com/nnlgsakib/membuss/core/store"
 	explorer "github.com/nnlgsakib/membuss/gateway/explorer"
-	"github.com/nnlgsakib/membuss/gateway/memgate"
+	memgate "github.com/nnlgsakib/membuss/gateway/memgate_v2"
 	"github.com/nnlgsakib/membuss/core/version"
 	"github.com/nnlgsakib/membuss/net/memex"
 	membusspb "github.com/nnlgsakib/membuss/proto"
@@ -99,6 +99,17 @@ func (a *explorerAdapter) Unseal(ctx context.Context, m mid.MID) error {
 	_, err := a.b.Unseal(ctx, m.String())
 	return err
 }
+
+// Delete recursively removes the given MID and its children.
+func (a *explorerAdapter) Delete(ctx context.Context, m mid.MID) (uint64, uint64, error) {
+	res, err := a.b.Delete(ctx, m.String())
+	if err != nil {
+		return 0, 0, err
+	}
+	delete(a.allRoots, m.String())
+	return res.BlocksDeleted, res.BytesFreed, nil
+}
+
 
 // Providers returns DHT-known providers for m.
 func (a *explorerAdapter) Providers(ctx context.Context, m mid.MID, limit int) ([]string, error) {
@@ -839,4 +850,75 @@ func (a *explorerAdapter) ConnectPeer(ctx context.Context, multiaddr string) err
 		return errors.New("host not ready")
 	}
 	return a.b.host.Connect(ctx, *ai)
+}
+
+func (a *explorerAdapter) KeyringGenerate(ctx context.Context, name, keyType string) (explorer.KeyringKeyInfo, error) {
+	if a.keyring == nil {
+		return explorer.KeyringKeyInfo{}, errors.New("keyring not configured")
+	}
+	k, err := a.keyring.Generate(name, keyType)
+	if err != nil {
+		return explorer.KeyringKeyInfo{}, err
+	}
+	kType := "ed25519"
+	if key, err := a.keyring.Get(k.Name); err == nil {
+		kType = strings.ToLower(key.PubKey.Type().String())
+	}
+	return explorer.KeyringKeyInfo{
+		Name:      k.Name,
+		MemNSName: k.MemNSName,
+		Type:      kType,
+		CreatedAt: time.Now(),
+	}, nil
+}
+
+func (a *explorerAdapter) KeyringDelete(ctx context.Context, name string) error {
+	if a.keyring == nil {
+		return errors.New("keyring not configured")
+	}
+	return a.keyring.Delete(name)
+}
+
+func (a *explorerAdapter) MemNSPublish(ctx context.Context, keyName, value string, ttl uint32, message string) (explorer.MemNSRecordInfo, error) {
+	if a.keyring == nil || a.memnsRes == nil {
+		return explorer.MemNSRecordInfo{}, errors.New("keyring or resolver not configured")
+	}
+	key, err := a.keyring.Get(keyName)
+	if err != nil {
+		return explorer.MemNSRecordInfo{}, fmt.Errorf("get key: %w", err)
+	}
+
+	cleanName := key.MemNSName
+	if strings.HasPrefix(cleanName, "/memns/") {
+		cleanName = cleanName[7:]
+	}
+
+	current, err := memns.ResolveDHT(ctx, a.memnsRes.DHTClient(), cleanName)
+	seq := uint64(1)
+	if err == nil && current != nil {
+		seq = current.Sequence + 1
+	}
+
+	recTTL := uint64(ttl)
+	if recTTL == 0 {
+		recTTL = 86400
+	}
+
+	record, err := memns.BuildRecord(key, value, seq, time.Duration(recTTL)*time.Second, nil, message)
+	if err != nil {
+		return explorer.MemNSRecordInfo{}, fmt.Errorf("build record: %w", err)
+	}
+
+	err = memns.PublishDHT(ctx, a.memnsRes.DHTClient(), key, record)
+	if err != nil {
+		return explorer.MemNSRecordInfo{}, fmt.Errorf("publish dht: %w", err)
+	}
+
+	if a.memnsRes.PubSub() != nil {
+		_ = a.memnsRes.PubSub().PublishPub(ctx, key, record)
+	}
+
+	_ = a.keyring.SaveRecord(keyName, record)
+
+	return a.ResolveMemNSRecord(ctx, cleanName)
 }

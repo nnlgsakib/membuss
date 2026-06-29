@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/rand"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,7 @@ type Resolver struct {
 	dns         DNSResolverAPI
 	pubsubCache map[string]*membusspb.MemNSRecord
 	pubsubMu    sync.RWMutex
+	lookupTXT   func(host string) ([]string, error)
 }
 
 // NewResolver instantiates a new Resolver.
@@ -39,12 +41,18 @@ func NewResolver(dhtClient *dht.MemDHT, pm *PubSubManager, cache *RecordCache) *
 		pubsub:      pm,
 		cache:       cache,
 		pubsubCache: make(map[string]*membusspb.MemNSRecord),
+		lookupTXT:   net.LookupTXT,
 	}
 }
 
 // SetDNSResolver sets the DNS resolver instance.
 func (r *Resolver) SetDNSResolver(dns DNSResolverAPI) {
 	r.dns = dns
+}
+
+// SetLookupTXT overrides the default DNS lookup function (primarily for testing).
+func (r *Resolver) SetLookupTXT(f func(host string) ([]string, error)) {
+	r.lookupTXT = f
 }
 
 // DHTClient returns the underlying DHT client.
@@ -144,8 +152,12 @@ func (r *Resolver) resolveDepth(ctx context.Context, nameOrDomain string, depth 
 		return "/mem/" + nameOrDomain, nil
 	}
 
-	// If it looks like a domain, resolve via MemLink
+	// If it looks like a domain, resolve via DNSLink first, then fallback to MemLink
 	if !strings.HasPrefix(nameOrDomain, "/memns/") && !strings.HasPrefix(nameOrDomain, "k51") && strings.Contains(nameOrDomain, ".") {
+		if target, err := r.resolveDNSLink(ctx, nameOrDomain); err == nil && target != "" {
+			return r.resolveDepth(ctx, target, depth+1)
+		}
+
 		if r.dns == nil {
 			return "", errors.New("memns: dns resolver not configured")
 		}
@@ -235,4 +247,32 @@ func (r *Resolver) subscribeToName(name string) {
 			}
 		}
 	}()
+}
+
+func (r *Resolver) resolveDNSLink(ctx context.Context, domain string) (string, error) {
+	if r.lookupTXT == nil {
+		return "", errors.New("memns: lookupTXT not configured")
+	}
+
+	// Try _dnslink.domain first
+	txts, err := r.lookupTXT("_dnslink." + domain)
+	if err != nil || len(txts) == 0 {
+		// Fallback to domain
+		txts, err = r.lookupTXT(domain)
+	}
+	if err != nil {
+		return "", err
+	}
+
+	for _, txt := range txts {
+		clean := strings.Trim(strings.TrimSpace(txt), "\"")
+		if strings.HasPrefix(clean, "dnslink=") {
+			target := strings.TrimPrefix(clean, "dnslink=")
+			if target != "" {
+				return target, nil
+			}
+		}
+	}
+
+	return "", errors.New("memns: no dnslink record found")
 }
