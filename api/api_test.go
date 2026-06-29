@@ -119,6 +119,18 @@ func (b *memBackend) Delete(ctx context.Context, midStr string) (DeleteResult, e
 	return DeleteResult{BlocksDeleted: 1, BytesFreed: 1024}, nil
 }
 
+func (b *memBackend) DescriptorExport(ctx context.Context, midStr string) ([]byte, error) {
+	return nil, fmt.Errorf("descriptor: test stub")
+}
+
+func (b *memBackend) DescriptorMeta(ctx context.Context, midStr string) (map[string]interface{}, error) {
+	return nil, fmt.Errorf("descriptor: test stub")
+}
+
+func (b *memBackend) DescriptorImport(ctx context.Context, data []byte) (string, error) {
+	return "", fmt.Errorf("descriptor: test stub")
+}
+
 
 func (b *memBackend) NodeInfo() NodeInfo {
 	return NodeInfo{PeerID: "12D3KooA", Addrs: []string{"/ip4/1.2.3.4/tcp/4001"}, Version: "0.1.0", Build: "test"}

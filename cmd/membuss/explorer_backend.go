@@ -21,6 +21,7 @@ import (
 	"github.com/nnlgsakib/membuss/anchor"
 	hostpkg "github.com/nnlgsakib/membuss/net/host"
 	"github.com/nnlgsakib/membuss/core/keyring"
+	"github.com/nnlgsakib/membuss/core/descriptor"
 	"github.com/nnlgsakib/membuss/core/memfs"
 	"github.com/nnlgsakib/membuss/core/memlink"
 	"github.com/nnlgsakib/membuss/core/memns"
@@ -921,4 +922,107 @@ func (a *explorerAdapter) MemNSPublish(ctx context.Context, keyName, value strin
 	_ = a.keyring.SaveRecord(keyName, record)
 
 	return a.ResolveMemNSRecord(ctx, cleanName)
+}
+
+// --- Phase 21: Descriptor support ---
+
+func (a *explorerAdapter) DescriptorExport(ctx context.Context, midStr string) ([]byte, error) {
+	b := a.b
+	if b == nil || b.store == nil {
+		return nil, errors.New("explorer: no backend")
+	}
+	m, err := mid.Parse(midStr)
+	if err != nil {
+		return nil, fmt.Errorf("descriptor: parse mid: %w", err)
+	}
+	has, err := b.store.Has(m)
+	if err != nil {
+		return nil, err
+	}
+	if !has {
+		return nil, fmt.Errorf("descriptor: MID not found locally")
+	}
+
+	var opts []descriptor.Option
+	if b.host != nil && b.dht != nil {
+		opts = append(opts, descriptor.WithBootstrapPeers(a.getBootstrapPeers()))
+	}
+
+	d, err := descriptor.Build(b.store, m, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return d.Serialize()
+}
+
+func (a *explorerAdapter) DescriptorMeta(ctx context.Context, midStr string) (map[string]interface{}, error) {
+	b := a.b
+	if b == nil || b.store == nil {
+		return nil, errors.New("explorer: no backend")
+	}
+	m, err := mid.Parse(midStr)
+	if err != nil {
+		return nil, fmt.Errorf("descriptor: parse mid: %w", err)
+	}
+	has, err := b.store.Has(m)
+	if err != nil {
+		return nil, err
+	}
+	if !has {
+		return nil, fmt.Errorf("descriptor: MID not found locally")
+	}
+
+	d, err := descriptor.Build(b.store, m)
+	if err != nil {
+		return nil, err
+	}
+
+	meta := map[string]interface{}{
+		"root_mid":    d.RootMID.String(),
+		"total_size":  d.TotalSize,
+		"block_count": d.BlockCount,
+		"name":        d.Name,
+		"mime_type":   d.MimeType,
+		"created_at":  d.CreatedAt.Unix(),
+		"chunker":     d.Chunker,
+		"chunk_size":  d.ChunkSize,
+	}
+	if d.Erasure != nil {
+		meta["erasure"] = map[string]interface{}{
+			"data_shards":   d.Erasure.DataShards,
+			"parity_shards": d.Erasure.ParityShards,
+		}
+	}
+	if len(d.BootstrapPeers) > 0 {
+		meta["bootstrap_peers"] = d.BootstrapPeers
+	}
+	if d.MemNSName != "" {
+		meta["memns_name"] = d.MemNSName
+	}
+	return meta, nil
+}
+
+func (a *explorerAdapter) DescriptorImport(ctx context.Context, data []byte) (string, error) {
+	b := a.b
+	if b == nil || b.store == nil {
+		return "", errors.New("explorer: no backend")
+	}
+	d, err := descriptor.Parse(data)
+	if err != nil {
+		return "", err
+	}
+
+	missing, err := d.Verify(b.store)
+	if err != nil {
+		return "", fmt.Errorf("descriptor: verify: %w", err)
+	}
+	if len(missing) > 0 {
+		return "", fmt.Errorf("descriptor: %d blocks missing locally; fetch from peers first", len(missing))
+	}
+
+	return d.RootMID.String(), nil
+}
+
+func (a *explorerAdapter) getBootstrapPeers() []string {
+	return nil
 }

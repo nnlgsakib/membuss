@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/nnlgsakib/membuss/core/dag"
+	"github.com/nnlgsakib/membuss/core/descriptor"
 	"github.com/nnlgsakib/membuss/core/memfs"
 	"github.com/nnlgsakib/membuss/core/mid"
 	"github.com/nnlgsakib/membuss/core/store"
@@ -417,5 +418,36 @@ func memFSTypeString(t memfs.MemFSType) string {
 }
 
 var errMGNotFound = errors.New("not found")
+
+// --- Phase 21: Descriptor support ---
+
+func (a *memgateAdapter) Descriptor(ctx context.Context, m mid.MID) ([]byte, error) {
+	b := a.b
+	if b == nil || b.store == nil {
+		return nil, errors.New("memgate: no backend")
+	}
+	has, err := b.store.Has(m)
+	if err != nil {
+		return nil, err
+	}
+	if !has {
+		return nil, errMGNotFound
+	}
+
+	var opts []descriptor.Option
+	if b.host != nil && b.dht != nil {
+		opts = append(opts, descriptor.WithBootstrapPeers(a.getBootstrapPeers()))
+	}
+
+	d, err := descriptor.Build(b.store, m, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return d.Serialize()
+}
+
+func (a *memgateAdapter) getBootstrapPeers() []string {
+	return nil
+}
 
 

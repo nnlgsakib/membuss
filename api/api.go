@@ -79,6 +79,17 @@ type Backend interface {
 	GetPath(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error)
 	// Delete recursively removes the given MID and its children from the store.
 	Delete(ctx context.Context, midStr string) (DeleteResult, error)
+
+	// --- Phase 21: Descriptor support ---
+
+	// DescriptorExport builds a .mbuss descriptor for the given MID
+	// and returns it as bytes.
+	DescriptorExport(ctx context.Context, midStr string) ([]byte, error)
+	// DescriptorMeta returns the descriptor metadata as a JSON-serializable map.
+	DescriptorMeta(ctx context.Context, midStr string) (map[string]interface{}, error)
+	// DescriptorImport ingests a .mbuss descriptor file and returns
+	// the root MID string.
+	DescriptorImport(ctx context.Context, data []byte) (string, error)
 }
 
 // DeleteResult is the return value of Backend.Delete.
@@ -278,6 +289,11 @@ func (a *NodeAPI) buildRouter() chi.Router {
 		r.Post("/memns/delegate/add", a.handleMemNSDelegateAdd)
 		r.Post("/memns/delegate/rm", a.handleMemNSDelegateRm)
 		r.Get("/memns/delegate/list/{keyname}", a.handleMemNSDelegateList)
+
+		// Phase 21: descriptor endpoints
+		r.Get("/descriptor/{mid}", a.handleDescriptorExport)
+		r.Get("/descriptor/{mid}/meta", a.handleDescriptorMeta)
+		r.Post("/descriptor/import", a.handleDescriptorImport)
 	})
 	return r
 }
@@ -1142,4 +1158,42 @@ func (a *NodeAPI) handleMemNSDelegateList(w http.ResponseWriter, r *http.Request
 	ok(w, map[string]any{
 		"delegates": delegates,
 	})
+}
+
+// --- Phase 21: Descriptor handlers ---
+
+func (a *NodeAPI) handleDescriptorExport(w http.ResponseWriter, r *http.Request) {
+	midStr := chi.URLParam(r, "mid")
+	data, err := a.cfg.Backend.DescriptorExport(r.Context(), midStr)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.mbuss", midStr))
+	w.Write(data)
+}
+
+func (a *NodeAPI) handleDescriptorMeta(w http.ResponseWriter, r *http.Request) {
+	midStr := chi.URLParam(r, "mid")
+	meta, err := a.cfg.Backend.DescriptorMeta(r.Context(), midStr)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	ok(w, meta)
+}
+
+func (a *NodeAPI) handleDescriptorImport(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	midStr, err := a.cfg.Backend.DescriptorImport(r.Context(), body)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	ok(w, map[string]any{"mid": midStr})
 }

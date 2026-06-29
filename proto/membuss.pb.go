@@ -2492,6 +2492,281 @@ func (x *DeleteResponse) GetBytesFreed() uint64 {
 	return 0
 }
 
+// DescriptorBlock is one leaf block entry in a descriptor.
+type DescriptorBlock struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Mid           string                 `protobuf:"bytes,1,opt,name=mid,proto3" json:"mid,omitempty"`
+	Size          uint64                 `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
+	Index         uint32                 `protobuf:"varint,3,opt,name=index,proto3" json:"index,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DescriptorBlock) Reset() {
+	*x = DescriptorBlock{}
+	mi := &file_membuss_proto_msgTypes[38]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DescriptorBlock) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DescriptorBlock) ProtoMessage() {}
+
+func (x *DescriptorBlock) ProtoReflect() protoreflect.Message {
+	mi := &file_membuss_proto_msgTypes[38]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DescriptorBlock.ProtoReflect.Descriptor instead.
+func (*DescriptorBlock) Descriptor() ([]byte, []int) {
+	return file_membuss_proto_rawDescGZIP(), []int{38}
+}
+
+func (x *DescriptorBlock) GetMid() string {
+	if x != nil {
+		return x.Mid
+	}
+	return ""
+}
+
+func (x *DescriptorBlock) GetSize() uint64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+func (x *DescriptorBlock) GetIndex() uint32 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+// DescriptorErasure captures the erasure-coding parameters
+// applied to the content (if any).
+type DescriptorErasure struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	DataShards    uint32                 `protobuf:"varint,1,opt,name=data_shards,json=dataShards,proto3" json:"data_shards,omitempty"`
+	ParityShards  uint32                 `protobuf:"varint,2,opt,name=parity_shards,json=parityShards,proto3" json:"parity_shards,omitempty"`
+	OriginalMids  []string               `protobuf:"bytes,3,rep,name=original_mids,json=originalMids,proto3" json:"original_mids,omitempty"`
+	ShardMids     []string               `protobuf:"bytes,4,rep,name=shard_mids,json=shardMids,proto3" json:"shard_mids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DescriptorErasure) Reset() {
+	*x = DescriptorErasure{}
+	mi := &file_membuss_proto_msgTypes[39]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DescriptorErasure) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DescriptorErasure) ProtoMessage() {}
+
+func (x *DescriptorErasure) ProtoReflect() protoreflect.Message {
+	mi := &file_membuss_proto_msgTypes[39]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DescriptorErasure.ProtoReflect.Descriptor instead.
+func (*DescriptorErasure) Descriptor() ([]byte, []int) {
+	return file_membuss_proto_rawDescGZIP(), []int{39}
+}
+
+func (x *DescriptorErasure) GetDataShards() uint32 {
+	if x != nil {
+		return x.DataShards
+	}
+	return 0
+}
+
+func (x *DescriptorErasure) GetParityShards() uint32 {
+	if x != nil {
+		return x.ParityShards
+	}
+	return 0
+}
+
+func (x *DescriptorErasure) GetOriginalMids() []string {
+	if x != nil {
+		return x.OriginalMids
+	}
+	return nil
+}
+
+func (x *DescriptorErasure) GetShardMids() []string {
+	if x != nil {
+		return x.ShardMids
+	}
+	return nil
+}
+
+// DescriptorPayload is the protobuf payload inside a .mbuss
+// descriptor file. The file format is:
+//
+//	magic "MEMB" (4 bytes) | version (1 byte) | payload | SHA-256 (32 bytes)
+type DescriptorPayload struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	RootMid        string                 `protobuf:"bytes,1,opt,name=root_mid,json=rootMid,proto3" json:"root_mid,omitempty"`
+	TotalSize      uint64                 `protobuf:"varint,2,opt,name=total_size,json=totalSize,proto3" json:"total_size,omitempty"`
+	BlockCount     uint32                 `protobuf:"varint,3,opt,name=block_count,json=blockCount,proto3" json:"block_count,omitempty"`
+	Name           string                 `protobuf:"bytes,4,opt,name=name,proto3" json:"name,omitempty"`
+	MimeType       string                 `protobuf:"bytes,5,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
+	CreatedAt      int64                  `protobuf:"varint,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	Chunker        string                 `protobuf:"bytes,7,opt,name=chunker,proto3" json:"chunker,omitempty"`
+	ChunkSize      uint32                 `protobuf:"varint,8,opt,name=chunk_size,json=chunkSize,proto3" json:"chunk_size,omitempty"`
+	Blocks         []*DescriptorBlock     `protobuf:"bytes,9,rep,name=blocks,proto3" json:"blocks,omitempty"`
+	Erasure        *DescriptorErasure     `protobuf:"bytes,10,opt,name=erasure,proto3" json:"erasure,omitempty"`
+	BootstrapPeers []string               `protobuf:"bytes,11,rep,name=bootstrap_peers,json=bootstrapPeers,proto3" json:"bootstrap_peers,omitempty"`
+	MemnsName      string                 `protobuf:"bytes,12,opt,name=memns_name,json=memnsName,proto3" json:"memns_name,omitempty"`
+	Signature      []byte                 `protobuf:"bytes,13,opt,name=signature,proto3" json:"signature,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *DescriptorPayload) Reset() {
+	*x = DescriptorPayload{}
+	mi := &file_membuss_proto_msgTypes[40]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DescriptorPayload) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DescriptorPayload) ProtoMessage() {}
+
+func (x *DescriptorPayload) ProtoReflect() protoreflect.Message {
+	mi := &file_membuss_proto_msgTypes[40]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DescriptorPayload.ProtoReflect.Descriptor instead.
+func (*DescriptorPayload) Descriptor() ([]byte, []int) {
+	return file_membuss_proto_rawDescGZIP(), []int{40}
+}
+
+func (x *DescriptorPayload) GetRootMid() string {
+	if x != nil {
+		return x.RootMid
+	}
+	return ""
+}
+
+func (x *DescriptorPayload) GetTotalSize() uint64 {
+	if x != nil {
+		return x.TotalSize
+	}
+	return 0
+}
+
+func (x *DescriptorPayload) GetBlockCount() uint32 {
+	if x != nil {
+		return x.BlockCount
+	}
+	return 0
+}
+
+func (x *DescriptorPayload) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *DescriptorPayload) GetMimeType() string {
+	if x != nil {
+		return x.MimeType
+	}
+	return ""
+}
+
+func (x *DescriptorPayload) GetCreatedAt() int64 {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return 0
+}
+
+func (x *DescriptorPayload) GetChunker() string {
+	if x != nil {
+		return x.Chunker
+	}
+	return ""
+}
+
+func (x *DescriptorPayload) GetChunkSize() uint32 {
+	if x != nil {
+		return x.ChunkSize
+	}
+	return 0
+}
+
+func (x *DescriptorPayload) GetBlocks() []*DescriptorBlock {
+	if x != nil {
+		return x.Blocks
+	}
+	return nil
+}
+
+func (x *DescriptorPayload) GetErasure() *DescriptorErasure {
+	if x != nil {
+		return x.Erasure
+	}
+	return nil
+}
+
+func (x *DescriptorPayload) GetBootstrapPeers() []string {
+	if x != nil {
+		return x.BootstrapPeers
+	}
+	return nil
+}
+
+func (x *DescriptorPayload) GetMemnsName() string {
+	if x != nil {
+		return x.MemnsName
+	}
+	return ""
+}
+
+func (x *DescriptorPayload) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
+	}
+	return nil
+}
+
 var File_membuss_proto protoreflect.FileDescriptor
 
 const file_membuss_proto_rawDesc = "" +
@@ -2677,7 +2952,38 @@ const file_membuss_proto_rawDesc = "" +
 	"\x0eDeleteResponse\x12%\n" +
 	"\x0eblocks_deleted\x18\x01 \x01(\x04R\rblocksDeleted\x12\x1f\n" +
 	"\vbytes_freed\x18\x02 \x01(\x04R\n" +
-	"bytesFreed*D\n" +
+	"bytesFreed\"M\n" +
+	"\x0fDescriptorBlock\x12\x10\n" +
+	"\x03mid\x18\x01 \x01(\tR\x03mid\x12\x12\n" +
+	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x14\n" +
+	"\x05index\x18\x03 \x01(\rR\x05index\"\x9d\x01\n" +
+	"\x11DescriptorErasure\x12\x1f\n" +
+	"\vdata_shards\x18\x01 \x01(\rR\n" +
+	"dataShards\x12#\n" +
+	"\rparity_shards\x18\x02 \x01(\rR\fparityShards\x12#\n" +
+	"\roriginal_mids\x18\x03 \x03(\tR\foriginalMids\x12\x1d\n" +
+	"\n" +
+	"shard_mids\x18\x04 \x03(\tR\tshardMids\"\xcb\x03\n" +
+	"\x11DescriptorPayload\x12\x19\n" +
+	"\broot_mid\x18\x01 \x01(\tR\arootMid\x12\x1d\n" +
+	"\n" +
+	"total_size\x18\x02 \x01(\x04R\ttotalSize\x12\x1f\n" +
+	"\vblock_count\x18\x03 \x01(\rR\n" +
+	"blockCount\x12\x12\n" +
+	"\x04name\x18\x04 \x01(\tR\x04name\x12\x1b\n" +
+	"\tmime_type\x18\x05 \x01(\tR\bmimeType\x12\x1d\n" +
+	"\n" +
+	"created_at\x18\x06 \x01(\x03R\tcreatedAt\x12\x18\n" +
+	"\achunker\x18\a \x01(\tR\achunker\x12\x1d\n" +
+	"\n" +
+	"chunk_size\x18\b \x01(\rR\tchunkSize\x123\n" +
+	"\x06blocks\x18\t \x03(\v2\x1b.membuss.v1.DescriptorBlockR\x06blocks\x127\n" +
+	"\aerasure\x18\n" +
+	" \x01(\v2\x1d.membuss.v1.DescriptorErasureR\aerasure\x12'\n" +
+	"\x0fbootstrap_peers\x18\v \x03(\tR\x0ebootstrapPeers\x12\x1d\n" +
+	"\n" +
+	"memns_name\x18\f \x01(\tR\tmemnsName\x12\x1c\n" +
+	"\tsignature\x18\r \x01(\fR\tsignature*D\n" +
 	"\fReachability\x12\v\n" +
 	"\aUNKNOWN\x10\x00\x12\n" +
 	"\n" +
@@ -2718,7 +3024,7 @@ func file_membuss_proto_rawDescGZIP() []byte {
 }
 
 var file_membuss_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_membuss_proto_msgTypes = make([]protoimpl.MessageInfo, 40)
+var file_membuss_proto_msgTypes = make([]protoimpl.MessageInfo, 43)
 var file_membuss_proto_goTypes = []any{
 	(Reachability)(0),            // 0: membuss.v1.Reachability
 	(MemFSType)(0),               // 1: membuss.v1.MemFSType
@@ -2760,8 +3066,11 @@ var file_membuss_proto_goTypes = []any{
 	(*MemFSMeta)(nil),            // 37: membuss.v1.MemFSMeta
 	(*DeleteRequest)(nil),        // 38: membuss.v1.DeleteRequest
 	(*DeleteResponse)(nil),       // 39: membuss.v1.DeleteResponse
-	nil,                          // 40: membuss.v1.MemexMessage.ObjectInfosEntry
-	nil,                          // 41: membuss.v1.MemFSMeta.AttrsEntry
+	(*DescriptorBlock)(nil),      // 40: membuss.v1.DescriptorBlock
+	(*DescriptorErasure)(nil),    // 41: membuss.v1.DescriptorErasure
+	(*DescriptorPayload)(nil),    // 42: membuss.v1.DescriptorPayload
+	nil,                          // 43: membuss.v1.MemexMessage.ObjectInfosEntry
+	nil,                          // 44: membuss.v1.MemFSMeta.AttrsEntry
 }
 var file_membuss_proto_depIdxs = []int32{
 	14, // 0: membuss.v1.StatResponse.erasure:type_name -> membuss.v1.ErasureInfo
@@ -2771,41 +3080,43 @@ var file_membuss_proto_depIdxs = []int32{
 	28, // 4: membuss.v1.PEXMessage.peers:type_name -> membuss.v1.PeerInfo
 	30, // 5: membuss.v1.MemexMessage.wants:type_name -> membuss.v1.WantEntry
 	24, // 6: membuss.v1.MemexMessage.blocks:type_name -> membuss.v1.Block
-	40, // 7: membuss.v1.MemexMessage.object_infos:type_name -> membuss.v1.MemexMessage.ObjectInfosEntry
+	43, // 7: membuss.v1.MemexMessage.object_infos:type_name -> membuss.v1.MemexMessage.ObjectInfosEntry
 	1,  // 8: membuss.v1.MemFSNode.type:type_name -> membuss.v1.MemFSType
 	35, // 9: membuss.v1.MemFSNode.blocks:type_name -> membuss.v1.MemFSBlock
 	36, // 10: membuss.v1.MemFSNode.entries:type_name -> membuss.v1.DirEntry
 	37, // 11: membuss.v1.MemFSNode.meta:type_name -> membuss.v1.MemFSMeta
 	1,  // 12: membuss.v1.DirEntry.type:type_name -> membuss.v1.MemFSType
-	41, // 13: membuss.v1.MemFSMeta.attrs:type_name -> membuss.v1.MemFSMeta.AttrsEntry
-	32, // 14: membuss.v1.MemexMessage.ObjectInfosEntry.value:type_name -> membuss.v1.ObjectInfo
-	2,  // 15: membuss.v1.Node.Ping:input_type -> membuss.v1.PingRequest
-	4,  // 16: membuss.v1.MembussNode.Add:input_type -> membuss.v1.AddRequest
-	6,  // 17: membuss.v1.MembussNode.Get:input_type -> membuss.v1.GetRequest
-	8,  // 18: membuss.v1.MembussNode.Seal:input_type -> membuss.v1.SealRequest
-	10, // 19: membuss.v1.MembussNode.Unseal:input_type -> membuss.v1.UnsealRequest
-	12, // 20: membuss.v1.MembussNode.Stat:input_type -> membuss.v1.StatRequest
-	16, // 21: membuss.v1.MembussNode.Peers:input_type -> membuss.v1.PeersRequest
-	18, // 22: membuss.v1.MembussNode.DHTPeek:input_type -> membuss.v1.DHTPeekRequest
-	20, // 23: membuss.v1.MembussNode.GC:input_type -> membuss.v1.GCRequest
-	22, // 24: membuss.v1.MembussNode.AnchorStatus:input_type -> membuss.v1.AnchorStatusRequest
-	38, // 25: membuss.v1.MembussNode.Delete:input_type -> membuss.v1.DeleteRequest
-	3,  // 26: membuss.v1.Node.Ping:output_type -> membuss.v1.PingResponse
-	5,  // 27: membuss.v1.MembussNode.Add:output_type -> membuss.v1.AddResponse
-	7,  // 28: membuss.v1.MembussNode.Get:output_type -> membuss.v1.GetChunk
-	9,  // 29: membuss.v1.MembussNode.Seal:output_type -> membuss.v1.SealResponse
-	11, // 30: membuss.v1.MembussNode.Unseal:output_type -> membuss.v1.UnsealResponse
-	13, // 31: membuss.v1.MembussNode.Stat:output_type -> membuss.v1.StatResponse
-	17, // 32: membuss.v1.MembussNode.Peers:output_type -> membuss.v1.PeersResponse
-	19, // 33: membuss.v1.MembussNode.DHTPeek:output_type -> membuss.v1.DHTPeekResponse
-	21, // 34: membuss.v1.MembussNode.GC:output_type -> membuss.v1.GCResponse
-	23, // 35: membuss.v1.MembussNode.AnchorStatus:output_type -> membuss.v1.AnchorStatusResponse
-	39, // 36: membuss.v1.MembussNode.Delete:output_type -> membuss.v1.DeleteResponse
-	26, // [26:37] is the sub-list for method output_type
-	15, // [15:26] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	44, // 13: membuss.v1.MemFSMeta.attrs:type_name -> membuss.v1.MemFSMeta.AttrsEntry
+	40, // 14: membuss.v1.DescriptorPayload.blocks:type_name -> membuss.v1.DescriptorBlock
+	41, // 15: membuss.v1.DescriptorPayload.erasure:type_name -> membuss.v1.DescriptorErasure
+	32, // 16: membuss.v1.MemexMessage.ObjectInfosEntry.value:type_name -> membuss.v1.ObjectInfo
+	2,  // 17: membuss.v1.Node.Ping:input_type -> membuss.v1.PingRequest
+	4,  // 18: membuss.v1.MembussNode.Add:input_type -> membuss.v1.AddRequest
+	6,  // 19: membuss.v1.MembussNode.Get:input_type -> membuss.v1.GetRequest
+	8,  // 20: membuss.v1.MembussNode.Seal:input_type -> membuss.v1.SealRequest
+	10, // 21: membuss.v1.MembussNode.Unseal:input_type -> membuss.v1.UnsealRequest
+	12, // 22: membuss.v1.MembussNode.Stat:input_type -> membuss.v1.StatRequest
+	16, // 23: membuss.v1.MembussNode.Peers:input_type -> membuss.v1.PeersRequest
+	18, // 24: membuss.v1.MembussNode.DHTPeek:input_type -> membuss.v1.DHTPeekRequest
+	20, // 25: membuss.v1.MembussNode.GC:input_type -> membuss.v1.GCRequest
+	22, // 26: membuss.v1.MembussNode.AnchorStatus:input_type -> membuss.v1.AnchorStatusRequest
+	38, // 27: membuss.v1.MembussNode.Delete:input_type -> membuss.v1.DeleteRequest
+	3,  // 28: membuss.v1.Node.Ping:output_type -> membuss.v1.PingResponse
+	5,  // 29: membuss.v1.MembussNode.Add:output_type -> membuss.v1.AddResponse
+	7,  // 30: membuss.v1.MembussNode.Get:output_type -> membuss.v1.GetChunk
+	9,  // 31: membuss.v1.MembussNode.Seal:output_type -> membuss.v1.SealResponse
+	11, // 32: membuss.v1.MembussNode.Unseal:output_type -> membuss.v1.UnsealResponse
+	13, // 33: membuss.v1.MembussNode.Stat:output_type -> membuss.v1.StatResponse
+	17, // 34: membuss.v1.MembussNode.Peers:output_type -> membuss.v1.PeersResponse
+	19, // 35: membuss.v1.MembussNode.DHTPeek:output_type -> membuss.v1.DHTPeekResponse
+	21, // 36: membuss.v1.MembussNode.GC:output_type -> membuss.v1.GCResponse
+	23, // 37: membuss.v1.MembussNode.AnchorStatus:output_type -> membuss.v1.AnchorStatusResponse
+	39, // 38: membuss.v1.MembussNode.Delete:output_type -> membuss.v1.DeleteResponse
+	28, // [28:39] is the sub-list for method output_type
+	17, // [17:28] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_membuss_proto_init() }
@@ -2819,7 +3130,7 @@ func file_membuss_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_membuss_proto_rawDesc), len(file_membuss_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   40,
+			NumMessages:   43,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

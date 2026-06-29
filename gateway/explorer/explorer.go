@@ -236,6 +236,14 @@ type Backend interface {
 	// ConnectPeer parses a multiaddr and dials the peer.
 	// Returns nil on success or an error if the dial fails.
 	ConnectPeer(ctx context.Context, multiaddr string) error
+
+	// --- Phase 21: Descriptor support ---
+	// DescriptorExport builds and returns the .mbuss descriptor bytes for a MID.
+	DescriptorExport(ctx context.Context, midStr string) ([]byte, error)
+	// DescriptorMeta returns the descriptor metadata (no block list) as a map.
+	DescriptorMeta(ctx context.Context, midStr string) (map[string]interface{}, error)
+	// DescriptorImport imports a .mbuss descriptor and returns the root MID string.
+	DescriptorImport(ctx context.Context, data []byte) (string, error)
 }
 
 // KeyringKeyInfo represents metadata about a key in the keyring.
@@ -411,6 +419,11 @@ func (e *Explorer) buildRouter() http.Handler {
 	r.Delete("/keyring/rm/{name}", e.handleKeyringRm)
 	r.Post("/memns/publish", e.handleMemNSPublish)
 
+	// Phase 21: descriptor endpoints
+	r.Get("/descriptor/{mid}", e.handleDescriptorExport)
+	r.Get("/descriptor/{mid}/meta", e.handleDescriptorMeta)
+	r.Post("/descriptor/import", e.handleDescriptorImport)
+
 	// serveSpaOrPage runs the handler if formatting requested or User-Agent is test.
 	// Otherwise it falls back to serving Svelte SPA index.html.
 	serveSpaOrPage := func(handler http.HandlerFunc) http.HandlerFunc {
@@ -457,6 +470,12 @@ func (e *Explorer) buildRouter() http.Handler {
 			// Check if file exists in the Svelte dist
 			if f, err := distSubFS.Open(cleanPath); err == nil {
 				_ = f.Close()
+				// SvelteKit uses content-hashed filenames so long cache
+				// is safe; index.html (served via serveIndexHTML) already
+				// sets no-cache.  Only apply to immutable assets.
+				if strings.HasPrefix(cleanPath, "_app/") {
+					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+				}
 				http.StripPrefix("/explorer", distFileServer).ServeHTTP(w, r)
 				return
 			}
@@ -1459,4 +1478,51 @@ func (e *Explorer) handleMemNSPublish(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(res)
+}
+
+func (e *Explorer) handleDescriptorExport(w http.ResponseWriter, r *http.Request) {
+	midStr := chi.URLParam(r, "mid")
+	data, err := e.cfg.Backend.DescriptorExport(r.Context(), midStr)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.mbuss", midStr))
+	w.Write(data)
+}
+
+func (e *Explorer) handleDescriptorMeta(w http.ResponseWriter, r *http.Request) {
+	midStr := chi.URLParam(r, "mid")
+	meta, err := e.cfg.Backend.DescriptorMeta(r.Context(), midStr)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(meta)
+}
+
+func (e *Explorer) handleDescriptorImport(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(64 << 20); err != nil {
+		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "no file: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	body, err := io.ReadAll(io.LimitReader(file, 64<<20))
+	if err != nil {
+		http.Error(w, "read: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	midStr, err := e.cfg.Backend.DescriptorImport(r.Context(), body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/explorer/mid/"+midStr, http.StatusSeeOther)
 }

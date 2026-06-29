@@ -96,6 +96,20 @@
       </dl>
     </div>
 
+    <div class="card">
+      <h2>Descriptor File</h2>
+      <dl>
+        <dt>Format</dt><dd>.mbuss v1</dd>
+        <dt>Magic</dt><dd><code>MEMB</code></dd>
+        <dt>Checksum</dt><dd>SHA-256</dd>
+        <dt>Encoding</dt><dd>Protobuf</dd>
+      </dl>
+      <div class="actions">
+        <a class="btn primary" href="/explorer/descriptor/{{.MID}}" download="{{.MID}}.mbuss">Export .mbuss</a>
+      </div>
+      <p class="muted" style="margin-top:8px; font-size:11px;">Portable descriptor with block hashes, erasure params, and bootstrap peers.</p>
+    </div>
+
     <div class="card span-2">
       <h2>Providers (DHT)</h2>
       <pre class="providers">{{range .Providers}}{{.}}
@@ -144,6 +158,20 @@
         <dt>Total shards</dt><dd>{{.TotalShards}}</dd>
         <dt>Health</dt><dd>{{.HealthLabel}} ({{.Health}})</dd>
       </dl>
+    </div>
+
+    <div class="card">
+      <h2>Descriptor File</h2>
+      <dl>
+        <dt>Format</dt><dd>.mbuss v1</dd>
+        <dt>Magic</dt><dd><code>MEMB</code></dd>
+        <dt>Checksum</dt><dd>SHA-256</dd>
+        <dt>Encoding</dt><dd>Protobuf</dd>
+      </dl>
+      <div class="actions">
+        <a class="btn primary" href="/explorer/descriptor/{{.MID}}" download="{{.MID}}.mbuss">Export .mbuss</a>
+      </div>
+      <p class="muted" style="margin-top:8px; font-size:11px;">Portable descriptor with block hashes, erasure params, and bootstrap peers.</p>
     </div>
 
     <div class="card span-2">
