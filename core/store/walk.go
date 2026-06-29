@@ -38,8 +38,16 @@ func Walk(bs BlockGetter, root mid.MID, visit func(m mid.MID, leaf bool) error) 
 		return errors.New("store: zero root MID")
 	}
 
+	visited := make(map[string]struct{})
+
 	var walk func(m mid.MID) error
 	walk = func(m mid.MID) error {
+		key := m.String()
+		if _, ok := visited[key]; ok {
+			return nil
+		}
+		visited[key] = struct{}{}
+
 		data, err := bs.Get(m)
 		if err != nil {
 			return fmt.Errorf("store: walk get %s: %w", m.String(), err)

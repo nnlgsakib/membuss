@@ -669,3 +669,110 @@ func TestMemStoreTimestampsWrittenOnPutDAG(t *testing.T) {
 	}
 }
 
+func TestWalkCycleDetection(t *testing.T) {
+	s := newTestStore(t)
+
+	// Build a DAG with diamond structure where the same child
+	// appears from multiple parents. Without cycle detection
+	// this would visit the shared child twice.
+	//
+	//   root -> A, B
+	//   A   -> shared
+	//   B   -> shared
+
+	sharedData := []byte("shared-child")
+	shared := mid.FromBytes(sharedData)
+	if err := s.Put(shared, sharedData); err != nil {
+		t.Fatalf("Put shared: %v", err)
+	}
+
+	// A has an extra link so its hash differs from B.
+	sharedData2 := []byte("extra-for-A")
+	shared2 := mid.FromBytes(sharedData2)
+	if err := s.Put(shared2, sharedData2); err != nil {
+		t.Fatalf("Put shared2: %v", err)
+	}
+
+	nodeA := &membusspb.DAGNode{Links: []string{shared.String(), shared2.String()}}
+	rawA, err := proto.Marshal(nodeA)
+	if err != nil {
+		t.Fatalf("marshal A: %v", err)
+	}
+	dagA := mid.FromBytes(rawA)
+	if err := s.PutDAG(dagA, rawA); err != nil {
+		t.Fatalf("PutDAG A: %v", err)
+	}
+
+	nodeB := &membusspb.DAGNode{Links: []string{shared.String()}}
+	rawB, err := proto.Marshal(nodeB)
+	if err != nil {
+		t.Fatalf("marshal B: %v", err)
+	}
+	dagB := mid.FromBytes(rawB)
+	if err := s.PutDAG(dagB, rawB); err != nil {
+		t.Fatalf("PutDAG B: %v", err)
+	}
+
+	rootNode := &membusspb.DAGNode{Links: []string{dagA.String(), dagB.String()}}
+	rawRoot, err := proto.Marshal(rootNode)
+	if err != nil {
+		t.Fatalf("marshal root: %v", err)
+	}
+	root := mid.FromBytes(rawRoot)
+	if err := s.PutDAG(root, rawRoot); err != nil {
+		t.Fatalf("PutDAG root: %v", err)
+	}
+
+	// Without cycle detection, shared would be visited twice.
+	visited := make(map[string]int)
+	err = Walk(s, root, func(m mid.MID, leaf bool) error {
+		visited[m.String()]++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	// root, dagA, dagB, shared, shared2 = 5 unique nodes.
+	if len(visited) != 5 {
+		t.Fatalf("Walk visited %d unique nodes, want 5", len(visited))
+	}
+	// shared must be visited exactly once.
+	if visited[shared.String()] != 1 {
+		t.Fatalf("shared visited %d times, want 1", visited[shared.String()])
+	}
+}
+
+func TestWalkSelfCycle(t *testing.T) {
+	s := newTestStore(t)
+
+	// A DAG that links to itself.
+	selfData := []byte("self-ref-payload")
+	selfMID := mid.FromBytes(selfData)
+	if err := s.Put(selfMID, selfData); err != nil {
+		t.Fatalf("Put selfMID: %v", err)
+	}
+
+	node := &membusspb.DAGNode{Links: []string{selfMID.String()}}
+	data, err := proto.Marshal(node)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	dag := mid.FromBytes(data)
+	if err := s.PutDAG(dag, data); err != nil {
+		t.Fatalf("PutDAG: %v", err)
+	}
+
+	visited := 0
+	err = Walk(s, dag, func(m mid.MID, leaf bool) error {
+		visited++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	// dag + selfMID = 2 nodes visited.
+	if visited != 2 {
+		t.Fatalf("Walk visited %d nodes, want 2", visited)
+	}
+}
+
