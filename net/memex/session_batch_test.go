@@ -26,6 +26,13 @@ func (m *mockStream) Write(p []byte) (n int, err error) {
 	return m.buf.Write(p)
 }
 
+func newTestPipelineState(maxDepth int) *pipelineState {
+	return &pipelineState{
+		maxDepth: maxDepth,
+		capCh:    make(chan struct{}, maxDepth),
+	}
+}
+
 func decodeFrames(buf []byte) ([]*membusspb.MemexMessage, error) {
 	var msgs []*membusspb.MemexMessage
 	r := bytes.NewReader(buf)
@@ -63,6 +70,7 @@ func TestWriteLoopBatching(t *testing.T) {
 
 	stream := &mockStream{}
 	eventChan := make(chan sessionEvent, 100)
+	ps := newTestPipelineState(1024)
 
 	// Create some MIDs to request
 	mids := make([]mid.MID, 5)
@@ -80,7 +88,7 @@ func TestWriteLoopBatching(t *testing.T) {
 	// Close channel to signal writeLoop to exit after processing
 	close(eventChan)
 
-	err := s.writeLoop(ctx, stream, eventChan)
+	err := s.writeLoop(ctx, stream, eventChan, ps)
 	if err != nil {
 		t.Fatalf("writeLoop exited with error: %v", err)
 	}
@@ -127,6 +135,7 @@ func TestWriteLoopBatchTimeout(t *testing.T) {
 
 	stream := &mockStream{}
 	eventChan := make(chan sessionEvent, 100)
+	ps := newTestPipelineState(1024)
 
 	mids := make([]mid.MID, 2)
 	for i := 0; i < 2; i++ {
@@ -136,7 +145,7 @@ func TestWriteLoopBatchTimeout(t *testing.T) {
 	// Start writeLoop in a goroutine
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- s.writeLoop(ctx, stream, eventChan)
+		errChan <- s.writeLoop(ctx, stream, eventChan, ps)
 	}()
 
 	// Send first event
@@ -189,6 +198,7 @@ func TestWriteLoopMaxBatchSize(t *testing.T) {
 
 	stream := &mockStream{}
 	eventChan := make(chan sessionEvent, 100)
+	ps := newTestPipelineState(1024)
 
 	// Queue 33 events
 	mids := make([]mid.MID, 33)
@@ -200,7 +210,7 @@ func TestWriteLoopMaxBatchSize(t *testing.T) {
 
 	close(eventChan)
 
-	err := s.writeLoop(ctx, stream, eventChan)
+	err := s.writeLoop(ctx, stream, eventChan, ps)
 	if err != nil {
 		t.Fatalf("writeLoop exited with error: %v", err)
 	}
@@ -221,5 +231,275 @@ func TestWriteLoopMaxBatchSize(t *testing.T) {
 	}
 	if len(msgs[1].Wants) != 1 {
 		t.Errorf("expected second frame to have 1 want, got %d", len(msgs[1].Wants))
+	}
+}
+
+func TestWriteLoopPipelineBlocks(t *testing.T) {
+	s := &Session{}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stream := &mockStream{}
+	eventChan := make(chan sessionEvent, 100)
+	ps := newTestPipelineState(2)
+	ps.inFlight = 2
+
+	mids := make([]mid.MID, 3)
+	for i := 0; i < 3; i++ {
+		mids[i] = mid.FromBytes([]byte(fmt.Sprintf("pipeline-block-%d", i)))
+	}
+
+	// Queue 3 wants.
+	for _, m := range mids {
+		eventChan <- sessionEvent{isCancel: false, mid: m}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.writeLoop(ctx, stream, eventChan, ps)
+	}()
+
+	// writeLoop should be blocked because inFlight >= maxDepth.
+	time.Sleep(50 * time.Millisecond)
+	msgs, _ := decodeFrames(stream.buf.Bytes())
+	if len(msgs) != 0 {
+		t.Fatal("writeLoop should not have sent anything yet")
+	}
+
+	// Simulate readLoop resolving one block.
+	ps.capCh <- struct{}{}
+
+	// writeLoop should now send a batch.
+	time.Sleep(50 * time.Millisecond)
+	msgs, _ = decodeFrames(stream.buf.Bytes())
+	if len(msgs) == 0 {
+		t.Fatal("writeLoop should have sent after signal")
+	}
+
+	close(eventChan)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("writeLoop error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("writeLoop did not exit")
+	}
+}
+
+func TestWriteLoopPipelineDepthRespected(t *testing.T) {
+	s := &Session{}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stream := &mockStream{}
+	eventChan := make(chan sessionEvent, 100)
+	ps := newTestPipelineState(3)
+
+	mids := make([]mid.MID, 6)
+	for i := 0; i < 6; i++ {
+		mids[i] = mid.FromBytes([]byte(fmt.Sprintf("depth-respect-%d", i)))
+	}
+
+	// Send first 3 wants (should all be sent immediately).
+	for i := 0; i < 3; i++ {
+		eventChan <- sessionEvent{isCancel: false, mid: mids[i]}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.writeLoop(ctx, stream, eventChan, ps)
+	}()
+
+	// Wait for first batch to be sent.
+	time.Sleep(50 * time.Millisecond)
+	msgs, _ := decodeFrames(stream.buf.Bytes())
+	if len(msgs) == 0 {
+		t.Fatal("expected at least 1 frame")
+	}
+
+	// Pipeline should now be full (inFlight == 3).
+	if ps.inFlight != 3 {
+		t.Fatalf("inFlight = %d, want 3", ps.inFlight)
+	}
+
+	// Send 3 more wants — these should block.
+	for i := 3; i < 6; i++ {
+		eventChan <- sessionEvent{isCancel: false, mid: mids[i]}
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	bufLen := stream.buf.Len()
+
+	// Resolve 2 blocks to free capacity.
+	ps.capCh <- struct{}{}
+	ps.capCh <- struct{}{}
+
+	time.Sleep(50 * time.Millisecond)
+
+	// More data should have been written.
+	if stream.buf.Len() <= bufLen {
+		t.Fatal("writeLoop should have sent more after signal")
+	}
+
+	close(eventChan)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("writeLoop error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("writeLoop did not exit")
+	}
+}
+
+func TestWriteLoopPipelineCancelsFreeCapacity(t *testing.T) {
+	s := &Session{}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stream := &mockStream{}
+	eventChan := make(chan sessionEvent, 100)
+	ps := newTestPipelineState(2)
+
+	mids := make([]mid.MID, 4)
+	for i := 0; i < 4; i++ {
+		mids[i] = mid.FromBytes([]byte(fmt.Sprintf("cancel-free-%d", i)))
+	}
+
+	// Fill pipeline.
+	eventChan <- sessionEvent{isCancel: false, mid: mids[0]}
+	eventChan <- sessionEvent{isCancel: false, mid: mids[1]}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.writeLoop(ctx, stream, eventChan, ps)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancels should NOT block on pipeline capacity.
+	eventChan <- sessionEvent{isCancel: true, mid: mids[0]}
+	eventChan <- sessionEvent{isCancel: true, mid: mids[1]}
+
+	// 2 more wants — should block because pipeline is full.
+	eventChan <- sessionEvent{isCancel: false, mid: mids[2]}
+	eventChan <- sessionEvent{isCancel: false, mid: mids[3]}
+
+	time.Sleep(50 * time.Millisecond)
+	msgs, _ := decodeFrames(stream.buf.Bytes())
+
+	// Should have at least 2 frames: initial wants + cancels.
+	if len(msgs) < 2 {
+		t.Fatalf("expected at least 2 frames, got %d", len(msgs))
+	}
+
+	// Verify cancels were sent.
+	foundCancel := false
+	for _, msg := range msgs {
+		if len(msg.Cancel) > 0 {
+			foundCancel = true
+			break
+		}
+	}
+	if !foundCancel {
+		t.Fatal("expected cancel messages to be sent")
+	}
+
+	close(eventChan)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("writeLoop error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("writeLoop did not exit")
+	}
+}
+
+func TestWriteLoopPipelineShutdown(t *testing.T) {
+	s := &Session{}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stream := &mockStream{}
+	eventChan := make(chan sessionEvent, 100)
+	ps := newTestPipelineState(1)
+
+	// Fill pipeline.
+	mid1 := mid.FromBytes([]byte("shutdown-test-1"))
+	eventChan <- sessionEvent{isCancel: false, mid: mid1}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.writeLoop(ctx, stream, eventChan, ps)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Close both channels — writeLoop should exit.
+	close(eventChan)
+	close(ps.capCh)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("writeLoop error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("writeLoop did not exit after pipeline close")
+	}
+}
+
+func TestWriteLoopPipelinePendingOverflow(t *testing.T) {
+	s := &Session{}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stream := &mockStream{}
+	eventChan := make(chan sessionEvent, 100)
+	ps := newTestPipelineState(2)
+
+	mids := make([]mid.MID, 5)
+	for i := 0; i < 5; i++ {
+		mids[i] = mid.FromBytes([]byte(fmt.Sprintf("overflow-%d", i)))
+	}
+
+	// Queue 5 wants.
+	for _, m := range mids {
+		eventChan <- sessionEvent{isCancel: false, mid: m}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.writeLoop(ctx, stream, eventChan, ps)
+	}()
+
+	// First batch should be sent (2 wants).
+	time.Sleep(50 * time.Millisecond)
+	msgs, _ := decodeFrames(stream.buf.Bytes())
+	if len(msgs) == 0 {
+		t.Fatal("expected at least 1 frame")
+	}
+
+	// Resolve 1 to free capacity.
+	ps.capCh <- struct{}{}
+
+	time.Sleep(50 * time.Millisecond)
+
+	// The pending overflow event should have been sent.
+	bufLen := stream.buf.Len()
+	if bufLen == 0 {
+		t.Fatal("expected data to be written")
+	}
+
+	close(eventChan)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("writeLoop error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("writeLoop did not exit")
 	}
 }

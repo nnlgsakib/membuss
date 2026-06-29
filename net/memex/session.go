@@ -29,6 +29,24 @@ type SessionConfig struct {
 	ParallelPeers int
 	Timeout       time.Duration
 	ProgressFn    func(blocksResolved, blocksTotal uint64)
+
+	// PipelineDepth controls the maximum number of in-flight
+	// want requests per provider stream. When the pipeline is
+	// full, writeLoop waits for readLoop to resolve or cancel
+	// requests before sending more. Zero uses DefaultPipelineDepth.
+	PipelineDepth int
+}
+
+// pipelineState tracks in-flight request count for one provider
+// stream and provides a channel for writeLoop to wait when the
+// pipeline is full.
+type pipelineState struct {
+	inFlight int
+	maxDepth int
+	// capCh is a buffered channel used as a semaphore. readLoop
+	// sends on it when blocks are resolved (freeing capacity).
+	// writeLoop receives from it to know when to send more.
+	capCh chan struct{}
 }
 
 type sessionEvent struct {
@@ -362,6 +380,16 @@ func (s *Session) runProvider(ctx context.Context, provider peer.AddrInfo) error
 	}
 	s.mu.Unlock()
 
+	// Create pipeline state for this stream.
+	depth := s.cfg.PipelineDepth
+	if depth <= 0 {
+		depth = DefaultPipelineDepth
+	}
+	ps := &pipelineState{
+		maxDepth: depth,
+		capCh:    make(chan struct{}, depth),
+	}
+
 	defer func() {
 		s.mu.Lock()
 		for i, ch := range s.streamChans {
@@ -382,18 +410,18 @@ func (s *Session) runProvider(ctx context.Context, provider peer.AddrInfo) error
 	go func() {
 		defer wg.Done()
 		defer cancel()
-		_ = s.readLoop(pctx, stream)
+		_ = s.readLoop(pctx, stream, ps)
 	}()
 	go func() {
 		defer wg.Done()
 		defer cancel()
-		_ = s.writeLoop(pctx, stream, eventChan)
+		_ = s.writeLoop(pctx, stream, eventChan, ps)
 	}()
 	wg.Wait()
 	return nil
 }
 
-func (s *Session) readLoop(ctx context.Context, stream network.Stream) error {
+func (s *Session) readLoop(ctx context.Context, stream network.Stream, ps *pipelineState) error {
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -407,6 +435,7 @@ func (s *Session) readLoop(ctx context.Context, stream network.Stream) error {
 		if err := proto.Unmarshal(buf, &msg); err != nil {
 			return fmt.Errorf("memex session: unmarshal: %w", err)
 		}
+		resolvedCount := 0
 		for _, b := range msg.Blocks {
 			if b == nil || b.Mid == "" {
 				continue
@@ -419,6 +448,14 @@ func (s *Session) readLoop(ctx context.Context, stream network.Stream) error {
 				continue
 			}
 			s.markResolved(id)
+			resolvedCount++
+		}
+		// Signal writeLoop that capacity opened up.
+		for i := 0; i < resolvedCount; i++ {
+			select {
+			case ps.capCh <- struct{}{}:
+			default:
+			}
 		}
 		if len(msg.ObjectInfos) > 0 {
 			s.storeObjectInfos(msg.ObjectInfos)
@@ -458,23 +495,61 @@ func (s *Session) storeObjectInfos(infos map[string]*membusspb.ObjectInfo) {
 	}
 }
 
-func (s *Session) writeLoop(ctx context.Context, stream network.Stream, eventChan <-chan sessionEvent) error {
+func (s *Session) writeLoop(ctx context.Context, stream network.Stream, eventChan <-chan sessionEvent, ps *pipelineState) error {
 	const (
 		maxBatchSize = 32
 		flushTimeout = 5 * time.Millisecond
 	)
 
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case ev, ok := <-eventChan:
-			if !ok {
-				return nil
-			}
+	var pending []sessionEvent
 
-			// Start a batch.
-			var msg membusspb.MemexMessage
+	for {
+		// Drain pending events first.
+		var firstEv sessionEvent
+		var gotFirst bool
+		if len(pending) > 0 {
+			firstEv = pending[0]
+			pending = pending[1:]
+			gotFirst = true
+		} else {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case ev, ok := <-eventChan:
+				if !ok {
+					return nil
+				}
+				firstEv = ev
+				gotFirst = true
+			}
+		}
+
+		if !gotFirst {
+			continue
+		}
+
+		// Wait for pipeline capacity before sending wants.
+		if !firstEv.isCancel {
+			for ps.inFlight >= ps.maxDepth {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-ps.capCh:
+					ps.inFlight--
+				case ev, ok := <-eventChan:
+					if !ok {
+						return nil
+					}
+					pending = append(pending, ev)
+				}
+			}
+		}
+
+		// Build batch.
+		var msg membusspb.MemexMessage
+		newWantCount := 0
+
+		addEvent := func(ev sessionEvent) {
 			if ev.isCancel {
 				msg.Cancel = append(msg.Cancel, ev.mid.String())
 			} else {
@@ -482,47 +557,61 @@ func (s *Session) writeLoop(ctx context.Context, stream network.Stream, eventCha
 					Mid:          ev.mid.String(),
 					SendDontHave: true,
 				})
+				newWantCount++
 			}
+		}
 
-			batchCount := 1
-			timer := time.NewTimer(flushTimeout)
-			closed := false
+		addEvent(firstEv)
 
-		batchLoop:
-			for batchCount < maxBatchSize && !closed {
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					return ctx.Err()
-				case <-timer.C:
-					// Batch timer fired, flush now.
+		batchCount := 1
+		timer := time.NewTimer(flushTimeout)
+		closed := false
+
+	batchLoop:
+		for batchCount < maxBatchSize && !closed {
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+				break batchLoop
+			case nextEv, nextOk := <-eventChan:
+				if !nextOk {
+					closed = true
 					break batchLoop
-				case nextEv, nextOk := <-eventChan:
-					if !nextOk {
-						closed = true
+				}
+
+				// If it's a want, check pipeline capacity.
+				if !nextEv.isCancel {
+					if ps.inFlight+newWantCount >= ps.maxDepth {
+						pending = append(pending, nextEv)
 						break batchLoop
 					}
-					if nextEv.isCancel {
-						msg.Cancel = append(msg.Cancel, nextEv.mid.String())
-					} else {
-						msg.Wants = append(msg.Wants, &membusspb.WantEntry{
-							Mid:          nextEv.mid.String(),
-							SendDontHave: true,
-						})
-					}
-					batchCount++
 				}
-			}
-			timer.Stop()
 
-			_ = stream.SetWriteDeadline(time.Now().Add(DefaultPeerTimeout))
-			if err := writeFrame(stream, &msg); err != nil {
-				return err
+				addEvent(nextEv)
+				batchCount++
 			}
+		}
+		timer.Stop()
 
+		if len(msg.Wants) == 0 && len(msg.Cancel) == 0 {
 			if closed {
 				return nil
 			}
+			continue
+		}
+
+		_ = stream.SetWriteDeadline(time.Now().Add(DefaultPeerTimeout))
+		if err := writeFrame(stream, &msg); err != nil {
+			return err
+		}
+
+		// Record in-flight wants.
+		ps.inFlight += newWantCount
+
+		if closed {
+			return nil
 		}
 	}
 }
