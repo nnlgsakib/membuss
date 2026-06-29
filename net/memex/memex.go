@@ -57,6 +57,11 @@ const (
 	// in-flight wants per provider stream. A depth of 8 keeps
 	// the pipe full without overwhelming a single peer.
 	DefaultPipelineDepth = 8
+	// DefaultStreamsPerProvider is the default number of
+	// concurrent streams opened to each provider peer.
+	DefaultStreamsPerProvider = 2
+	// MaxStreamsPerProvider caps the number of streams per peer.
+	MaxStreamsPerProvider = 8
 	// maxFrameSize caps a single MemexMessage frame.
 	maxFrameSize = 16 << 20
 )

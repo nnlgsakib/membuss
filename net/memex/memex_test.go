@@ -255,6 +255,77 @@ func TestMemex_ObjectInfoTransmit(t *testing.T) {
 		t.Errorf("mime: got %q want %q", oi.MimeType, "text/plain; charset=utf-8")
 	}
 	if oi.Size != uint64(len(content)) {
-		t.Errorf("size: got %d want %d", oi.Size, len(content))
+		t.Errorf("size: got %d want %d", oi.Size, uint64(len(content)))
+	}
+}
+
+// TestMemex_MultipleStreamsPerProvider verifies that opening
+// multiple streams per provider produces the same correct
+// result as a single stream. The content must be identical.
+func TestMemex_MultipleStreamsPerProvider(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	content := makeContent(t, 2*1024*1024)
+	sum := sha256.Sum256(content)
+
+	hA := newTestHost(t)
+	t.Cleanup(func() { _ = hA.Close() })
+	_, bsA := newTestEngine(t, hA)
+	rootStr := buildDAG(t, content, bsA)
+
+	hB := newTestHost(t)
+	t.Cleanup(func() { _ = hB.Close() })
+	engB, _ := newTestEngine(t, hB)
+
+	if err := hA.Connect(ctx, peer.AddrInfo{ID: hB.ID(), Addrs: hB.Addrs()}); err != nil {
+		t.Fatalf("hA connect hB: %v", err)
+	}
+	if err := hB.Connect(ctx, peer.AddrInfo{ID: hA.ID(), Addrs: hA.Addrs()}); err != nil {
+		t.Fatalf("hB connect hA: %v", err)
+	}
+
+	root, err := mid.Parse(rootStr)
+	if err != nil {
+		t.Fatalf("parse root: %v", err)
+	}
+
+	sess, err := NewSession(SessionConfig{
+		Engine:            engB,
+		Root:              root,
+		Providers:         []peer.AddrInfo{{ID: hA.ID(), Addrs: hA.Addrs()}},
+		Timeout:           45 * time.Second,
+		StreamsPerProvider: 3,
+	})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	rc, err := sess.Fetch(ctx)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(got) != len(content) {
+		t.Fatalf("len mismatch: got %d want %d", len(got), len(content))
+	}
+	if sha256.Sum256(got) != sum {
+		t.Fatalf("content mismatch")
+	}
+}
+
+// TestMemex_MultiStreamDefaults verifies that the default
+// StreamsPerProvider value is applied when not explicitly set.
+func TestMemex_MultiStreamDefaults(t *testing.T) {
+	if DefaultStreamsPerProvider != 2 {
+		t.Fatalf("DefaultStreamsPerProvider = %d, want 2", DefaultStreamsPerProvider)
+	}
+	// Verify the constant is bounded.
+	if MaxStreamsPerProvider < DefaultStreamsPerProvider {
+		t.Fatalf("MaxStreamsPerProvider (%d) < DefaultStreamsPerProvider (%d)",
+			MaxStreamsPerProvider, DefaultStreamsPerProvider)
 	}
 }

@@ -35,6 +35,15 @@ type SessionConfig struct {
 	// full, writeLoop waits for readLoop to resolve or cancel
 	// requests before sending more. Zero uses DefaultPipelineDepth.
 	PipelineDepth int
+
+	// StreamsPerProvider controls how many concurrent libp2p
+	// streams are opened to each provider peer. Multiple
+	// streams allow true parallel block transfers — while one
+	// stream is receiving a large block, other streams can
+	// transfer different blocks concurrently. Higher values
+	// increase throughput at the cost of more open streams.
+	// Zero uses DefaultStreamsPerProvider.
+	StreamsPerProvider int
 }
 
 // pipelineState tracks in-flight request count for one provider
@@ -355,9 +364,37 @@ func (s *Session) enqueueChildren(ctx context.Context, midStr string) error {
 	return nil
 }
 
-// runProvider opens a single Memex stream to provider, then
-// runs a read loop and a write loop concurrently.
+// runProvider opens one or more Memex streams to provider
+// (controlled by StreamsPerProvider) and runs a read/write
+// loop pair on each stream concurrently. Multiple streams
+// allow true parallel block transfers: while one stream is
+// receiving a large block, other streams can transfer
+// different blocks concurrently.
 func (s *Session) runProvider(ctx context.Context, provider peer.AddrInfo) error {
+	streamsPerPeer := s.cfg.StreamsPerProvider
+	if streamsPerPeer <= 0 {
+		streamsPerPeer = DefaultStreamsPerProvider
+	}
+	if streamsPerPeer > MaxStreamsPerProvider {
+		streamsPerPeer = MaxStreamsPerProvider
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(streamsPerPeer)
+	for i := 0; i < streamsPerPeer; i++ {
+		go func() {
+			defer wg.Done()
+			_ = s.runStream(ctx, provider, i)
+		}()
+	}
+	wg.Wait()
+	return nil
+}
+
+// runStream opens a single Memex stream to provider and runs
+// a read loop and a write loop concurrently. streamIdx is
+// used for logging/diagnostics only.
+func (s *Session) runStream(ctx context.Context, provider peer.AddrInfo, streamIdx int) error {
 	stream, err := s.cfg.Engine.openStream(ctx, provider.ID)
 	type dialNotifier interface {
 		NotifyDialResult(peer.ID, error)
@@ -366,7 +403,7 @@ func (s *Session) runProvider(ctx context.Context, provider peer.AddrInfo) error
 		dn.NotifyDialResult(provider.ID, err)
 	}
 	if err != nil {
-		return fmt.Errorf("memex session: open %s: %w", provider.ID, err)
+		return fmt.Errorf("memex session: open %s stream %d: %w", provider.ID, streamIdx, err)
 	}
 	defer stream.Close()
 
@@ -405,19 +442,19 @@ func (s *Session) runProvider(ctx context.Context, provider peer.AddrInfo) error
 	pctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	var wg sync.WaitGroup
-	wg.Add(2)
+	var swg sync.WaitGroup
+	swg.Add(2)
 	go func() {
-		defer wg.Done()
+		defer swg.Done()
 		defer cancel()
 		_ = s.readLoop(pctx, stream, ps)
 	}()
 	go func() {
-		defer wg.Done()
+		defer swg.Done()
 		defer cancel()
 		_ = s.writeLoop(pctx, stream, eventChan, ps)
 	}()
-	wg.Wait()
+	swg.Wait()
 	return nil
 }
 
