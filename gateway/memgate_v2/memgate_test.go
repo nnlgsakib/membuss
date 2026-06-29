@@ -1,0 +1,1166 @@
+package memgate_v2
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"mime"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"testing/fstest"
+
+	"github.com/nnlgsakib/membuss/core/memfs"
+	"github.com/nnlgsakib/membuss/core/mid"
+	"github.com/nnlgsakib/membuss/core/store"
+)
+
+type memBackend struct {
+	mu       sync.Mutex
+	content  map[string][]byte
+	sealed   map[string]bool
+	stat     map[string]ContentInfo
+	failPing bool
+}
+
+func newMemBackend() *memBackend {
+	return &memBackend{
+		content: map[string][]byte{},
+		sealed:  map[string]bool{},
+		stat:    map[string]ContentInfo{},
+	}
+}
+
+func (b *memBackend) put(m mid.MID, data []byte, contentType string) {
+	b.putWithMeta(m, data, contentType, "", "")
+}
+
+func (b *memBackend) putWithMeta(m mid.MID, data []byte, contentType, name, mimeType string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.content[m.String()] = data
+	b.stat[m.String()] = ContentInfo{
+		MID:         m.String(),
+		Size:        uint64(len(data)),
+		Blocks:      1,
+		ContentType: contentType,
+		Sealed:      true,
+		Name:        name,
+		MimeType:    mimeType,
+	}
+}
+
+func (b *memBackend) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser, ContentInfo, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	data, ok := b.content[m.String()]
+	if !ok {
+		return nil, ContentInfo{}, errNotFound
+	}
+	return io.NopCloser(bytes.NewReader(data)), b.stat[m.String()], nil
+}
+
+func (b *memBackend) RawBlock(ctx context.Context, m mid.MID) ([]byte, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	data, ok := b.content[m.String()]
+	if !ok {
+		return nil, errNotFound
+	}
+	return append([]byte(nil), data...), nil
+}
+
+func (b *memBackend) DAGNodeJSON(ctx context.Context, m mid.MID) ([]byte, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	data, ok := b.content[m.String()]
+	if !ok {
+		return nil, errNotFound
+	}
+	out := map[string]any{
+		"mid":   m.String(),
+		"size":  len(data),
+		"links": []string{},
+	}
+	return json.Marshal(out)
+}
+
+func (b *memBackend) Stat(ctx context.Context, m mid.MID) (ContentInfo, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	info, ok := b.stat[m.String()]
+	if !ok {
+		return ContentInfo{}, errNotFound
+	}
+	return info, nil
+}
+
+func (b *memBackend) Ping(ctx context.Context) error {
+	if b.failPing {
+		return errNotFound
+	}
+	return nil
+}
+
+func (b *memBackend) MemFSInfo(ctx context.Context, m mid.MID) (MemFSInfo, error) {
+	return MemFSInfo{}, errNotFound
+}
+
+func (b *memBackend) MemFSPathGet(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error) {
+	return nil, 0, "", errNotFound
+}
+
+func (b *memBackend) MemFSList(ctx context.Context, m mid.MID) ([]MemFSEntry, error) {
+	return nil, errNotFound
+}
+
+func (b *memBackend) MemFSPathInfo(ctx context.Context, m mid.MID, path string) (MemFSInfo, error) {
+	return MemFSInfo{}, errNotFound
+}
+
+func (b *memBackend) MemFSPathList(ctx context.Context, m mid.MID, path string) ([]MemFSEntry, error) {
+	return nil, errNotFound
+}
+
+var errNotFound = &notFoundError{}
+
+type notFoundError struct{}
+
+func (e *notFoundError) Error() string { return "not found" }
+
+func newTestGate(t *testing.T, b Backend) *MemGate {
+	t.Helper()
+	mg, err := New(Config{Backend: b, MaxCacheBytes: 1 << 20})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return mg
+}
+
+func putRandom(b *memBackend, data []byte) mid.MID {
+	m := mid.FromBytes(data)
+	b.put(m, data, http.DetectContentType(data))
+	return m
+}
+
+func TestGet_Raw_Default(t *testing.T) {
+	b := newMemBackend()
+	body := []byte("hello, world!")
+	m := putRandom(b, body)
+
+	srv := httptest.NewServer(newTestGate(t, b).Router())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/mem/" + m.String())
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	if resp.Header.Get("X-Membuss-MID") != m.String() {
+		t.Errorf("mid header: %q", resp.Header.Get("X-Membuss-MID"))
+	}
+	if resp.Header.Get("ETag") != `"`+m.String()+`"` {
+		t.Errorf("etag: %q", resp.Header.Get("ETag"))
+	}
+	if !strings.Contains(resp.Header.Get("Cache-Control"), "immutable") {
+		t.Errorf("cache-control: %q", resp.Header.Get("Cache-Control"))
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(got, body) {
+		t.Errorf("body: got %q want %q", got, body)
+	}
+}
+
+func TestGet_Format_Raw(t *testing.T) {
+	b := newMemBackend()
+	body := []byte("\x00\x01\x02binary data")
+	m := putRandom(b, body)
+	srv := httptest.NewServer(newTestGate(t, b).Router())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/mem/" + m.String() + "?format=raw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	if resp.Header.Get("Content-Type") != "application/octet-stream" {
+		t.Errorf("content-type: %q", resp.Header.Get("Content-Type"))
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(got, body) {
+		t.Errorf("body mismatch")
+	}
+}
+
+func TestGet_Format_DAGJSON(t *testing.T) {
+	b := newMemBackend()
+	m := putRandom(b, []byte("hello"))
+	srv := httptest.NewServer(newTestGate(t, b).Router())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/mem/" + m.String() + "?format=dag-json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json") {
+		t.Errorf("content-type: %q", resp.Header.Get("Content-Type"))
+	}
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out["mid"] != m.String() {
+		t.Errorf("mid: %v", out["mid"])
+	}
+}
+
+func TestHead_ReturnsHeaders(t *testing.T) {
+	b := newMemBackend()
+	body := []byte("payload")
+	m := putRandom(b, body)
+	srv := httptest.NewServer(newTestGate(t, b).Router())
+	defer srv.Close()
+	resp, err := http.Head(srv.URL + "/mem/" + m.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	if resp.Header.Get("Content-Length") != "7" {
+		t.Errorf("content-length: %q", resp.Header.Get("Content-Length"))
+	}
+	if resp.Header.Get("Accept-Ranges") != "bytes" {
+		t.Errorf("accept-ranges: %q", resp.Header.Get("Accept-Ranges"))
+	}
+}
+
+func TestRange_Bytes_Suffix(t *testing.T) {
+	b := newMemBackend()
+	body := []byte("0123456789")
+	m := putRandom(b, body)
+	srv := httptest.NewServer(newTestGate(t, b).Router())
+	defer srv.Close()
+	req, _ := http.NewRequest("GET", srv.URL+"/mem/"+m.String(), nil)
+	req.Header.Set("Range", "bytes=-3")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 206 {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	if resp.Header.Get("Content-Range") != "bytes 7-9/10" {
+		t.Errorf("content-range: %q", resp.Header.Get("Content-Range"))
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if string(got) != "789" {
+		t.Errorf("body: %q", string(got))
+	}
+}
+
+func TestRange_Bytes_Open(t *testing.T) {
+	b := newMemBackend()
+	body := []byte("0123456789")
+	m := putRandom(b, body)
+	srv := httptest.NewServer(newTestGate(t, b).Router())
+	defer srv.Close()
+	req, _ := http.NewRequest("GET", srv.URL+"/mem/"+m.String(), nil)
+	req.Header.Set("Range", "bytes=2-5")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 206 {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	if resp.Header.Get("Content-Range") != "bytes 2-5/10" {
+		t.Errorf("content-range: %q", resp.Header.Get("Content-Range"))
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if string(got) != "2345" {
+		t.Errorf("body: %q", string(got))
+	}
+}
+
+func TestRange_Bytes_OpenEnd(t *testing.T) {
+	b := newMemBackend()
+	body := []byte("0123456789")
+	m := putRandom(b, body)
+	srv := httptest.NewServer(newTestGate(t, b).Router())
+	defer srv.Close()
+	req, _ := http.NewRequest("GET", srv.URL+"/mem/"+m.String(), nil)
+	req.Header.Set("Range", "bytes=4-")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 206 {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if string(got) != "456789" {
+		t.Errorf("body: %q", string(got))
+	}
+}
+
+func TestRange_Invalid(t *testing.T) {
+	b := newMemBackend()
+	m := putRandom(b, []byte("abcdefgh"))
+	srv := httptest.NewServer(newTestGate(t, b).Router())
+	defer srv.Close()
+	req, _ := http.NewRequest("GET", srv.URL+"/mem/"+m.String(), nil)
+	req.Header.Set("Range", "bytes=100-200")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestedRangeNotSatisfiable {
+		t.Errorf("status: %d", resp.StatusCode)
+	}
+}
+
+func TestGet_BadMID(t *testing.T) {
+	b := newMemBackend()
+	srv := httptest.NewServer(newTestGate(t, b).Router())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/mem/not-a-valid-mid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("status: %d", resp.StatusCode)
+	}
+}
+
+func TestGet_MissingMID(t *testing.T) {
+	b := newMemBackend()
+	m := mid.FromBytes([]byte("never added"))
+	srv := httptest.NewServer(newTestGate(t, b).Router())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/mem/" + m.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Errorf("status: %d", resp.StatusCode)
+	}
+}
+
+func TestHealthz_OK(t *testing.T) {
+	b := newMemBackend()
+	srv := httptest.NewServer(newTestGate(t, b).Router())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 204 {
+		t.Errorf("status: %d", resp.StatusCode)
+	}
+}
+
+func TestHealthz_503(t *testing.T) {
+	b := newMemBackend()
+	b.failPing = true
+	srv := httptest.NewServer(newTestGate(t, b).Router())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 503 {
+		t.Errorf("status: %d", resp.StatusCode)
+	}
+}
+
+func TestLRU_BasicGetPut(t *testing.T) {
+	l := newLRU(100)
+	l.put("a", []byte("hello"))
+	if data, ok := l.get("a"); !ok || string(data) != "hello" {
+		t.Errorf("get a: %q ok=%v", data, ok)
+	}
+	l.put("b", []byte("world"))
+	if _, ok := l.get("a"); !ok {
+		t.Errorf("a evicted unexpectedly")
+	}
+	l.put("c", make([]byte, 200))
+	if _, ok := l.get("a"); ok {
+		t.Errorf("a should be evicted")
+	}
+	if l.bytes() > l.max() {
+		t.Errorf("bytes over cap: %d > %d", l.bytes(), l.max())
+	}
+}
+
+func TestLRU_MarshalJSON(t *testing.T) {
+	l := newLRU(100)
+	l.put("a", []byte("hello"))
+	b, err := json.Marshal(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"entries":1`) {
+		t.Errorf("marshal: %s", b)
+	}
+}
+
+func TestParseRange_Cases(t *testing.T) {
+	cases := []struct {
+		s       string
+		size    int64
+		start   int64
+		end     int64
+		wantErr bool
+	}{
+		{"bytes=0-9", 10, 0, 10, false},
+		{"bytes=5-", 10, 5, 10, false},
+		{"bytes=-3", 10, 7, 10, false},
+		{"bytes=0-0", 10, 0, 1, false},
+		{"bytes=100-200", 10, 0, 0, true},
+		{"bytes=0-9,20-29", 30, 0, 0, true},
+		{"items=0-9", 10, 0, 0, true},
+	}
+	for _, c := range cases {
+		s, e, err := parseRange(c.s, c.size)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("%q: expected error", c.s)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%q: %v", c.s, err)
+			continue
+		}
+		if s != c.start || e != c.end {
+			t.Errorf("%q: got [%d,%d) want [%d,%d)", c.s, s, e, c.start, c.end)
+		}
+	}
+}
+
+func TestDetectContentType_OverrideWins(t *testing.T) {
+	got := DetectContentType("mem1abc.html", []byte("<html/>"), "text/x-custom")
+	if got != "text/x-custom" {
+		t.Errorf("override: %q", got)
+	}
+}
+
+func TestDetectContentType_EmptyData(t *testing.T) {
+	got := DetectContentType("mem1abc", nil, "")
+	if got != "application/octet-stream" {
+		t.Errorf("empty: %q", got)
+	}
+}
+
+func TestDetectContentType_HTMLByExtension(t *testing.T) {
+	_ = mime.TypeByExtension
+	ct := DetectContentType("mem1.html", []byte("x"), "")
+	if !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("html: %q", ct)
+	}
+}
+
+func TestDownloadDisposition(t *testing.T) {
+	be := newMemBackend()
+	m := mid.FromBytes([]byte("hello world"))
+	be.putWithMeta(m, []byte("hello world"), "text/plain", "hello world.txt", "text/plain; charset=utf-8")
+	mg, err := New(Config{Backend: be, MaxCacheBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(mg.Router())
+	defer srv.Close()
+	url := srv.URL + "/mem/" + m.String()
+
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	disp := resp.Header.Get("Content-Disposition")
+	if !strings.HasPrefix(disp, "inline;") {
+		t.Fatalf("default Content-Disposition: got %q, want inline prefix", disp)
+	}
+	if !strings.Contains(disp, "hello world.txt") {
+		t.Fatalf("default Content-Disposition should include uploader filename: %q", disp)
+	}
+
+	resp2, err := http.Get(url + "?download=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	disp2 := resp2.Header.Get("Content-Disposition")
+	if !strings.HasPrefix(disp2, "attachment;") {
+		t.Fatalf("download=1 Content-Disposition: got %q, want attachment prefix", disp2)
+	}
+	if !strings.Contains(disp2, "hello world.txt") {
+		t.Fatalf("download=1 Content-Disposition should include uploader filename: %q", disp2)
+	}
+
+	custom := "myreport.txt"
+	resp3, err := http.Get(url + "?download=1&filename=" + custom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp3.Body.Close()
+	disp3 := resp3.Header.Get("Content-Disposition")
+	if !strings.Contains(disp3, custom) {
+		t.Fatalf("custom filename: got %q, want substring %q", disp3, custom)
+	}
+}
+
+type memfsBackend struct {
+	*memBackend
+	resolver *memfs.Resolver
+	bs       store.Blockstore
+}
+
+func (b *memfsBackend) RawBlock(ctx context.Context, m mid.MID) ([]byte, error) {
+	if b.bs != nil {
+		data, err := b.bs.Get(m)
+		if err == nil {
+			return data, nil
+		}
+	}
+	return b.memBackend.RawBlock(ctx, m)
+}
+
+func (b *memfsBackend) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser, ContentInfo, error) {
+	if b.bs != nil && m.Codec() == mid.CodecMemFS {
+		mr := memfs.NewResolver(b.bs)
+		node, err := mr.Resolve(ctx, m)
+		if err == nil {
+			if node.IsFile() {
+				rc, err := mr.Open(ctx, m)
+				if err == nil {
+					return rc, ContentInfo{
+						MID:      m.String(),
+						Size:     node.TotalSize(),
+						Blocks:   uint64(1 + node.BlockCount()),
+						MimeType: node.MimeType(),
+						Sealed:   true,
+					}, nil
+				}
+			}
+		}
+	}
+	return b.memBackend.Resolve(ctx, m)
+}
+
+func (b *memfsBackend) Stat(ctx context.Context, m mid.MID) (ContentInfo, error) {
+	if b.bs != nil && m.Codec() == mid.CodecMemFS {
+		mr := memfs.NewResolver(b.bs)
+		node, err := mr.Resolve(ctx, m)
+		if err == nil {
+			return ContentInfo{
+				MID:      m.String(),
+				Size:     node.TotalSize(),
+				Blocks:   uint64(1 + node.BlockCount()),
+				MimeType: node.MimeType(),
+				Sealed:   true,
+			}, nil
+		}
+	}
+	return b.memBackend.Stat(ctx, m)
+}
+
+func (b *memfsBackend) MemFSInfo(ctx context.Context, m mid.MID) (MemFSInfo, error) {
+	st, err := b.resolver.Stat(ctx, m)
+	if err != nil {
+		return MemFSInfo{}, errNotFound
+	}
+	return MemFSInfo{
+		MID:  m.String(),
+		Type: memFSTypeString(st.Type),
+		Size: st.Size,
+	}, nil
+}
+
+func (b *memfsBackend) MemFSPathGet(ctx context.Context, m mid.MID, path string) (io.ReadSeekCloser, uint64, string, error) {
+	node, err := b.resolver.ResolvePath(ctx, m, path)
+	if err != nil {
+		return nil, 0, "", errNotFound
+	}
+	if !node.IsFile() {
+		return nil, 0, "", errNotFound
+	}
+	rc, err := b.resolver.Open(ctx, node.MustMID())
+	if err != nil {
+		return nil, 0, "", err
+	}
+	return rc, node.TotalSize(), node.MimeType(), nil
+}
+
+func (b *memfsBackend) MemFSList(ctx context.Context, m mid.MID) ([]MemFSEntry, error) {
+	st, err := b.resolver.Stat(ctx, m)
+	if err != nil {
+		return nil, errNotFound
+	}
+	if st.Type != memfs.TypeDir {
+		return nil, errNotFound
+	}
+	out := make([]MemFSEntry, 0, len(st.Entries))
+	for _, e := range st.Entries {
+		out = append(out, MemFSEntry{
+			Name: e.Name,
+			MID:  e.Mid.String(),
+			Type: memFSTypeString(e.Type),
+			Size: e.Size,
+		})
+	}
+	return out, nil
+}
+
+func (b *memfsBackend) MemFSPathInfo(ctx context.Context, m mid.MID, subPath string) (MemFSInfo, error) {
+	node, err := b.resolver.ResolvePath(ctx, m, subPath)
+	if err != nil {
+		return MemFSInfo{}, errNotFound
+	}
+	return MemFSInfo{
+		MID:  node.MustMID().String(),
+		Type: memFSTypeString(node.GetType()),
+		Size: node.TotalSize(),
+	}, nil
+}
+
+func (b *memfsBackend) MemFSPathList(ctx context.Context, m mid.MID, subPath string) ([]MemFSEntry, error) {
+	node, err := b.resolver.ResolvePath(ctx, m, subPath)
+	if err != nil {
+		return nil, errNotFound
+	}
+	if !node.IsDir() {
+		return nil, errNotFound
+	}
+	out := make([]MemFSEntry, 0, node.EntryCount())
+	for _, e := range node.EntriesValue() {
+		out = append(out, MemFSEntry{
+			Name: e.Name,
+			MID:  e.Mid.String(),
+			Type: memFSTypeString(e.Type),
+			Size: e.Size,
+		})
+	}
+	return out, nil
+}
+
+func memFSTypeString(t memfs.MemFSType) string {
+	switch t {
+	case memfs.TypeFile:
+		return "file"
+	case memfs.TypeDir:
+		return "dir"
+	case memfs.TypeSymlink:
+		return "symlink"
+	default:
+		return "raw"
+	}
+}
+
+func TestMemFS_DirList(t *testing.T) {
+	bs, _ := store.NewMemStore(store.Options{InMemory: true})
+	defer bs.Close()
+	b := memfs.NewBuilder(bs)
+	mem := fstest.MapFS{
+		"x.txt": &fstest.MapFile{Data: []byte("X")},
+		"y.txt": &fstest.MapFile{Data: []byte("YY")},
+	}
+	root, err := b.AddDirectoryFromFS(mem, ".")
+	if err != nil {
+		t.Fatalf("add dir: %v", err)
+	}
+	be := &memfsBackend{memBackend: newMemBackend(), resolver: memfs.NewResolver(bs), bs: bs}
+	srv := httptest.NewServer(newTestGate(t, be).Router())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/mem/" + root.MID.String() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "x.txt") || !strings.Contains(string(body), "y.txt") {
+		t.Errorf("listing missing entries: %s", string(body))
+	}
+}
+
+func TestMemFS_DirList_JSON(t *testing.T) {
+	bs, _ := store.NewMemStore(store.Options{InMemory: true})
+	defer bs.Close()
+	b := memfs.NewBuilder(bs)
+	root, err := b.AddDirectoryFromFS(fstest.MapFS{
+		"a.txt": &fstest.MapFile{Data: []byte("A")},
+	}, ".")
+	if err != nil {
+		t.Fatalf("add dir: %v", err)
+	}
+	be := &memfsBackend{memBackend: newMemBackend(), resolver: memfs.NewResolver(bs), bs: bs}
+	srv := httptest.NewServer(newTestGate(t, be).Router())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/mem/" + root.MID.String() + "/?format=json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+	var out struct {
+		MID  string `json:"mid"`
+		Type string `json:"type"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Type != "dir" {
+		t.Errorf("type: want dir, got %q", out.Type)
+	}
+}
+
+func TestMemFS_PathGet(t *testing.T) {
+	bs, _ := store.NewMemStore(store.Options{InMemory: true})
+	defer bs.Close()
+	b := memfs.NewBuilder(bs)
+	root, err := b.AddDirectoryFromFS(fstest.MapFS{
+		"hello.txt":        &fstest.MapFile{Data: []byte("Hello, world!")},
+		"assets/style.css": &fstest.MapFile{Data: []byte("body { color: blue; }")},
+		"assets/index.js":  &fstest.MapFile{Data: []byte("console.log(1)")},
+	}, ".")
+	if err != nil {
+		t.Fatalf("add dir: %v", err)
+	}
+	be := &memfsBackend{memBackend: newMemBackend(), resolver: memfs.NewResolver(bs), bs: bs}
+	srv := httptest.NewServer(newTestGate(t, be).Router())
+	defer srv.Close()
+
+	cases := []struct {
+		urlPath  string
+		wantBody string
+		wantCT   string
+	}{
+		{"/hello.txt", "Hello, world!", "text/plain; charset=utf-8"},
+		{"/assets/style.css", "body { color: blue; }", "text/css; charset=utf-8"},
+		{"/assets/index.js", "console.log(1)", "text/javascript; charset=utf-8"},
+	}
+
+	for _, tc := range cases {
+		resp, err := http.Get(srv.URL + "/mem/" + root.MID.String() + tc.urlPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			t.Fatalf("status: %d for path %s, body: %q", resp.StatusCode, tc.urlPath, string(body))
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(body) != tc.wantBody {
+			t.Errorf("body for %s: got %q, want %q", tc.urlPath, string(body), tc.wantBody)
+		}
+		ct := resp.Header.Get("Content-Type")
+		if ct != tc.wantCT {
+			t.Errorf("content-type for %s: got %q, want %q", tc.urlPath, ct, tc.wantCT)
+		}
+	}
+}
+
+func TestMemFS_SubdirList(t *testing.T) {
+	bs, _ := store.NewMemStore(store.Options{InMemory: true})
+	defer bs.Close()
+	b := memfs.NewBuilder(bs)
+	root, err := b.AddDirectoryFromFS(fstest.MapFS{
+		"assets/style.css": &fstest.MapFile{Data: []byte("body { color: blue; }")},
+		"assets/index.js":  &fstest.MapFile{Data: []byte("console.log(1)")},
+	}, ".")
+	if err != nil {
+		t.Fatalf("add dir: %v", err)
+	}
+	be := &memfsBackend{memBackend: newMemBackend(), resolver: memfs.NewResolver(bs), bs: bs}
+	srv := httptest.NewServer(newTestGate(t, be).Router())
+	defer srv.Close()
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Get(srv.URL + "/mem/" + root.MID.String() + "/assets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMovedPermanently {
+		t.Errorf("expected 301 redirect for directory subpath without slash, got %d", resp.StatusCode)
+	}
+	loc := resp.Header.Get("Location")
+	if !strings.HasSuffix(loc, "/assets/") {
+		t.Errorf("expected redirect location ending with /assets/, got %q", loc)
+	}
+
+	resp2, err := http.Get(srv.URL + "/mem/" + root.MID.String() + "/assets/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp2.StatusCode)
+	}
+	body, _ := io.ReadAll(resp2.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "style.css") || !strings.Contains(bodyStr, "index.js") {
+		t.Errorf("expected index.js and style.css in directory list, got body: %q", bodyStr)
+	}
+
+	if !strings.Contains(bodyStr, `href="style.css"`) {
+		t.Errorf("expected relative link href=\"style.css\", got: %q", bodyStr)
+	}
+}
+
+func TestHttpCachingAndMemoryCache(t *testing.T) {
+	bs, _ := store.NewMemStore(store.Options{InMemory: true})
+	defer bs.Close()
+	builder := memfs.NewBuilder(bs)
+	root, err := builder.AddDirectoryFromFS(fstest.MapFS{
+		"hello.txt": &fstest.MapFile{Data: []byte("Hello, world!")},
+	}, ".")
+	if err != nil {
+		t.Fatalf("add dir: %v", err)
+	}
+
+	be := &memfsBackend{
+		memBackend: newMemBackend(),
+		resolver:   memfs.NewResolver(bs),
+		bs:         bs,
+	}
+	rawDir, _ := bs.Get(root.MID)
+	be.memBackend.put(root.MID, rawDir, "application/octet-stream")
+
+	mg := newTestGate(t, be)
+	srv := httptest.NewServer(mg.Router())
+	defer srv.Close()
+
+	client := &http.Client{}
+
+	req, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String(), nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		t.Fatal("expected ETag header")
+	}
+
+	reqCond, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String(), nil)
+	reqCond.Header.Set("If-None-Match", etag)
+	respCond, err := client.Do(reqCond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respCond.Body.Close()
+	if respCond.StatusCode != http.StatusNotModified {
+		t.Fatalf("expected 304, got %d", respCond.StatusCode)
+	}
+
+	reqJSON, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String()+"?format=dag-json", nil)
+	respJSON, err := client.Do(reqJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respJSON.Body.Close()
+	etagJSON := respJSON.Header.Get("ETag")
+
+	reqCondJSON, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String()+"?format=dag-json", nil)
+	reqCondJSON.Header.Set("If-None-Match", etagJSON)
+	respCondJSON, err := client.Do(reqCondJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respCondJSON.Body.Close()
+	if respCondJSON.StatusCode != http.StatusNotModified {
+		t.Fatalf("expected 304 for conditional DAG-JSON, got %d", respCondJSON.StatusCode)
+	}
+
+	reqRaw, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String()+"?format=raw", nil)
+	respRaw, err := client.Do(reqRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respRaw.Body.Close()
+	etagRaw := respRaw.Header.Get("ETag")
+
+	reqCondRaw, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String()+"?format=raw", nil)
+	reqCondRaw.Header.Set("If-None-Match", etagRaw)
+	respCondRaw, err := client.Do(reqCondRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respCondRaw.Body.Close()
+	if respCondRaw.StatusCode != http.StatusNotModified {
+		t.Fatalf("expected 304 for conditional raw block, got %d", respCondRaw.StatusCode)
+	}
+
+	reqPath, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String()+"/hello.txt", nil)
+	respPath, err := client.Do(reqPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respPath.Body.Close()
+	etagPath := respPath.Header.Get("ETag")
+
+	reqCondPath, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String()+"/hello.txt", nil)
+	reqCondPath.Header.Set("If-None-Match", etagPath)
+	respCondPath, err := client.Do(reqCondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respCondPath.Body.Close()
+	if respCondPath.StatusCode != http.StatusNotModified {
+		t.Fatalf("expected 304 for conditional MemFS subpath, got %d", respCondPath.StatusCode)
+	}
+}
+
+func TestDetectContentType_MimeLibraryAndCustomMap(t *testing.T) {
+	cases := []struct {
+		name     string
+		mid      string
+		data     []byte
+		expected string
+	}{
+		{
+			name:     "HTML sniffed (no ext)",
+			mid:      "mem1abc",
+			data:     []byte("<!DOCTYPE html><html><body>hello</body></html>"),
+			expected: "text/html; charset=utf-8",
+		},
+		{
+			name:     "WASM extension",
+			mid:      "mem1abc.wasm",
+			data:     []byte{0x00, 0x61, 0x73, 0x6d},
+			expected: "application/wasm",
+		},
+		{
+			name:     "CSS extension override registry",
+			mid:      "mem1abc.css",
+			data:     []byte("body { color: red; }"),
+			expected: "text/css; charset=utf-8",
+		},
+		{
+			name:     "JS extension override registry",
+			mid:      "mem1abc.js",
+			data:     []byte("console.log('hello');"),
+			expected: "text/javascript; charset=utf-8",
+		},
+		{
+			name:     "SVG extension override registry",
+			mid:      "mem1abc.svg",
+			data:     []byte("<svg></svg>"),
+			expected: "image/svg+xml",
+		},
+		{
+			name:     "PNG sniffed (no ext)",
+			mid:      "mem1abc",
+			data:     []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a},
+			expected: "image/png",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := DetectContentType(c.mid, c.data, "")
+			if got != c.expected {
+				t.Errorf("expected %q, got %q", c.expected, got)
+			}
+		})
+	}
+}
+
+func TestStreamedRangeRequests_RawDAG(t *testing.T) {
+	b := newMemBackend()
+
+	mg, err := New(Config{
+		Backend:       b,
+		MaxCacheBytes: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte("0123456789abcdef")
+	m := putRandom(b, body)
+
+	srv := httptest.NewServer(mg.Router())
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/mem/"+m.String(), nil)
+	req.Header.Set("Range", "bytes=4-11")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("expected 206 Partial Content, got %d", resp.StatusCode)
+	}
+
+	gotRange := resp.Header.Get("Content-Range")
+	if gotRange != "bytes 4-11/16" {
+		t.Errorf("expected Content-Range 'bytes 4-11/16', got %q", gotRange)
+	}
+
+	gotBytes, _ := io.ReadAll(resp.Body)
+	if string(gotBytes) != "456789ab" {
+		t.Errorf("expected body '456789ab', got %q", string(gotBytes))
+	}
+}
+
+func TestStreamedRangeRequests_MemFS(t *testing.T) {
+	bs, _ := store.NewMemStore(store.Options{InMemory: true})
+	defer bs.Close()
+	builder := memfs.NewBuilder(bs)
+
+	fileData := []byte("abcdefghijklmnopqrstuvwxyz")
+	root, err := builder.AddDirectoryFromFS(fstest.MapFS{
+		"alphabet.txt": &fstest.MapFile{Data: fileData},
+	}, ".")
+	if err != nil {
+		t.Fatalf("add dir: %v", err)
+	}
+
+	be := &memfsBackend{
+		memBackend: newMemBackend(),
+		resolver:   memfs.NewResolver(bs),
+		bs:         bs,
+	}
+
+	mg, err := New(Config{
+		Backend:       be,
+		MaxCacheBytes: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(mg.Router())
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/mem/"+root.MID.String()+"/alphabet.txt", nil)
+	req.Header.Set("Range", "bytes=10-15")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("expected 206 Partial Content, got %d", resp.StatusCode)
+	}
+
+	gotRange := resp.Header.Get("Content-Range")
+	if gotRange != "bytes 10-15/26" {
+		t.Errorf("expected Content-Range 'bytes 10-15/26', got %q", gotRange)
+	}
+
+	gotBytes, _ := io.ReadAll(resp.Body)
+	if string(gotBytes) != "klmnop" {
+		t.Errorf("expected body 'klmnop', got %q", string(gotBytes))
+	}
+}
+
+func TestSubdomainResolution(t *testing.T) {
+	b := newMemBackend()
+	body := []byte("hello subdomain!")
+	m := putRandom(b, body)
+
+	mg := newTestGate(t, b)
+	srv := httptest.NewServer(mg.Handler())
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/", nil)
+	req.Host = m.String() + ".localhost"
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(got, body) {
+		t.Errorf("body mismatch: got %q, want %q", string(got), string(body))
+	}
+}
+
+func TestRefererResolution(t *testing.T) {
+	bs, _ := store.NewMemStore(store.Options{InMemory: true})
+	defer bs.Close()
+	builder := memfs.NewBuilder(bs)
+	root, err := builder.AddDirectoryFromFS(fstest.MapFS{
+		"assets/index.js": &fstest.MapFile{Data: []byte("console.log(1)")},
+	}, ".")
+	if err != nil {
+		t.Fatalf("add dir: %v", err)
+	}
+
+	be := &memfsBackend{
+		memBackend: newMemBackend(),
+		resolver:   memfs.NewResolver(bs),
+		bs:         bs,
+	}
+
+	mg := newTestGate(t, be)
+	srv := httptest.NewServer(mg.Handler())
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/assets/index.js", nil)
+	req.Header.Set("Referer", srv.URL+"/mem/"+root.MID.String()+"/")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+
+	got, _ := io.ReadAll(resp.Body)
+	if string(got) != "console.log(1)" {
+		t.Errorf("body mismatch: got %q, want 'console.log(1)'", string(got))
+	}
+}

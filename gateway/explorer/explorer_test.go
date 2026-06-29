@@ -619,6 +619,18 @@ func (b *memBackend) KeyringKeys(ctx context.Context) ([]KeyringKeyInfo, error) 
 	return nil, nil
 }
 
+func (b *memBackend) KeyringGenerate(ctx context.Context, name, keyType string) (KeyringKeyInfo, error) {
+	return KeyringKeyInfo{}, nil
+}
+
+func (b *memBackend) KeyringDelete(ctx context.Context, name string) error {
+	return nil
+}
+
+func (b *memBackend) MemNSPublish(ctx context.Context, keyName, value string, ttl uint32, message string) (MemNSRecordInfo, error) {
+	return MemNSRecordInfo{}, nil
+}
+
 func (b *memBackend) ResolveMemNSRecord(ctx context.Context, name string) (MemNSRecordInfo, error) {
 	return MemNSRecordInfo{}, fmt.Errorf("memns: test backend stub")
 }

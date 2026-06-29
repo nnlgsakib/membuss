@@ -18,7 +18,7 @@ import (
 	"github.com/nnlgsakib/membuss/core/mid"
 	"github.com/nnlgsakib/membuss/core/store"
 	"github.com/nnlgsakib/membuss/net/memex"
-	memgate "github.com/nnlgsakib/membuss/gateway/memgate"
+	memgate "github.com/nnlgsakib/membuss/gateway/memgate_v2"
 	membusspb "github.com/nnlgsakib/membuss/proto"
 )
 

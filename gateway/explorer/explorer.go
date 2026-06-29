@@ -228,6 +228,9 @@ type Backend interface {
 
 	// --- Phase 18: MemNS support ---
 	KeyringKeys(ctx context.Context) ([]KeyringKeyInfo, error)
+	KeyringGenerate(ctx context.Context, name, keyType string) (KeyringKeyInfo, error)
+	KeyringDelete(ctx context.Context, name string) error
+	MemNSPublish(ctx context.Context, keyName, value string, ttl uint32, message string) (MemNSRecordInfo, error)
 	ResolveMemNSRecord(ctx context.Context, name string) (MemNSRecordInfo, error)
 	ResolveMemLink(ctx context.Context, domain string) (MemLinkInfo, error)
 	// ConnectPeer parses a multiaddr and dials the peer.
@@ -403,6 +406,10 @@ func (e *Explorer) buildRouter() http.Handler {
 	r.Post("/search", e.handleSearch)
 	r.Post("/upload", e.handleUpload)
 	r.Post("/peers/connect", e.handleConnectPeer)
+	r.Get("/keyring/list", e.handleKeyringList)
+	r.Post("/keyring/gen", e.handleKeyringGen)
+	r.Delete("/keyring/rm/{name}", e.handleKeyringRm)
+	r.Post("/memns/publish", e.handleMemNSPublish)
 
 	// serveSpaOrPage runs the handler if formatting requested or User-Agent is test.
 	// Otherwise it falls back to serving Svelte SPA index.html.
@@ -1390,4 +1397,66 @@ func firstPublicIP(addrs []string) string {
 		}
 	}
 	return ""
+}
+
+func (e *Explorer) handleKeyringList(w http.ResponseWriter, r *http.Request) {
+	keys, err := e.cfg.Backend.KeyringKeys(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(keys)
+}
+
+func (e *Explorer) handleKeyringGen(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	key, err := e.cfg.Backend.KeyringGenerate(r.Context(), req.Name, req.Type)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(key)
+}
+
+func (e *Explorer) handleKeyringRm(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		http.Error(w, "missing name", http.StatusBadRequest)
+		return
+	}
+	err := e.cfg.Backend.KeyringDelete(r.Context(), name)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (e *Explorer) handleMemNSPublish(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Key     string `json:"key"`
+		Value   string `json:"value"`
+		TTL     uint32 `json:"ttl"`
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	res, err := e.cfg.Backend.MemNSPublish(r.Context(), req.Key, req.Value, req.TTL, req.Message)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(res)
 }

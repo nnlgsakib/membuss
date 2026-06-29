@@ -16,6 +16,7 @@
 	const navItems = [
 		{ name: 'Status', path: '/', icon: 'ph:gauge' },
 		{ name: 'Files', path: '/files', icon: 'ph:folder-open' },
+		{ name: 'MemNS', path: '/memns', icon: 'ph:identification-card' },
 		{ name: 'Explore', path: '/explore', icon: 'ph:git-branch' },
 		{ name: 'Peers', path: '/peers', icon: 'ph:circle-notch' },
 		{ name: 'Node Info', path: '/node', icon: 'ph:gear-six' }

@@ -46,6 +46,17 @@
 	let error = $state<string | null>(null);
 	let copiedMID = $state(false);
 
+	function getGatewayURL(mid: string, isDir: boolean): string {
+		if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
+			const portStr = window.location.port ? `:${window.location.port}` : '';
+			if (isDir) {
+				return `${window.location.protocol}//${mid}.localhost${portStr}/`;
+			}
+		}
+		const gateBase = base.replace('/explorer', '');
+		return `${gateBase}/mem/${mid}${isDir ? '/' : ''}`;
+	}
+
 	let renameValue = $state('');
 	let isRenaming = $state(false);
 	let activeTab = $state<'info' | 'dag'>('info');
@@ -499,15 +510,15 @@
 
 						<div class="flex items-center gap-2 mt-4 pt-4 border-t border-slate-800/80">
 							{#if data.MemFSType === 'dir'}
-								<a href={`${base.replace('/explorer', '')}/mem/${midVal}/`} target="_blank" class="px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold text-xs transition-colors">
+								<a href={getGatewayURL(midVal, true)} target="_blank" class="px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold text-xs transition-colors">
 									Open Gateway Directory
 								</a>
 							{:else}
-								<a href={`${base.replace('/explorer', '')}/mem/${midVal}`} target="_blank" class="px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold text-xs transition-colors">
+								<a href={getGatewayURL(midVal, false)} target="_blank" class="px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-slate-950 font-bold text-xs transition-colors">
 									View Payload File
 								</a>
 								<a
-									href={`${base.replace('/explorer', '')}/mem/${midVal}?download=1&filename=${encodeURIComponent(data.Name || (midVal + '.bin'))}`}
+									href={getGatewayURL(midVal, false) + `?download=1&filename=${encodeURIComponent(data.Name || (midVal + '.bin'))}`}
 									class="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-750 font-bold text-xs transition-colors"
 								>
 									Download

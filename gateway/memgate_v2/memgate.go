@@ -1,15 +1,7 @@
-// Mem-Gate: HTTP gateway that serves Membuss content by MID.
-//
-// The gateway is a read-only CDN edge. It supports:
-//   - GET /mem/{mid}             resolved content (default)
-//   - GET /mem/{mid}?format=raw  raw block bytes (no DAG walk)
-//   - GET /mem/{mid}?format=dag-json  DAGNode as JSON
-//   - HEAD /mem/{mid}            existence + size
-//   - GET /mem/{mid}/{path}      DAG path traversal
-//   - HTTP Range requests        206 Partial Content
-//   - ETag + Cache-Control: immutable
-// Deprecated: use github.com/nnlgsakib/membuss/gateway/memgate_v2 instead.
-package memgate
+// Package memgate_v2 provides the public HTTP gateway and CDN layer
+// for Membuss. It supports path-based gateway routes, subdomain-based
+// resolution for SPAs, custom domain mapping via MemNS, and caching.
+package memgate_v2
 
 import (
 	"context"
@@ -192,11 +184,143 @@ func New(cfg Config) (*MemGate, error) {
 // the gateway via httptest.
 func (m *MemGate) Router() http.Handler { return m.router }
 
-// Handler returns an http.Handler wrapping the router with
-// the gateway's timeouts applied. The daemon wires this into
-// http.Server.
 func (m *MemGate) Handler() http.Handler {
-	return m.router
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 1. Subdomain routing
+		if midStr, innerPath, ok := m.resolveSubdomain(r); ok {
+			root, err := mid.Parse(midStr)
+			if err == nil {
+				info, err := m.cfg.Backend.MemFSInfo(r.Context(), root)
+				if err == nil && info.Type == "dir" {
+					m.serveMemFSPath(w, r, midStr, innerPath)
+					return
+				}
+				if innerPath == "" {
+					m.handleResolved(w, r, root, midStr)
+					return
+				}
+			}
+			m.serveMemFSPath(w, r, midStr, innerPath)
+			return
+		}
+
+		// 2. Referer-based path resolution for absolute assets on path-based gateways
+		path := r.URL.Path
+		if !strings.HasPrefix(path, "/mem/") &&
+			!strings.HasPrefix(path, "/healthz") &&
+			!strings.HasPrefix(path, "/explorer") &&
+			!strings.HasPrefix(path, "/memns/") &&
+			!strings.HasPrefix(path, "/memlink/") {
+			if midStr, innerPath, ok := m.resolveRefererMID(r); ok {
+				m.serveMemFSPath(w, r, midStr, innerPath)
+				return
+			}
+		}
+
+		m.router.ServeHTTP(w, r)
+	})
+}
+
+// resolveRefererMID checks if the request's Referer header points to a Membuss gateway path.
+// If it does, it returns the MID and the inner path.
+func (m *MemGate) resolveRefererMID(r *http.Request) (string, string, bool) {
+	ref := r.Header.Get("Referer")
+	if ref == "" {
+		return "", "", false
+	}
+
+	refURL, err := url.Parse(ref)
+	if err != nil {
+		return "", "", false
+	}
+
+	refPath := refURL.Path
+	var prefix string
+	if strings.HasPrefix(refPath, "/mem/") {
+		prefix = "/mem/"
+	} else if strings.HasPrefix(refPath, "/memns/") {
+		prefix = "/memns/"
+	} else if strings.HasPrefix(refPath, "/memlink/") {
+		prefix = "/memlink/"
+	} else {
+		return "", "", false
+	}
+
+	trimmed := strings.TrimPrefix(refPath, prefix)
+	parts := strings.Split(trimmed, "/")
+	if len(parts) == 0 || parts[0] == "" {
+		return "", "", false
+	}
+
+	identifier := parts[0]
+	var midStr string
+	if prefix == "/mem/" {
+		midStr = identifier
+	} else {
+		if m.cfg.MemNSResolver != nil {
+			resolved, err := m.cfg.MemNSResolver.Resolve(r.Context(), identifier)
+			if err == nil && resolved != "" {
+				midStr = resolved
+				if strings.HasPrefix(midStr, "/mem/") {
+					midStr = midStr[5:]
+				}
+			}
+		}
+	}
+
+	if midStr == "" {
+		return "", "", false
+	}
+
+	if _, err := mid.Parse(midStr); err != nil {
+		return "", "", false
+	}
+
+	innerPath := strings.TrimPrefix(r.URL.Path, "/")
+	return midStr, innerPath, true
+}
+
+// resolveSubdomain checks if the host uses a subdomain representing either a MID or a MemNS name.
+// It returns the resolved MID string, the inner path, and true if matched.
+func (m *MemGate) resolveSubdomain(r *http.Request) (string, string, bool) {
+	host := r.Host
+	if idx := strings.Index(host, ":"); idx != -1 {
+		host = host[:idx]
+	}
+
+	// Subdomain routing only runs on .localhost (e.g. *.localhost or *.mem.localhost)
+	if !strings.HasSuffix(host, ".localhost") {
+		return "", "", false
+	}
+
+	labels := strings.Split(host, ".")
+	if len(labels) < 2 {
+		return "", "", false
+	}
+
+	firstLabel := labels[0]
+	// 1. Check if first label is a valid MID
+	if _, err := mid.Parse(firstLabel); err == nil {
+		innerPath := strings.TrimPrefix(r.URL.Path, "/")
+		return firstLabel, innerPath, true
+	}
+
+	// 2. Check if first label is a MemNS name
+	if firstLabel != "localhost" && firstLabel != "127" && firstLabel != "www" {
+		if m.cfg.MemNSResolver != nil {
+			resolved, err := m.cfg.MemNSResolver.Resolve(r.Context(), firstLabel)
+			if err == nil && resolved != "" {
+				midStr := resolved
+				if strings.HasPrefix(midStr, "/mem/") {
+					midStr = midStr[5:]
+				}
+				innerPath := strings.TrimPrefix(r.URL.Path, "/")
+				return midStr, innerPath, true
+			}
+		}
+	}
+
+	return "", "", false
 }
 
 func (m *MemGate) buildRouter() chi.Router {
@@ -701,12 +825,18 @@ func init() {
 }
 
 // DetectContentType picks a MIME type using (in order):
-//   1. The override/hint if provided.
+//   1. The override/hint if provided (ignoring generic application/octet-stream).
 //   2. Extension-based lookup via the standard library's registry (mime.TypeByExtension).
 //   3. Content-based sniffing using the gabriel-vasile/mimetype library.
 //   4. application/octet-stream as a fallback.
 func DetectContentType(midStr string, data []byte, override string) string {
-	if override != "" {
+	if override != "" && override != "application/octet-stream" {
+		if strings.HasPrefix(override, "application/javascript") || strings.HasPrefix(override, "text/javascript") {
+			return "text/javascript; charset=utf-8"
+		}
+		if strings.HasPrefix(override, "text/css") {
+			return "text/css; charset=utf-8"
+		}
 		return override
 	}
 	if ext := filepath.Ext(midStr); ext != "" {
@@ -1037,7 +1167,7 @@ func (m *MemGate) serveMemFSPath(w http.ResponseWriter, r *http.Request, midStr,
 		if json.Unmarshal(cachedBytes, &cp) == nil {
 			filename := filepath.Base(innerPath)
 			w.Header().Set("Content-Type", cp.Mime)
-			w.Header().Set("X-Membuss-MID", midStr)
+			w.Header().Set("X-Membuss-MID", pathInfo.MID)
 			w.Header().Set("X-Membuss-Path", "/"+innerPath)
 			w.Header().Set("X-Membuss-Name", filename)
 			w.Header().Set("X-Membuss-MimeType", cp.Mime)
@@ -1046,7 +1176,7 @@ func (m *MemGate) serveMemFSPath(w http.ResponseWriter, r *http.Request, midStr,
 			}
 			w.Header().Set("ETag", `"`+etagVal+`"`)
 			w.Header().Set("Cache-Control", "public, immutable, max-age=31536000")
-			m.writeBytes(w, r, midStr, cp.Data, cp.Mime)
+			m.writeBytes(w, r, pathInfo.MID, cp.Data, cp.Mime)
 			return
 		}
 	}
@@ -1062,10 +1192,7 @@ func (m *MemGate) serveMemFSPath(w http.ResponseWriter, r *http.Request, midStr,
 	}
 	defer rc.Close()
 
-	ct := mimeType
-	if ct == "" {
-		ct = "application/octet-stream"
-	}
+	ct := DetectContentType(innerPath, nil, mimeType)
 	filename := filepath.Base(innerPath)
 
 	if size > 0 && size <= m.cfg.MaxCacheBytes {
@@ -1074,6 +1201,7 @@ func (m *MemGate) serveMemFSPath(w http.ResponseWriter, r *http.Request, midStr,
 			http.Error(w, "read: "+err.Error(), http.StatusBadGateway)
 			return
 		}
+		ct = DetectContentType(innerPath, buf, mimeType)
 		cp := struct {
 			Data []byte `json:"data"`
 			Mime string `json:"mime"`
@@ -1086,7 +1214,7 @@ func (m *MemGate) serveMemFSPath(w http.ResponseWriter, r *http.Request, midStr,
 		}
 
 		w.Header().Set("Content-Type", ct)
-		w.Header().Set("X-Membuss-MID", midStr)
+		w.Header().Set("X-Membuss-MID", pathInfo.MID)
 		w.Header().Set("X-Membuss-Path", "/"+innerPath)
 		w.Header().Set("X-Membuss-Name", filename)
 		w.Header().Set("X-Membuss-MimeType", ct)
@@ -1095,12 +1223,12 @@ func (m *MemGate) serveMemFSPath(w http.ResponseWriter, r *http.Request, midStr,
 		}
 		w.Header().Set("ETag", `"`+etagVal+`"`)
 		w.Header().Set("Cache-Control", "public, immutable, max-age=31536000")
-		m.writeBytes(w, r, midStr, buf, ct)
+		m.writeBytes(w, r, pathInfo.MID, buf, ct)
 		return
 	}
 
 	w.Header().Set("Content-Type", ct)
-	w.Header().Set("X-Membuss-MID", midStr)
+	w.Header().Set("X-Membuss-MID", pathInfo.MID)
 	w.Header().Set("X-Membuss-Path", "/"+innerPath)
 	w.Header().Set("X-Membuss-Name", filename)
 	w.Header().Set("X-Membuss-MimeType", ct)

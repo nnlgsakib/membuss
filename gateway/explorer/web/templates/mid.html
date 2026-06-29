@@ -73,7 +73,7 @@
         <dt>Content-Type</dt><dd>inode/directory</dd>
       </dl>
       <div class="actions">
-        <a class="btn primary" href="/mem/{{.MID}}/" target="_blank">Open Gateway</a>
+        <a class="btn primary" id="open-gateway-btn" href="/mem/{{.MID}}/" target="_blank">Open Gateway</a>
         <a class="btn" href="/explorer/mid/{{.MID}}/dag">DAG</a>
         {{if .Sealed}}
         <form method="POST" action="/explorer/mid/{{.MID}}/unseal" style="display:inline">
@@ -155,4 +155,13 @@
   {{end}}
   {{end}}
 </section>
+<script>
+  (function() {
+    var btn = document.getElementById("open-gateway-btn");
+    if (btn && window.location.hostname === "localhost") {
+      var portStr = window.location.port ? ":" + window.location.port : "";
+      btn.href = window.location.protocol + "//{{.MID}}.localhost" + portStr + "/";
+    }
+  })();
+</script>
 {{end}}

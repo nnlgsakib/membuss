@@ -43,7 +43,7 @@ import (
 
 	"github.com/nnlgsakib/membuss/api"
 	explorerPkg "github.com/nnlgsakib/membuss/gateway/explorer"
-	memgate "github.com/nnlgsakib/membuss/gateway/memgate"
+	memgate "github.com/nnlgsakib/membuss/gateway/memgate_v2"
 
 	badgerds "github.com/ipfs/go-ds-badger4"
 	"github.com/libp2p/go-libp2p/core/network"

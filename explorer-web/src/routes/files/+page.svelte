@@ -136,8 +136,14 @@
 
 	// Copy gateway link to share
 	function shareFile(file: LocalFile) {
-		const gateBase = window.location.origin;
-		const shareUrl = `${gateBase}/mem/${file.mid}${file.type === 'dir' ? '/' : ''}`;
+		let shareUrl = '';
+		if (file.type === 'dir' && window.location.hostname === 'localhost') {
+			const portStr = window.location.port ? `:${window.location.port}` : '';
+			shareUrl = `${window.location.protocol}//${file.mid}.localhost${portStr}/`;
+		} else {
+			const gateBase = window.location.origin;
+			shareUrl = `${gateBase}/mem/${file.mid}${file.type === 'dir' ? '/' : ''}`;
+		}
 		navigator.clipboard.writeText(shareUrl).then(() => {
 			copiedId = file.mid;
 			setTimeout(() => {
