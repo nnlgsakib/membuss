@@ -353,6 +353,9 @@ func (m *MemGate) buildRouter() chi.Router {
 	// limiter by setting RateLimitPerMin=0 in config.
 	r.Use(m.ipLimiter.Middleware)
 
+	// Explorer is a local admin UI — block non-localhost access
+	r.Use(m.localOnlyMiddleware)
+
 	// Phase 18: custom domain serving middleware
 	r.Use(m.customDomainMiddleware)
 
@@ -558,7 +561,7 @@ func (m *MemGate) renderDirectoryList(w http.ResponseWriter, r *http.Request, ti
 		}
 		fmt.Fprintf(w, `<tr><td><a href="%s">%s</a></td>`+
 			`<td>%s</td><td>%d</td>`+
-			`<td class="muted"><a href="/explorer/mid/%s">%s…</a></td></tr>`,
+			`<td class="muted"><a href="/mem/%s">%s…</a></td></tr>`,
 			href, html.EscapeString(e.Name), html.EscapeString(e.Type), e.Size, url.PathEscape(e.MID), html.EscapeString(shortMID(e.MID)))
 	}
 	fmt.Fprintf(w, `</table></body></html>`)
@@ -1077,6 +1080,26 @@ func (m *MemGate) customDomainMiddleware(next http.Handler) http.Handler {
 
 		innerPath := strings.TrimPrefix(path, "/")
 		m.serveMemFSPath(w, r, midStr, innerPath)
+	})
+}
+
+// localOnlyMiddleware blocks /explorer access from non-localhost sources.
+// The explorer is a local admin UI and must not be exposed to the public internet.
+func (m *MemGate) localOnlyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/explorer") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		host := r.Host
+		if idx := strings.Index(host, ":"); idx != -1 {
+			host = host[:idx]
+		}
+		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "explorer not available on public gateway", http.StatusNotFound)
 	})
 }
 
