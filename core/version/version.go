@@ -10,7 +10,7 @@ var (
 	// Version is the semantic version of the application.
 	// Can be overridden at build time via:
 	// -ldflags "-X github.com/nnlgsakib/membuss/core/version.Version=1.0.0"
-	Version = "1.0.0-rc.2"
+	Version = "1.0.0-rc.3"
 
 	// GitCommit is the git commit SHA.
 	// Can be overridden at build time via:
