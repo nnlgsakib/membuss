@@ -11,8 +11,9 @@
 	let selectedFile = $state<File | null>(null);
 	let selectedFiles = $state<FileList | null>(null);
 	let descriptorFile = $state<File | null>(null);
-	let descriptorStatus = $state<'idle' | 'importing' | 'done' | 'error'>('idle');
+	let descriptorStatus = $state<'idle' | 'importing' | 'fetching' | 'done' | 'error'>('idle');
 	let descriptorError = $state('');
+	let descriptorProgress = $state({ blocks: 0, total: 0, missing: 0 });
 	
 	// Upload Progress states
 	let uploadActive = $state(false);
@@ -70,17 +71,68 @@
 		if (!descriptorFile) return;
 		descriptorStatus = 'importing';
 		descriptorError = '';
+		descriptorProgress = { blocks: 0, total: 0, missing: 0 };
+
 		try {
 			const formData = new FormData();
 			formData.append('file', descriptorFile);
-			const res = await fetch(`${base}/descriptor/import`, { method: 'POST', body: formData });
+			const res = await fetch(`${base}/descriptor/import-stream`, { method: 'POST', body: formData });
 			if (!res.ok) {
 				const txt = await res.text();
 				throw new Error(txt || `HTTP ${res.status}`);
 			}
-			descriptorStatus = 'done';
-			const url = new URL(res.url, window.location.origin);
-			goto(url.pathname);
+
+			const reader = res.body?.getReader();
+			if (!reader) throw new Error('No response stream');
+
+			const decoder = new TextDecoder();
+			let buffer = '';
+
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+
+				buffer += decoder.decode(value, { stream: true });
+				const lines = buffer.split('\n');
+				buffer = lines.pop() || '';
+
+				for (const line of lines) {
+					if (!line.startsWith('data: ')) continue;
+					const jsonStr = line.slice(6).trim();
+					if (!jsonStr) continue;
+
+					try {
+						const ev = JSON.parse(jsonStr);
+						if (ev.error) {
+							descriptorStatus = 'error';
+							descriptorError = ev.error;
+							return;
+						}
+						if (ev.state === 'fetching') {
+							descriptorStatus = 'fetching';
+							descriptorProgress = { blocks: 0, total: ev.total || 0, missing: ev.missing || 0 };
+						}
+						if (ev.state === 'downloading') {
+							descriptorStatus = 'fetching';
+							descriptorProgress = { blocks: ev.blocks || 0, total: ev.total || 0, missing: descriptorProgress.missing };
+						}
+						if (ev.done && ev.mid) {
+							descriptorStatus = 'done';
+							setTimeout(() => {
+								goto(`${base}/mid/${ev.mid}`);
+							}, 500);
+							return;
+						}
+					} catch {
+						// skip malformed lines
+					}
+				}
+			}
+
+			if (descriptorStatus !== 'done') {
+				descriptorStatus = 'error';
+				descriptorError = 'Stream ended without completion';
+			}
 		} catch (err) {
 			descriptorStatus = 'error';
 			descriptorError = err instanceof Error ? err.message : 'Import failed';
@@ -289,7 +341,7 @@
 					Ingest File
 				</button>
 			</form>
-		{:else}
+		{:else if activeTab === 'folder'}
 			<!-- Folder Submission Form -->
 			<form onsubmit={handleFolderSubmit} class="flex flex-col gap-6">
 				<div class="flex flex-col gap-2">
@@ -366,7 +418,7 @@
 							type="file"
 							accept=".mbuss"
 							required
-							disabled={descriptorStatus === 'importing'}
+							disabled={descriptorStatus === 'importing' || descriptorStatus === 'fetching'}
 							onchange={handleDescriptorChange}
 							class="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
 						/>
@@ -385,14 +437,33 @@
 					</div>
 				{/if}
 
+				{#if descriptorStatus === 'fetching'}
+					<div class="flex flex-col gap-2">
+						<div class="flex items-center justify-between text-[11px] font-mono text-slate-400">
+							<span>Fetching from network...</span>
+							<span>{descriptorProgress.blocks} / {descriptorProgress.total} blocks</span>
+						</div>
+						<div class="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+							<div 
+								class="h-full bg-cyan-500 transition-all duration-300"
+								style={`width: ${descriptorProgress.total > 0 ? (descriptorProgress.blocks / descriptorProgress.total * 100) : 0}%`}
+							></div>
+						</div>
+						<p class="text-[11px] text-slate-500">Downloading missing blocks from peers...</p>
+					</div>
+				{/if}
+
 				<button
 					type="submit"
-					disabled={!descriptorFile || descriptorStatus === 'importing'}
+					disabled={!descriptorFile || descriptorStatus === 'importing' || descriptorStatus === 'fetching'}
 					class="w-full py-3 bg-cyan-500 hover:bg-cyan-600 disabled:bg-slate-800 text-slate-950 disabled:text-slate-600 font-bold text-sm rounded-xl transition-all duration-300 active:scale-[0.98] flex items-center justify-center gap-2"
 				>
 					{#if descriptorStatus === 'importing'}
 						<div class="w-4 h-4 border-2 border-slate-950/30 border-t-slate-950 rounded-full animate-spin"></div>
 						Verifying...
+					{:else if descriptorStatus === 'fetching'}
+						<div class="w-4 h-4 border-2 border-slate-950/30 border-t-slate-950 rounded-full animate-spin"></div>
+						Fetching...
 					{:else}
 						<Icon icon="ph:download-simple" class="text-base" />
 						Import Descriptor

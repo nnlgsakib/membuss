@@ -57,7 +57,7 @@ func (f *memexFetcher) Fetch(ctx context.Context, root mid.MID, providers []peer
 		Engine:    f.eng,
 		Root:      root,
 		Providers: providers,
-		Timeout:   30 * time.Second,
+		Timeout:   memex.DefaultSessionTimeout,
 	})
 	if err != nil {
 		return err

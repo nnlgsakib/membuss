@@ -1,13 +1,15 @@
 # Membuss Makefile
 #
 # Targets:
-#   make build          compile the daemon and CLI into bin/
+#   make build          build frontend, then compile the daemon and CLI into bin/
+#   make frontend       build the explorer web UI (Vite)
+#   make frontend-dev   run the explorer web UI in dev mode (Vite)
 #   make proto          regenerate protobuf Go bindings into proto/
 #   make test           run `go test ./... -race -count=1`
 #   make lint           run golangci-lint (skipped if not installed)
 #   make run-daemon     run the daemon with ./membuss.yaml
 #   make tidy           go mod tidy
-#   make clean          remove bin/ and generated proto outputs
+#   make clean          remove bin/, proto outputs, and frontend build artifacts
 #
 #   make docker-build   build the container image (tag: membuss:local)
 #   make docker-run     run a one-off container with the named volume
@@ -31,6 +33,8 @@ BUILD_DIR     := bin
 DAEMON_BIN    := $(BUILD_DIR)/membuss$(BIN_EXT)
 CLI_BIN       := $(BUILD_DIR)/membuss-cli$(BIN_EXT)
 CONFIG_FILE   ?= membuss.yaml
+FRONTEND_DIR  := explorer-web
+NPM           ?= npm
 
 # Docker knobs. Override on the command line, e.g.
 #   make docker-push IMAGE=ghcr.io/me/membuss:0.1.0
@@ -40,7 +44,7 @@ CONTAINER     ?= membuss
 REGISTRY      ?=
 COMPOSE       ?= docker compose
 
-.PHONY: build proto test lint run-daemon tidy clean \
+.PHONY: build frontend frontend-dev proto test lint run-daemon tidy clean \
         docker-build docker-run docker-stop docker-logs docker-push \
         docker-compose-up docker-compose-down docker-compose-logs
 
@@ -54,9 +58,15 @@ else
 endif
 LDFLAGS    := -ldflags "-X github.com/nnlgsakib/membuss/core/version.GitCommit=$(GIT_COMMIT) -X github.com/nnlgsakib/membuss/core/version.BuildTime=$(BUILD_TIME)"
 
-build:
+build: frontend
 	$(GO) build $(LDFLAGS) -o $(DAEMON_BIN)  ./cmd/membuss
 	$(GO) build $(LDFLAGS) -o $(CLI_BIN)     ./cmd/membuss-cli
+
+frontend:
+	cd $(FRONTEND_DIR) && $(NPM) install && $(NPM) run build
+
+frontend-dev:
+	cd $(FRONTEND_DIR) && $(NPM) run dev
 
 proto:
 ifeq ($(OS),Windows_NT)
@@ -83,6 +93,7 @@ tidy:
 
 clean:
 	rm -rf $(BUILD_DIR) proto/*.pb.go
+	rm -rf gateway/explorer/web/dist
 
 # ---------------------------------------------------------------------------
 # Docker

@@ -199,10 +199,11 @@ func (b *daemonBackend) Get(ctx context.Context, midStr string, offset, limit ui
 			cancel()
 			if perr == nil && len(provs) > 0 {
 				sess, serr := memex.NewSession(memex.SessionConfig{
-					Engine:    b.memex,
-					Root:      root,
-					Providers: provs,
-					Timeout:   30 * time.Second,
+					Engine:         b.memex,
+					Root:           root,
+					Providers:      provs,
+					Timeout:        memex.DefaultSessionTimeout,
+					ProviderFinder: b.dht.FindProviders,
 				})
 				if serr == nil {
 					if rc, ferr := sess.FetchWithBackoff(ctx, memex.DefaultRetryConfig()); ferr == nil && rc != nil {
@@ -258,11 +259,12 @@ func (b *daemonBackend) GetWithProgress(ctx context.Context, midStr string, offs
 			cancel()
 			if perr == nil && len(provs) > 0 {
 				sess, serr := memex.NewSession(memex.SessionConfig{
-					Engine:     b.memex,
-					Root:       root,
-					Providers:  provs,
-					Timeout:    30 * time.Second,
-					ProgressFn: progressFn,
+					Engine:         b.memex,
+					Root:           root,
+					Providers:      provs,
+					Timeout:        memex.DefaultSessionTimeout,
+					ProgressFn:     progressFn,
+					ProviderFinder: b.dht.FindProviders,
 				})
 				if serr == nil {
 					if rc, ferr := sess.FetchWithBackoff(ctx, memex.DefaultRetryConfig()); ferr == nil && rc != nil {

@@ -199,10 +199,11 @@ func (a *explorerAdapter) ResolveWithProgress(ctx context.Context, m mid.MID, pr
 			return nil, explorer.ContentInfo{}, explorer.ErrNotFound
 		}
 		sess, serr := memex.NewSession(memex.SessionConfig{
-			Engine:    b.memex,
-			Root:      m,
-			Providers: provs,
-			Timeout:   30 * time.Second,
+			Engine:         b.memex,
+			Root:           m,
+			Providers:      provs,
+			Timeout:        memex.DefaultSessionTimeout,
+			ProviderFinder: b.dht.FindProviders,
 			ProgressFn: func(update memex.ProgressUpdate) {
 				if progressFn != nil {
 					progressFn(update.BlocksResolved, update.BlocksTotal)

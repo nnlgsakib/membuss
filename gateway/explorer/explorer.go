@@ -28,6 +28,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gorilla/websocket"
 
+	"github.com/nnlgsakib/membuss/core/descriptor"
 	"github.com/nnlgsakib/membuss/core/mid"
 )
 
@@ -398,6 +399,91 @@ func (e *Explorer) serveIndexHTML(w http.ResponseWriter) {
 	_, _ = w.Write(data)
 }
 
+func (e *Explorer) handleDescriptorImportStream(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(64 << 20); err != nil {
+		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "no file: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	body, err := io.ReadAll(io.LimitReader(file, 64<<20))
+	if err != nil {
+		http.Error(w, "read: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	type sseEvent struct {
+		State   string `json:"state,omitempty"`
+		Blocks  uint64 `json:"blocks,omitempty"`
+		Total   uint64 `json:"total,omitempty"`
+		Done    bool   `json:"done,omitempty"`
+		MID     string `json:"mid,omitempty"`
+		Error   string `json:"error,omitempty"`
+		Missing int    `json:"missing,omitempty"`
+	}
+
+	sendEvent := func(ev sseEvent) {
+		data, _ := json.Marshal(ev)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
+
+	d, err := descriptor.Parse(body)
+	if err != nil {
+		sendEvent(sseEvent{Error: "parse: " + err.Error()})
+		return
+	}
+
+	// Check if root MID is already fully available locally
+	_, _, rootErr := e.cfg.Backend.Resolve(r.Context(), d.RootMID)
+	if rootErr == nil {
+		// Already have everything
+		sendEvent(sseEvent{State: "complete", Done: true, MID: d.RootMID.String()})
+		return
+	}
+
+	// Root not fully available — fetch from network
+	sendEvent(sseEvent{State: "fetching", Missing: int(d.BlockCount), Total: uint64(d.BlockCount)})
+
+	timeout := e.cfg.ResolveTimeout
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	fetchCtx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+
+	rc, info, err := e.cfg.Backend.ResolveWithProgress(fetchCtx, d.RootMID, func(blocksResolved, blocksTotal uint64) {
+		sendEvent(sseEvent{
+			State:  "downloading",
+			Blocks: blocksResolved,
+			Total:  blocksTotal,
+		})
+	})
+	if err != nil {
+		sendEvent(sseEvent{Error: "fetch: " + err.Error()})
+		return
+	}
+	if rc != nil {
+		_, _ = io.Copy(io.Discard, rc)
+		_ = rc.Close()
+	}
+
+	sendEvent(sseEvent{State: "complete", Done: true, MID: info.MID})
+}
+
 func (e *Explorer) buildRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -423,6 +509,7 @@ func (e *Explorer) buildRouter() http.Handler {
 	r.Get("/descriptor/{mid}", e.handleDescriptorExport)
 	r.Get("/descriptor/{mid}/meta", e.handleDescriptorMeta)
 	r.Post("/descriptor/import", e.handleDescriptorImport)
+	r.Post("/descriptor/import-stream", e.handleDescriptorImportStream)
 
 	// serveSpaOrPage runs the handler if formatting requested or User-Agent is test.
 	// Otherwise it falls back to serving Svelte SPA index.html.

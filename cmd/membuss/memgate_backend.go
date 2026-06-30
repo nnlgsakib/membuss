@@ -61,10 +61,11 @@ func (a *memgateAdapter) Resolve(ctx context.Context, m mid.MID) (io.ReadCloser,
 		}
 		if len(provs) > 0 {
 			sess, serr := memex.NewSession(memex.SessionConfig{
-				Engine:    b.memex,
-				Root:      m,
-				Providers: provs,
-				Timeout:   30 * time.Second,
+				Engine:         b.memex,
+				Root:           m,
+				Providers:      provs,
+				Timeout:        memex.DefaultSessionTimeout,
+				ProviderFinder: b.dht.FindProviders,
 			})
 			if serr == nil {
 				if rc, ferr := sess.FetchWithBackoff(ctx, memex.DefaultRetryConfig()); ferr == nil && rc != nil {
