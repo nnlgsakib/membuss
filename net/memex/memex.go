@@ -64,7 +64,43 @@ const (
 	MaxStreamsPerProvider = 8
 	// maxFrameSize caps a single MemexMessage frame.
 	maxFrameSize = 16 << 20
+
+	// defaultChunkSize is the default block/chunk size used for
+	// timeout estimation. Matches the standard 256KB chunk.
+	defaultChunkSize = 256 * 1024
+	// perBlockTimeout is the estimated time allowance per block
+	// on a slow connection, used by EstimateTimeout.
+	perBlockTimeout = 500 * time.Millisecond
+	// minSessionTimeout is the floor for EstimateTimeout.
+	minSessionTimeout = 30 * time.Second
+	// maxSessionTimeout is the ceiling for EstimateTimeout.
+	maxSessionTimeout = 5 * time.Minute
 )
+
+// EstimateTimeout returns a session timeout proportional to the
+// estimated number of blocks. contentBytes is the total size of
+// the content in bytes. The formula accounts for network round-trips
+// at per-blockTimeout per block across MaxParallelPeers parallel
+// streams, clamped to [minSessionTimeout, maxSessionTimeout].
+func EstimateTimeout(contentBytes uint64) time.Duration {
+	if contentBytes == 0 {
+		return DefaultSessionTimeout
+	}
+	blocks := (contentBytes + defaultChunkSize - 1) / uint64(defaultChunkSize)
+	parallel := uint64(MaxParallelPeers)
+	if parallel == 0 {
+		parallel = 1
+	}
+	batches := (blocks + parallel - 1) / parallel
+	d := time.Duration(batches) * perBlockTimeout
+	if d < minSessionTimeout {
+		d = minSessionTimeout
+	}
+	if d > maxSessionTimeout {
+		d = maxSessionTimeout
+	}
+	return d
+}
 
 // Blockstore is the local block storage that the engine and
 // the session both read from and write to. The

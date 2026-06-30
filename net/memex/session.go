@@ -37,12 +37,13 @@ type ProgressUpdate struct {
 
 // SessionConfig configures a MemexSession.
 type SessionConfig struct {
-	Engine        *Engine
-	Root          mid.MID
-	Providers     []peer.AddrInfo
-	ParallelPeers int
-	Timeout       time.Duration
-	ProgressFn    func(update ProgressUpdate)
+	Engine         *Engine
+	Root           mid.MID
+	Providers      []peer.AddrInfo
+	ParallelPeers  int
+	Timeout        time.Duration
+	ProgressFn     func(update ProgressUpdate)
+	ProviderFinder func(ctx context.Context, m mid.MID) ([]peer.AddrInfo, error)
 
 	// PipelineDepth controls the maximum number of in-flight
 	// want requests per provider stream. When the pipeline is
@@ -77,16 +78,39 @@ type sessionEvent struct {
 	mid      mid.MID
 }
 
+type wantState struct {
+	mid             mid.MID
+	attempts        int
+	triedProviders  map[peer.ID]struct{}
+	currentProvider peer.ID
+	lastSent        time.Time
+}
+
+type streamInfo struct {
+	peerID peer.ID
+	ch     chan sessionEvent
+	stream network.Stream
+}
+
 // Session is a single in-flight retrieval. A Session drives
 // one Fetch call; reuse by creating a new Session.
 type Session struct {
 	cfg SessionConfig
 
-	mu          sync.Mutex
-	enqueued    map[string]struct{}
-	resolved    map[string]struct{}
-	wantlist    map[string]mid.MID
-	streamChans []chan sessionEvent
+	mu              sync.Mutex
+	enqueued        map[string]struct{}
+	resolved        map[string]struct{}
+	wantlist        map[string]mid.MID
+	streams         []streamInfo
+	wantStates      map[string]*wantState
+	schedulerWakeCh chan struct{}
+
+	provMu          sync.Mutex
+	liveProviders   []peer.AddrInfo
+	activeProviders map[peer.ID]struct{}
+	failedProviders map[peer.ID]struct{}
+	managerWakeCh   chan struct{}
+	activeWG        *sync.WaitGroup
 
 	// resolvedCh is a buffered channel used to wake the closer
 	// goroutine immediately when a block is resolved, instead
@@ -113,12 +137,15 @@ func NewSession(cfg SessionConfig) (*Session, error) {
 		return nil, errors.New("memex session: no providers")
 	}
 	return &Session{
-		cfg:        cfg,
-		enqueued:   make(map[string]struct{}),
-		resolved:   make(map[string]struct{}),
-		wantlist:   make(map[string]mid.MID),
-		resolvedCh: make(chan struct{}, 1),
-		walkerDone: make(chan struct{}),
+		cfg:             cfg,
+		enqueued:        make(map[string]struct{}),
+		resolved:        make(map[string]struct{}),
+		wantlist:        make(map[string]mid.MID),
+		wantStates:      make(map[string]*wantState),
+		schedulerWakeCh: make(chan struct{}, 1),
+		managerWakeCh:   make(chan struct{}, 1),
+		resolvedCh:      make(chan struct{}, 1),
+		walkerDone:      make(chan struct{}),
 	}, nil
 }
 
@@ -169,7 +196,12 @@ func (s *Session) Fetch(ctx context.Context) (io.Reader, error) {
 	s.enqueued = make(map[string]struct{})
 	s.resolved = make(map[string]struct{})
 	s.wantlist = make(map[string]mid.MID)
-	s.streamChans = nil
+	s.wantStates = make(map[string]*wantState)
+	select {
+	case <-s.schedulerWakeCh:
+	default:
+	}
+	s.streams = nil
 	select {
 	case <-s.resolvedCh:
 	default:
@@ -180,25 +212,46 @@ func (s *Session) Fetch(ctx context.Context) (io.Reader, error) {
 	if len(filtered) == 0 {
 		return nil, errors.New("memex session: no provider after bloom filter")
 	}
-	liveProviders := filtered
-	if fanout > len(liveProviders) {
-		fanout = len(liveProviders)
+
+	s.provMu.Lock()
+	s.liveProviders = filtered
+	s.activeProviders = make(map[peer.ID]struct{})
+	s.failedProviders = make(map[peer.ID]struct{})
+	s.activeWG = &sync.WaitGroup{}
+	select {
+	case <-s.managerWakeCh:
+	default:
 	}
+	s.provMu.Unlock()
 
 	fctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	s.checkAndEnqueue(fctx, s.cfg.Root)
 
-	var pwg sync.WaitGroup
-	pwg.Add(fanout)
-	for i := 0; i < fanout; i++ {
-		provider := liveProviders[i]
-		go func() {
-			defer pwg.Done()
-			_ = s.runProvider(fctx, provider)
-		}()
-	}
+	go s.schedulerLoop(fctx)
+
+	// Start the provider manager loop
+	var managerWG sync.WaitGroup
+	managerWG.Add(1)
+	go func() {
+		defer managerWG.Done()
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-fctx.Done():
+				return
+			case <-ticker.C:
+				s.manageProviders(fctx, fanout)
+			case <-s.managerWakeCh:
+				s.manageProviders(fctx, fanout)
+			}
+		}
+	}()
+
+	// Wake up provider manager to start the initial providers
+	s.wakeProviderManager()
 
 	seenWalked := make(map[string]struct{})
 	done := make(chan struct{})
@@ -246,7 +299,13 @@ func (s *Session) Fetch(ctx context.Context) (io.Reader, error) {
 
 	<-done
 	cancel()
-	pwg.Wait()
+	managerWG.Wait()
+	s.provMu.Lock()
+	activeWG := s.activeWG
+	s.provMu.Unlock()
+	if activeWG != nil {
+		activeWG.Wait()
+	}
 
 	if !s.allResolved() {
 		return nil, errors.New("memex session: not all blocks resolved")
@@ -287,7 +346,12 @@ func (s *Session) FetchStream(ctx context.Context) (io.Reader, error) {
 	s.enqueued = make(map[string]struct{})
 	s.resolved = make(map[string]struct{})
 	s.wantlist = make(map[string]mid.MID)
-	s.streamChans = nil
+	s.wantStates = make(map[string]*wantState)
+	select {
+	case <-s.schedulerWakeCh:
+	default:
+	}
+	s.streams = nil
 	select {
 	case <-s.resolvedCh:
 	default:
@@ -302,25 +366,46 @@ func (s *Session) FetchStream(ctx context.Context) (io.Reader, error) {
 	if len(filtered) == 0 {
 		return nil, errors.New("memex session: no provider after bloom filter")
 	}
-	liveProviders := filtered
-	if fanout > len(liveProviders) {
-		fanout = len(liveProviders)
+
+	s.provMu.Lock()
+	s.liveProviders = filtered
+	s.activeProviders = make(map[peer.ID]struct{})
+	s.failedProviders = make(map[peer.ID]struct{})
+	s.activeWG = &sync.WaitGroup{}
+	select {
+	case <-s.managerWakeCh:
+	default:
 	}
+	s.provMu.Unlock()
 
 	fctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	s.checkAndEnqueue(fctx, s.cfg.Root)
 
-	var pwg sync.WaitGroup
-	pwg.Add(fanout)
-	for i := 0; i < fanout; i++ {
-		provider := liveProviders[i]
-		go func() {
-			defer pwg.Done()
-			_ = s.runProvider(fctx, provider)
-		}()
-	}
+	go s.schedulerLoop(fctx)
+
+	// Start the provider manager loop
+	var managerWG sync.WaitGroup
+	managerWG.Add(1)
+	go func() {
+		defer managerWG.Done()
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-fctx.Done():
+				return
+			case <-ticker.C:
+				s.manageProviders(fctx, fanout)
+			case <-s.managerWakeCh:
+				s.manageProviders(fctx, fanout)
+			}
+		}
+	}()
+
+	// Wake up provider manager to start the initial providers
+	s.wakeProviderManager()
 
 	seenWalked := make(map[string]struct{})
 	done := make(chan struct{})
@@ -423,7 +508,13 @@ func (s *Session) FetchStream(ctx context.Context) (io.Reader, error) {
 
 	<-s.walkerDone
 	cancel()
-	pwg.Wait()
+	managerWG.Wait()
+	s.provMu.Lock()
+	activeWG := s.activeWG
+	s.provMu.Unlock()
+	if activeWG != nil {
+		activeWG.Wait()
+	}
 
 	if s.cfg.ProgressFn != nil {
 		bytes, elapsed := cw.Progress()
@@ -473,13 +564,11 @@ func (s *Session) checkAndEnqueue(ctx context.Context, id mid.MID) {
 		}
 	} else {
 		s.wantlist[midStr] = id
-		// Notify active slots about the new want
-		for _, ch := range s.streamChans {
-			select {
-			case ch <- sessionEvent{isCancel: false, mid: id}:
-			default:
-			}
+		s.wantStates[midStr] = &wantState{
+			mid:            id,
+			triedProviders: make(map[peer.ID]struct{}),
 		}
+		s.wakeScheduler()
 	}
 }
 
@@ -490,6 +579,7 @@ func (s *Session) markResolved(id mid.MID) {
 	midStr := id.String()
 	s.resolved[midStr] = struct{}{}
 	delete(s.wantlist, midStr)
+	delete(s.wantStates, midStr)
 
 	if s.cfg.ProgressFn != nil {
 		s.cfg.ProgressFn(ProgressUpdate{
@@ -499,9 +589,9 @@ func (s *Session) markResolved(id mid.MID) {
 	}
 
 	// Notify active slots to cancel the want
-	for _, ch := range s.streamChans {
+	for _, st := range s.streams {
 		select {
-		case ch <- sessionEvent{isCancel: true, mid: id}:
+		case st.ch <- sessionEvent{isCancel: true, mid: id}:
 		default:
 		}
 	}
@@ -511,6 +601,357 @@ func (s *Session) markResolved(id mid.MID) {
 	select {
 	case s.resolvedCh <- struct{}{}:
 	default:
+	}
+}
+
+func (s *Session) markFailed(id mid.MID, peerID peer.ID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	midStr := id.String()
+	ws, ok := s.wantStates[midStr]
+	if ok && ws.currentProvider == peerID {
+		ws.triedProviders[peerID] = struct{}{}
+		ws.currentProvider = ""
+
+		// Send cancel to this provider stream's channel so writeLoop can cancel it and free capacity
+		for _, st := range s.streams {
+			if st.peerID == peerID {
+				select {
+				case st.ch <- sessionEvent{isCancel: true, mid: id}:
+				default:
+				}
+			}
+		}
+		s.wakeScheduler()
+	}
+}
+
+func (s *Session) wakeScheduler() {
+	select {
+	case s.schedulerWakeCh <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Session) handleProviderDisconnect(peerID peer.ID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, ws := range s.wantStates {
+		if ws.currentProvider == peerID {
+			ws.triedProviders[peerID] = struct{}{}
+			ws.currentProvider = ""
+		}
+	}
+	s.wakeScheduler()
+}
+
+// allActiveProvidersUseless reports true when every active stream's peer
+// has already been tried (returned DONT_HAVE or timed out) for ALL
+// pending wants. This means no active provider can make further progress.
+// Caller must hold s.mu.
+func (s *Session) allActiveProvidersUseless() bool {
+	if len(s.wantStates) == 0 {
+		return false
+	}
+	if len(s.streams) == 0 {
+		return false
+	}
+	for _, st := range s.streams {
+		useless := true
+		for _, ws := range s.wantStates {
+			if _, tried := ws.triedProviders[st.peerID]; !tried {
+				useless = false
+				break
+			}
+		}
+		if !useless {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Session) wakeProviderManager() {
+	select {
+	case s.managerWakeCh <- struct{}{}:
+	default:
+	}
+}
+
+// closeUselessProviders disconnects any active provider that has been
+// tried (returned DONT_HAVE or timed out) for ALL pending wants.
+// This frees up a slot so the provider manager can discover and start
+// a replacement provider via ProviderFinder or the live provider list.
+func (s *Session) closeUselessProviders() {
+	s.mu.Lock()
+	if len(s.wantStates) == 0 {
+		s.mu.Unlock()
+		return
+	}
+	var toReset []network.Stream
+	for _, st := range s.streams {
+		allTried := true
+		for _, ws := range s.wantStates {
+			if _, tried := ws.triedProviders[st.peerID]; !tried {
+				allTried = false
+				break
+			}
+		}
+		if allTried {
+			toReset = append(toReset, st.stream)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, stream := range toReset {
+		if stream != nil {
+			_ = stream.Reset()
+		}
+	}
+}
+
+func (s *Session) manageProviders(ctx context.Context, fanout int) {
+	// Phase 1: Check if we need discovery. This runs regardless of active
+	// provider count. If all active providers are useless (tried for all
+	// pending wants), we need new providers even if we're at fanout.
+	needDiscovery := false
+	s.mu.Lock()
+	hasPending := len(s.wantStates) > 0
+	allUseless := hasPending && s.allActiveProvidersUseless()
+	s.mu.Unlock()
+
+	if allUseless && s.cfg.ProviderFinder != nil {
+		needDiscovery = true
+	}
+
+	s.provMu.Lock()
+	activeCount := len(s.activeProviders)
+
+	// Phase 2: Close useless providers to free slots for replacements.
+	if allUseless {
+		s.provMu.Unlock()
+		s.closeUselessProviders()
+		s.provMu.Lock()
+	}
+
+	// Phase 3: Start new providers from candidates not yet active/failed.
+	needed := fanout - len(s.activeProviders)
+	if needed > 0 {
+		var toStart []peer.AddrInfo
+		for _, p := range s.liveProviders {
+			if _, active := s.activeProviders[p.ID]; active {
+				continue
+			}
+			if _, failed := s.failedProviders[p.ID]; failed {
+				continue
+			}
+			toStart = append(toStart, p)
+			if len(toStart) >= needed {
+				break
+			}
+		}
+
+		for _, p := range toStart {
+			s.activeProviders[p.ID] = struct{}{}
+			if s.activeWG != nil {
+				s.activeWG.Add(1)
+			}
+			go func(prov peer.AddrInfo) {
+				defer func() {
+					if s.activeWG != nil {
+						s.activeWG.Done()
+					}
+					s.provMu.Lock()
+					delete(s.activeProviders, prov.ID)
+					s.failedProviders[prov.ID] = struct{}{}
+					s.provMu.Unlock()
+					s.wakeProviderManager()
+				}()
+				_ = s.runProvider(ctx, prov)
+			}(p)
+		}
+	}
+
+	// Also trigger discovery when at capacity but we have pending wants
+	// and no candidates can serve them.
+	if !needDiscovery && activeCount >= fanout && hasPending && s.cfg.ProviderFinder != nil {
+		s.mu.Lock()
+		needDiscovery = s.allActiveProvidersUseless()
+		s.mu.Unlock()
+	}
+
+	// Also trigger discovery when below fanout.
+	if !needDiscovery && len(s.activeProviders) < fanout && hasPending && s.cfg.ProviderFinder != nil {
+		needDiscovery = true
+	}
+
+	s.provMu.Unlock()
+
+	// Phase 4: Trigger async DHT/peer exchange discovery.
+	if needDiscovery {
+		searchMID := s.cfg.Root
+		s.mu.Lock()
+		for _, ws := range s.wantStates {
+			searchMID = ws.mid
+			break
+		}
+		s.mu.Unlock()
+
+		go func(m mid.MID) {
+			discCtx, discCancel := context.WithTimeout(ctx, 5*time.Second)
+			defer discCancel()
+			newProvs, err := s.cfg.ProviderFinder(discCtx, m)
+			if err != nil || len(newProvs) == 0 {
+				return
+			}
+
+			s.provMu.Lock()
+			defer s.provMu.Unlock()
+
+			for _, np := range newProvs {
+				exists := false
+				for _, lp := range s.liveProviders {
+					if lp.ID == np.ID {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					s.liveProviders = append(s.liveProviders, np)
+				}
+			}
+			s.wakeProviderManager()
+		}(searchMID)
+	}
+}
+
+func (s *Session) schedulerLoop(ctx context.Context) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.scheduleWants()
+			s.closeUselessProviders()
+		case <-s.schedulerWakeCh:
+			s.scheduleWants()
+		}
+	}
+}
+
+func (s *Session) scheduleWants() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	const maxBlockAttempts = 10
+	const blockTimeout = 3 * time.Second
+
+	for midStr, ws := range s.wantStates {
+		if _, ok := s.resolved[midStr]; ok {
+			delete(s.wantStates, midStr)
+			continue
+		}
+
+		needsScheduling := false
+		if ws.currentProvider == "" {
+			needsScheduling = true
+		} else if now.Sub(ws.lastSent) > blockTimeout {
+			// Timeout: mark current provider as tried (failed)
+			ws.triedProviders[ws.currentProvider] = struct{}{}
+			ws.currentProvider = ""
+			needsScheduling = true
+		}
+
+		if !needsScheduling {
+			continue
+		}
+
+		candidates := s.selectPeersForMID(ws.mid)
+		if len(candidates) == 0 {
+			candidates = s.cfg.Providers
+		}
+
+		// Also include providers discovered via ProviderFinder (in liveProviders).
+		s.provMu.Lock()
+		seenCands := make(map[peer.ID]struct{})
+		for _, c := range candidates {
+			seenCands[c.ID] = struct{}{}
+		}
+		for _, lp := range s.liveProviders {
+			if _, already := seenCands[lp.ID]; !already {
+				candidates = append(candidates, lp)
+			}
+		}
+		s.provMu.Unlock()
+
+		type activeCandidate struct {
+			peerID peer.ID
+			ch     chan sessionEvent
+		}
+		var activeList []activeCandidate
+		for _, st := range s.streams {
+			isCand := false
+			for _, c := range candidates {
+				if c.ID == st.peerID {
+					isCand = true
+					break
+				}
+			}
+			if isCand {
+				if _, tried := ws.triedProviders[st.peerID]; !tried {
+					activeList = append(activeList, activeCandidate{peerID: st.peerID, ch: st.ch})
+				}
+			}
+		}
+
+		if len(activeList) == 0 {
+			// No untried active stream can serve this want.
+			// If we've hit the attempt limit, reset triedProviders
+			// so that when new providers arrive, they can be tried.
+			if ws.attempts >= maxBlockAttempts {
+				ws.triedProviders = make(map[peer.ID]struct{})
+				ws.attempts = 0
+			}
+			// Wake the provider manager so it can discover replacements.
+			s.mu.Unlock()
+			s.wakeProviderManager()
+			s.mu.Lock()
+			continue
+		}
+
+		if ws.attempts >= maxBlockAttempts {
+			continue
+		}
+
+		var selected activeCandidate
+		minLoad := -1
+		for _, ac := range activeList {
+			load := 0
+			for _, otherWs := range s.wantStates {
+				if otherWs.currentProvider == ac.peerID {
+					load++
+				}
+			}
+			if minLoad == -1 || load < minLoad {
+				minLoad = load
+				selected = ac
+			}
+		}
+
+		ws.currentProvider = selected.peerID
+		ws.lastSent = now
+		ws.attempts++
+
+		select {
+		case selected.ch <- sessionEvent{isCancel: false, mid: ws.mid}:
+		default:
+			ws.currentProvider = ""
+		}
 	}
 }
 
@@ -643,11 +1084,8 @@ func (s *Session) runStream(ctx context.Context, provider peer.AddrInfo, streamI
 	// Register channel for this provider stream
 	eventChan := make(chan sessionEvent, 1024)
 	s.mu.Lock()
-	s.streamChans = append(s.streamChans, eventChan)
-	// Seed the worker with all current active wants
-	for _, m := range s.wantlist {
-		eventChan <- sessionEvent{isCancel: false, mid: m}
-	}
+	s.streams = append(s.streams, streamInfo{peerID: provider.ID, ch: eventChan, stream: stream})
+	s.wakeScheduler()
 	s.mu.Unlock()
 
 	// Create pipeline state for this stream.
@@ -662,14 +1100,15 @@ func (s *Session) runStream(ctx context.Context, provider peer.AddrInfo, streamI
 
 	defer func() {
 		s.mu.Lock()
-		for i, ch := range s.streamChans {
-			if ch == eventChan {
-				s.streamChans = append(s.streamChans[:i], s.streamChans[i+1:]...)
+		for i, st := range s.streams {
+			if st.ch == eventChan {
+				s.streams = append(s.streams[:i], s.streams[i+1:]...)
 				break
 			}
 		}
 		s.mu.Unlock()
 		close(eventChan)
+		s.handleProviderDisconnect(provider.ID)
 	}()
 
 	pctx, cancel := context.WithCancel(ctx)
@@ -718,6 +1157,14 @@ func (s *Session) readLoop(ctx context.Context, stream network.Stream, ps *pipel
 				continue
 			}
 			s.markResolved(id)
+			resolvedCount++
+		}
+		for _, dontHaveMidStr := range msg.HaveMids {
+			id, err := mid.Parse(dontHaveMidStr)
+			if err != nil {
+				continue
+			}
+			s.markFailed(id, stream.Conn().RemotePeer())
 			resolvedCount++
 		}
 		// Signal writeLoop that capacity opened up.
@@ -772,6 +1219,7 @@ func (s *Session) writeLoop(ctx context.Context, stream network.Stream, eventCha
 	)
 
 	var pending []sessionEvent
+	inFlightMIDs := make(map[string]struct{})
 
 	for {
 		// Drain pending events first.
@@ -810,7 +1258,23 @@ func (s *Session) writeLoop(ctx context.Context, stream network.Stream, eventCha
 					if !ok {
 						return nil
 					}
-					pending = append(pending, ev)
+					if ev.isCancel {
+						// Process cancel immediately to free capacity and notify peer
+						msg := membusspb.MemexMessage{
+							Cancel: []string{ev.mid.String()},
+						}
+						if _, ok := inFlightMIDs[ev.mid.String()]; ok {
+							delete(inFlightMIDs, ev.mid.String())
+							select {
+							case ps.capCh <- struct{}{}:
+							default:
+							}
+						}
+						_ = stream.SetWriteDeadline(time.Now().Add(DefaultPeerTimeout))
+						_ = writeFrame(stream, &msg)
+					} else {
+						pending = append(pending, ev)
+					}
 				}
 			}
 		}
@@ -821,13 +1285,33 @@ func (s *Session) writeLoop(ctx context.Context, stream network.Stream, eventCha
 
 		addEvent := func(ev sessionEvent) {
 			if ev.isCancel {
-				msg.Cancel = append(msg.Cancel, ev.mid.String())
+				foundInBatch := false
+				for i, w := range msg.Wants {
+					if w.Mid == ev.mid.String() {
+						msg.Wants = append(msg.Wants[:i], msg.Wants[i+1:]...)
+						newWantCount--
+						delete(inFlightMIDs, ev.mid.String())
+						foundInBatch = true
+						break
+					}
+				}
+				if !foundInBatch {
+					msg.Cancel = append(msg.Cancel, ev.mid.String())
+					if _, ok := inFlightMIDs[ev.mid.String()]; ok {
+						delete(inFlightMIDs, ev.mid.String())
+						select {
+						case ps.capCh <- struct{}{}:
+						default:
+						}
+					}
+				}
 			} else {
 				msg.Wants = append(msg.Wants, &membusspb.WantEntry{
 					Mid:          ev.mid.String(),
 					SendDontHave: true,
 				})
 				newWantCount++
+				inFlightMIDs[ev.mid.String()] = struct{}{}
 			}
 		}
 

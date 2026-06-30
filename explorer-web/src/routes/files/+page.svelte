@@ -49,10 +49,14 @@
 	});
 
 	// Upload States
-	let activeUploadTab = $state<'file' | 'folder'>('file');
+	let activeUploadTab = $state<'file' | 'folder' | 'descriptor'>('file');
 	let folderName = $state('');
 	let selectedFile = $state<File | null>(null);
 	let selectedFiles = $state<FileList | null>(null);
+	let descriptorFile = $state<File | null>(null);
+	let descriptorStatus = $state<'idle' | 'importing' | 'fetching' | 'done' | 'error'>('idle');
+	let descriptorError = $state('');
+	let descriptorProgress = $state({ blocks: 0, total: 0, missing: 0 });
 	
 	// Upload Progress
 	let uploadPercent = $state(0);
@@ -342,6 +346,94 @@
 		}
 	}
 
+	function handleDescriptorChange(e: Event) {
+		const target = e.target as HTMLInputElement;
+		if (target.files && target.files.length > 0) {
+			descriptorFile = target.files[0];
+			descriptorStatus = 'idle';
+			descriptorError = '';
+		} else {
+			descriptorFile = null;
+		}
+	}
+
+	async function handleDescriptorSubmit(e: Event) {
+		e.preventDefault();
+		if (!descriptorFile) return;
+		descriptorStatus = 'importing';
+		descriptorError = '';
+		descriptorProgress = { blocks: 0, total: 0, missing: 0 };
+
+		try {
+			// First, upload the .mbuss file to the streaming endpoint
+			const formData = new FormData();
+			formData.append('file', descriptorFile);
+
+			// Use fetch to POST, then read the SSE stream from the response
+			const res = await fetch(`${base}/descriptor/import-stream`, { method: 'POST', body: formData });
+			if (!res.ok) {
+				const txt = await res.text();
+				throw new Error(txt || `HTTP ${res.status}`);
+			}
+
+			const reader = res.body?.getReader();
+			if (!reader) throw new Error('No response stream');
+
+			const decoder = new TextDecoder();
+			let buffer = '';
+
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+
+				buffer += decoder.decode(value, { stream: true });
+				const lines = buffer.split('\n');
+				buffer = lines.pop() || '';
+
+				for (const line of lines) {
+					if (!line.startsWith('data: ')) continue;
+					const jsonStr = line.slice(6).trim();
+					if (!jsonStr) continue;
+
+					try {
+						const ev = JSON.parse(jsonStr);
+						if (ev.error) {
+							descriptorStatus = 'error';
+							descriptorError = ev.error;
+							return;
+						}
+						if (ev.state === 'fetching') {
+							descriptorStatus = 'fetching';
+							descriptorProgress = { blocks: 0, total: ev.total || 0, missing: ev.missing || 0 };
+						}
+						if (ev.state === 'downloading') {
+							descriptorStatus = 'fetching';
+							descriptorProgress = { blocks: ev.blocks || 0, total: ev.total || 0, missing: descriptorProgress.missing };
+						}
+						if (ev.done && ev.mid) {
+							descriptorStatus = 'done';
+							setTimeout(() => {
+								goto(`${base}/mid/${ev.mid}`);
+							}, 500);
+							return;
+						}
+					} catch {
+						// skip malformed lines
+					}
+				}
+			}
+
+			// If we get here without a done event, something went wrong
+			if (descriptorStatus !== 'done') {
+				descriptorStatus = 'error';
+				descriptorError = 'Stream ended without completion';
+			}
+		} catch (err) {
+			descriptorStatus = 'error';
+			descriptorError = err instanceof Error ? err.message : 'Import failed';
+		}
+	}
+
 	onMount(() => {
 		loadFiles();
 	});
@@ -373,52 +465,116 @@
 				>
 					File Upload
 				</button>
-				<button 
-					onclick={() => activeUploadTab = 'folder'}
-					class={`pb-2 px-3 text-xs font-mono font-bold tracking-wider uppercase border-b-2 -mb-[2px] transition-all ${
-						activeUploadTab === 'folder' ? 'border-cyan-500 text-cyan-400' : 'border-transparent text-slate-500'
-					}`}
-				>
-					Directory Upload
-				</button>
+			<button 
+				onclick={() => activeUploadTab = 'folder'}
+				class={`pb-2 px-3 text-xs font-mono font-bold tracking-wider uppercase border-b-2 -mb-[2px] transition-all ${
+					activeUploadTab === 'folder' ? 'border-cyan-500 text-cyan-400' : 'border-transparent text-slate-500'
+				}`}
+			>
+				Directory Upload
+			</button>
+			<button 
+				onclick={() => activeUploadTab = 'descriptor'}
+				class={`pb-2 px-3 text-xs font-mono font-bold tracking-wider uppercase border-b-2 -mb-[2px] transition-all ${
+					activeUploadTab === 'descriptor' ? 'border-cyan-500 text-cyan-400' : 'border-transparent text-slate-500'
+				}`}
+			>
+				Import .mbuss
+			</button>
 			</div>
 
-			<form onsubmit={triggerUploadForm} class="flex flex-col gap-4 flex-grow justify-between">
-				{#if activeUploadTab === 'file'}
+			{#if activeUploadTab === 'descriptor'}
+				<form onsubmit={handleDescriptorSubmit} class="flex flex-col gap-4 flex-grow justify-between">
 					<div class="group relative border border-slate-700/50 hover:border-slate-700/50 rounded-lg p-5 flex flex-col items-center text-center gap-2 select-none cursor-pointer bg-slate-950/30 py-7">
-						<Icon icon="ph:upload-simple" class="text-4xl text-slate-500 group-hover:scale-110 transition-transform" />
+						<Icon icon="ph:file-arrow-down" class="text-4xl text-slate-500 group-hover:scale-110 transition-transform" />
 						<span class="text-xs font-bold text-slate-300">
-							{selectedFile ? selectedFile.name : 'Select or drop a file'}
+							{descriptorFile ? descriptorFile.name : 'Select a .mbuss descriptor'}
 						</span>
-						{#if selectedFile}
-							<span class="text-[10px] text-slate-500 font-mono">({formatBytes(selectedFile.size)})</span>
+						{#if descriptorFile}
+							<span class="text-[10px] text-slate-500 font-mono">({formatBytes(descriptorFile.size)})</span>
 						{/if}
-						<input type="file" required onchange={handleFileChange} class="absolute inset-0 opacity-0 cursor-pointer w-full h-full" />
+						<input type="file" accept=".mbuss" required disabled={descriptorStatus === 'importing'} onchange={handleDescriptorChange} class="absolute inset-0 opacity-0 cursor-pointer w-full h-full" />
 					</div>
-				{:else}
-					<div class="group relative border border-slate-700/50 hover:border-slate-700/50 rounded-lg p-5 flex flex-col items-center text-center gap-2 select-none cursor-pointer bg-slate-950/30 py-4">
-						<Icon icon="ph:folder-open" class="text-4xl text-slate-500 group-hover:scale-110 transition-transform" />
-						<span class="text-xs font-bold text-slate-300">
-							{selectedFiles && selectedFiles.length > 0 ? `${selectedFiles.length} files selected` : 'Select a directory to import'}
-						</span>
-						<input type="file" required webkitdirectory directory multiple onchange={handleFolderChange} class="absolute inset-0 opacity-0 cursor-pointer w-full h-full" />
-					</div>
-					<input 
-						type="text" 
-						bind:value={folderName} 
-						placeholder="Custom root directory name (optional)" 
-						class="w-full bg-slate-950/60 border border-slate-700/50 text-xs px-3.5 py-2.5 rounded-lg focus:outline-none focus:border-cyan-500" 
-					/>
-				{/if}
+					{#if descriptorStatus === 'error'}
+						<div class="bg-red-950/20 border border-red-800/40 text-red-400 px-4 py-3 rounded-lg text-xs font-mono">
+							{descriptorError}
+						</div>
+					{/if}
+					{#if descriptorStatus === 'done'}
+						<div class="bg-emerald-950/20 border border-emerald-800/40 text-emerald-400 px-4 py-3 rounded-lg text-xs font-mono">
+							Imported! Redirecting...
+						</div>
+					{/if}
+					{#if descriptorStatus === 'fetching'}
+						<div class="flex flex-col gap-2">
+							<div class="flex items-center justify-between text-[10px] font-mono text-slate-400">
+								<span>Fetching from network...</span>
+								<span>{descriptorProgress.blocks} / {descriptorProgress.total} blocks</span>
+							</div>
+							<div class="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+								<div 
+									class="h-full bg-cyan-500 transition-all duration-300"
+									style={`width: ${descriptorProgress.total > 0 ? (descriptorProgress.blocks / descriptorProgress.total * 100) : 0}%`}
+								></div>
+							</div>
+							<p class="text-[10px] text-slate-500">Downloading missing blocks from peers...</p>
+						</div>
+					{/if}
+					<button 
+						type="submit" 
+						disabled={!descriptorFile || descriptorStatus === 'importing' || descriptorStatus === 'fetching'}
+						class="w-full py-2.5 bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-800 text-slate-950 disabled:text-slate-500 text-xs font-bold rounded-lg transition-all duration-200 active:scale-[0.98] flex items-center justify-center gap-2"
+					>
+						{#if descriptorStatus === 'importing'}
+							<div class="w-3.5 h-3.5 border-2 border-slate-950/30 border-t-slate-950 rounded-full animate-spin"></div>
+							Verifying...
+						{:else if descriptorStatus === 'fetching'}
+							<div class="w-3.5 h-3.5 border-2 border-slate-950/30 border-t-slate-950 rounded-full animate-spin"></div>
+							Fetching...
+						{:else}
+							<Icon icon="ph:download-simple" class="text-sm" />
+							Import Descriptor
+						{/if}
+					</button>
+				</form>
+			{:else}
+				<form onsubmit={triggerUploadForm} class="flex flex-col gap-4 flex-grow justify-between">
+					{#if activeUploadTab === 'file'}
+						<div class="group relative border border-slate-700/50 hover:border-slate-700/50 rounded-lg p-5 flex flex-col items-center text-center gap-2 select-none cursor-pointer bg-slate-950/30 py-7">
+							<Icon icon="ph:upload-simple" class="text-4xl text-slate-500 group-hover:scale-110 transition-transform" />
+							<span class="text-xs font-bold text-slate-300">
+								{selectedFile ? selectedFile.name : 'Select or drop a file'}
+							</span>
+							{#if selectedFile}
+								<span class="text-[10px] text-slate-500 font-mono">({formatBytes(selectedFile.size)})</span>
+							{/if}
+							<input type="file" required onchange={handleFileChange} class="absolute inset-0 opacity-0 cursor-pointer w-full h-full" />
+						</div>
+					{:else}
+						<div class="group relative border border-slate-700/50 hover:border-slate-700/50 rounded-lg p-5 flex flex-col items-center text-center gap-2 select-none cursor-pointer bg-slate-950/30 py-4">
+							<Icon icon="ph:folder-open" class="text-4xl text-slate-500 group-hover:scale-110 transition-transform" />
+							<span class="text-xs font-bold text-slate-300">
+								{selectedFiles && selectedFiles.length > 0 ? `${selectedFiles.length} files selected` : 'Select a directory to import'}
+							</span>
+							<input type="file" required webkitdirectory directory multiple onchange={handleFolderChange} class="absolute inset-0 opacity-0 cursor-pointer w-full h-full" />
+						</div>
+						<input 
+							type="text" 
+							bind:value={folderName} 
+							placeholder="Custom root directory name (optional)" 
+							class="w-full bg-slate-950/60 border border-slate-700/50 text-xs px-3.5 py-2.5 rounded-lg focus:outline-none focus:border-cyan-500" 
+						/>
+					{/if}
 
-				<button 
-					type="submit" 
-					disabled={(activeUploadTab === 'file' ? !selectedFile : !selectedFiles) || uploadActive}
-					class="w-full py-2.5 bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-800 text-slate-950 disabled:text-slate-500 text-xs font-bold rounded-lg transition-all duration-200 active:scale-[0.98]"
-				>
-					{uploadActive ? 'Processing Ingest...' : 'Ingest to Network'}
-				</button>
-			</form>
+					<button 
+						type="submit" 
+						disabled={(activeUploadTab === 'file' ? !selectedFile : !selectedFiles) || uploadActive}
+						class="w-full py-2.5 bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-800 text-slate-950 disabled:text-slate-500 text-xs font-bold rounded-lg transition-all duration-200 active:scale-[0.98]"
+					>
+						{uploadActive ? 'Processing Ingest...' : 'Ingest to Network'}
+					</button>
+				</form>
+			{/if}
 		</div>
 
 		<!-- Action Panel 2: Fetch CID/MID from Swarm DHT -->

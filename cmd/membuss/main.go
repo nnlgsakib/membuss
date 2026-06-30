@@ -418,7 +418,7 @@ func main() {
 	// 7) Optional Anchor engine.
 	var anchorEng *anchor.AnchorEngine
 	if cfg.AnchorMode && !*noAnchor {
-		fetcher := &memexFetcher{eng: mx}
+		fetcher := &memexFetcher{eng: mx, dht: mdht}
 		anchorEng, err = anchor.New(anchor.Config{
 			Host:              h,
 			DHT:               mdht,

@@ -7,27 +7,35 @@ package main
 import (
 	"context"
 	"io"
-	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"github.com/nnlgsakib/membuss/core/mid"
+	"github.com/nnlgsakib/membuss/net/dht"
 	"github.com/nnlgsakib/membuss/net/memex"
 )
 
 type memexFetcher struct {
 	eng *memex.Engine
+	dht *dht.MemDHT
 }
 
 func (f *memexFetcher) Fetch(ctx context.Context, root mid.MID, providers []peer.AddrInfo) error {
 	if len(providers) == 0 {
 		return nil
 	}
+
+	var finder func(ctx context.Context, m mid.MID) ([]peer.AddrInfo, error)
+	if f.dht != nil {
+		finder = f.dht.FindProviders
+	}
+
 	sess, err := memex.NewSession(memex.SessionConfig{
-		Engine:    f.eng,
-		Root:      root,
-		Providers: providers,
-		Timeout:   30 * time.Second,
+		Engine:         f.eng,
+		Root:           root,
+		Providers:      providers,
+		Timeout:        memex.DefaultSessionTimeout,
+		ProviderFinder: finder,
 	})
 	if err != nil {
 		return err

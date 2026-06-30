@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/nnlgsakib/membuss/core/mid"
 	"github.com/nnlgsakib/membuss/core/store"
 	"github.com/nnlgsakib/membuss/net/memex"
@@ -48,11 +49,16 @@ func (f *fetchingBlockstore) Get(m mid.MID) ([]byte, error) {
 		return nil, store.ErrNotFound
 	}
 
+	var finder func(ctx context.Context, m mid.MID) ([]peer.AddrInfo, error)
+	if f.b != nil && f.b.dht != nil {
+		finder = f.b.dht.FindProviders
+	}
 	sess, serr := memex.NewSession(memex.SessionConfig{
-		Engine:    f.b.memex,
-		Root:      m,
-		Providers: provs,
-		Timeout:   30 * time.Second,
+		Engine:         f.b.memex,
+		Root:           m,
+		Providers:      provs,
+		Timeout:        memex.DefaultSessionTimeout,
+		ProviderFinder: finder,
 	})
 	if serr != nil {
 		return nil, store.ErrNotFound

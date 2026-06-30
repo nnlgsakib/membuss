@@ -222,7 +222,7 @@ func TestMemex_ObjectInfoTransmit(t *testing.T) {
 		Engine:    engB,
 		Root:      root,
 		Providers: []peer.AddrInfo{{ID: hA.ID(), Addrs: hA.Addrs()}},
-		Timeout:   30 * time.Second,
+		Timeout:   DefaultSessionTimeout,
 	})
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
