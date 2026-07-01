@@ -577,6 +577,11 @@ func (s *Session) markResolved(id mid.MID) {
 	defer s.mu.Unlock()
 
 	midStr := id.String()
+	ws, ok := s.wantStates[midStr]
+	if ok && ws.currentProvider != "" {
+		s.cfg.Engine.RecordPeerSuccess(ws.currentProvider, time.Since(ws.lastSent))
+	}
+
 	s.resolved[midStr] = struct{}{}
 	delete(s.wantlist, midStr)
 	delete(s.wantStates, midStr)
@@ -611,6 +616,7 @@ func (s *Session) markFailed(id mid.MID, peerID peer.ID) {
 	midStr := id.String()
 	ws, ok := s.wantStates[midStr]
 	if ok && ws.currentProvider == peerID {
+		s.cfg.Engine.RecordPeerFailure(peerID)
 		ws.triedProviders[peerID] = struct{}{}
 		ws.currentProvider = ""
 
@@ -863,6 +869,7 @@ func (s *Session) scheduleWants() {
 		} else if now.Sub(ws.lastSent) > blockTimeout {
 			// Timeout: mark current provider as tried (failed)
 			ws.triedProviders[ws.currentProvider] = struct{}{}
+			s.cfg.Engine.RecordPeerFailure(ws.currentProvider)
 			ws.currentProvider = ""
 			needsScheduling = true
 		}
@@ -929,7 +936,7 @@ func (s *Session) scheduleWants() {
 		}
 
 		var selected activeCandidate
-		minLoad := -1
+		maxEffectiveScore := -1.0
 		for _, ac := range activeList {
 			load := 0
 			for _, otherWs := range s.wantStates {
@@ -937,8 +944,10 @@ func (s *Session) scheduleWants() {
 					load++
 				}
 			}
-			if minLoad == -1 || load < minLoad {
-				minLoad = load
+			score := s.cfg.Engine.PeerScore(ac.peerID)
+			effectiveScore := score / float64(load+1)
+			if maxEffectiveScore == -1.0 || effectiveScore > maxEffectiveScore {
+				maxEffectiveScore = effectiveScore
 				selected = ac
 			}
 		}

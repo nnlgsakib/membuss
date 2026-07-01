@@ -183,6 +183,16 @@ type Engine struct {
 	// disables the Phase 13 want-list optimization. Set
 	// by New(Bloom: mgr).
 	bloom *BloomManager
+
+	metricsMu   sync.RWMutex
+	peerMetrics map[peer.ID]*peerMetrics
+}
+
+type peerMetrics struct {
+	mu         sync.RWMutex
+	successes  int
+	failures   int
+	avgLatency time.Duration
 }
 
 // Config configures an Engine.
@@ -205,10 +215,11 @@ func New(cfg Config) (*Engine, error) {
 		return nil, errors.New("memex: nil blockstore")
 	}
 	return &Engine{
-		host: cfg.Host,
-		bs:   cfg.Blockstore,
-		wm:   newWantManager(),
-	bloom: cfg.Bloom,
+		host:        cfg.Host,
+		bs:          cfg.Blockstore,
+		wm:          newWantManager(),
+		bloom:       cfg.Bloom,
+		peerMetrics: make(map[peer.ID]*peerMetrics),
 	}, nil
 }
 
@@ -577,4 +588,99 @@ func (e *Engine) openStream(ctx context.Context, pid peer.ID) (network.Stream, e
 	}
 
 	return rstream, nil
+}
+
+// RecordPeerSuccess records a successful block transfer from pid with measured latency.
+func (e *Engine) RecordPeerSuccess(pid peer.ID, latency time.Duration) {
+	if pid == "" {
+		return
+	}
+	e.metricsMu.Lock()
+	m, exists := e.peerMetrics[pid]
+	if !exists {
+		m = &peerMetrics{}
+		e.peerMetrics[pid] = m
+	}
+	e.metricsMu.Unlock()
+
+	m.mu.Lock()
+	m.successes++
+	if m.avgLatency == 0 {
+		m.avgLatency = latency
+	} else {
+		// EMA with alpha = 0.2
+		m.avgLatency = time.Duration(float64(m.avgLatency)*0.8 + float64(latency)*0.2)
+	}
+	m.mu.Unlock()
+}
+
+// RecordPeerFailure records a failed block transfer or timeout from pid.
+func (e *Engine) RecordPeerFailure(pid peer.ID) {
+	if pid == "" {
+		return
+	}
+	e.metricsMu.Lock()
+	m, exists := e.peerMetrics[pid]
+	if !exists {
+		m = &peerMetrics{}
+		e.peerMetrics[pid] = m
+	}
+	e.metricsMu.Unlock()
+
+	m.mu.Lock()
+	m.failures++
+	m.mu.Unlock()
+}
+
+// PeerScore calculates a performance score for a peer. Higher is better.
+func (e *Engine) PeerScore(pid peer.ID) float64 {
+	if pid == "" {
+		return 0
+	}
+
+	// 1. Get connection latency from the libp2p peerstore (via peerstore.Metrics interface)
+	var pstoreLatency time.Duration
+	if m, ok := e.host.Peerstore().(corepeerstore.Metrics); ok {
+		pstoreLatency = m.LatencyEWMA(pid)
+	}
+
+	// 2. Get dynamic latency & success rate from memex engine metrics
+	var dynamicLatency time.Duration
+	successRate := 1.0
+
+	e.metricsMu.RLock()
+	m, exists := e.peerMetrics[pid]
+	e.metricsMu.RUnlock()
+
+	if exists {
+		m.mu.RLock()
+		dynamicLatency = m.avgLatency
+		total := m.successes + m.failures
+		if total > 0 {
+			successRate = float64(m.successes) / float64(total)
+		}
+		m.mu.RUnlock()
+	}
+
+	// Determine representative latency
+	var latency time.Duration
+	if dynamicLatency > 0 {
+		latency = dynamicLatency
+	} else if pstoreLatency > 0 {
+		latency = pstoreLatency
+	} else {
+		latency = 200 * time.Millisecond // assume a default latency of 200ms
+	}
+
+	// Success rate multiplier: heavily penalize nodes with high failure rates.
+	effectiveLatency := float64(latency)
+	if successRate > 0 {
+		effectiveLatency = effectiveLatency / successRate
+	} else {
+		effectiveLatency = effectiveLatency * 100.0 // heavily penalize 0% success rate
+	}
+
+	// Score is inversely proportional to effective latency (in seconds)
+	// Higher score = better / faster peer
+	return 1.0 / (effectiveLatency/float64(time.Second) + 0.001)
 }

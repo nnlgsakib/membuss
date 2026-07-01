@@ -413,3 +413,68 @@ func TestMemex_CircuitRelayFallback(t *testing.T) {
 		t.Fatalf("fetched content mismatch: got %q, want %q", string(got), string(content))
 	}
 }
+
+// TestMemex_ProviderScoringAndLatencyScheduling verifies that peer latency
+// and success metrics are correctly recorded and used by the scheduler to prioritize
+// faster / higher-scoring peers over slower ones.
+func TestMemex_ProviderScoringAndLatencyScheduling(t *testing.T) {
+	hC := newTestHost(t)
+	t.Cleanup(func() { _ = hC.Close() })
+	engC, _ := newTestEngine(t, hC)
+
+	// Create two fake peer IDs
+	privA, _, _ := crypto.GenerateKeyPair(crypto.Ed25519, 256)
+	peerA, _ := peer.IDFromPrivateKey(privA)
+	privB, _, _ := crypto.GenerateKeyPair(crypto.Ed25519, 256)
+	peerB, _ := peer.IDFromPrivateKey(privB)
+
+	// Peer A: Fast node (10ms latency, high successes)
+	for i := 0; i < 5; i++ {
+		engC.RecordPeerSuccess(peerA, 10*time.Millisecond)
+	}
+
+	// Peer B: Slow/unreliable node (500ms latency, some failures)
+	for i := 0; i < 3; i++ {
+		engC.RecordPeerSuccess(peerB, 500*time.Millisecond)
+	}
+	engC.RecordPeerFailure(peerB)
+
+	scoreA := engC.PeerScore(peerA)
+	scoreB := engC.PeerScore(peerB)
+
+	if scoreA <= scoreB {
+		t.Fatalf("expected fast peer score (%f) to be higher than slow peer score (%f)", scoreA, scoreB)
+	}
+
+	// Now check scheduler preference. We'll set up a dummy Session with A and B as active streams.
+	sess, err := NewSession(SessionConfig{
+		Engine:    engC,
+		Root:      mid.FromBytes([]byte("dummy root")),
+		Providers: []peer.AddrInfo{{ID: peerA}, {ID: peerB}},
+	})
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	// Add both to active streams
+	sess.streams = []streamInfo{
+		{peerID: peerA, ch: make(chan sessionEvent, 10)},
+		{peerID: peerB, ch: make(chan sessionEvent, 10)},
+	}
+
+	// Enqueue a want
+	id1 := mid.FromBytes([]byte("test content 1"))
+	sess.wantStates[id1.String()] = &wantState{
+		mid:            id1,
+		triedProviders: make(map[peer.ID]struct{}),
+	}
+
+	// Run scheduleWants
+	sess.scheduleWants()
+
+	// Verify that the scheduler preferred the higher-scoring peerA
+	ws1 := sess.wantStates[id1.String()]
+	if ws1.currentProvider != peerA {
+		t.Fatalf("expected scheduler to select faster peer %s, but got %s", peerA, ws1.currentProvider)
+	}
+}
