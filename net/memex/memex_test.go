@@ -19,11 +19,14 @@ import (
 	libp2pquic "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	"github.com/multiformats/go-multiaddr"
+	"github.com/libp2p/go-libp2p/core/network"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/nnlgsakib/membuss/core/chunk"
 	"github.com/nnlgsakib/membuss/core/dag"
 	"github.com/nnlgsakib/membuss/core/mid"
 	"github.com/nnlgsakib/membuss/core/store"
+	membusspb "github.com/nnlgsakib/membuss/proto"
 )
 
 func newTestHost(t *testing.T) host.Host {
@@ -477,4 +480,115 @@ func TestMemex_ProviderScoringAndLatencyScheduling(t *testing.T) {
 	if ws1.currentProvider != peerA {
 		t.Fatalf("expected scheduler to select faster peer %s, but got %s", peerA, ws1.currentProvider)
 	}
+}
+
+// TestMemex_BlockIntegrityVerification verifies that a received block with
+// mismatched hash/MID is discarded and the provider peer is recorded as failed.
+func TestMemex_BlockIntegrityVerification(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	hC := newTestHost(t)
+	t.Cleanup(func() { _ = hC.Close() })
+	engC, bsC := newTestEngine(t, hC)
+
+	// Create valid MID for content A
+	contentA := []byte("correct block data")
+	idA := mid.FromBytes(contentA)
+
+	// Build a MemexMessage containing a block with idA, but corrupt data
+	corruptData := []byte("completely different corrupt data")
+	msg := membusspb.MemexMessage{
+		Blocks: []*membusspb.Block{
+			{
+				Mid:  idA.String(),
+				Data: corruptData,
+			},
+		},
+	}
+
+	buf, err := proto.Marshal(&msg)
+	if err != nil {
+		t.Fatalf("marshal message: %v", err)
+	}
+
+	// Write framed message to a buffer manually (big-endian length prefix)
+	frameBuf := new(bytes.Buffer)
+	lenBuf := make([]byte, 4)
+	l := uint32(len(buf))
+	lenBuf[0] = byte(l >> 24)
+	lenBuf[1] = byte(l >> 16)
+	lenBuf[2] = byte(l >> 8)
+	lenBuf[3] = byte(l)
+	frameBuf.Write(lenBuf)
+	frameBuf.Write(buf)
+
+	// Setup mock stream
+	mockStr := &mockReadStream{
+		r: frameBuf,
+	}
+
+	sess, err := NewSession(SessionConfig{
+		Engine:    engC,
+		Root:      idA,
+		Providers: []peer.AddrInfo{{ID: peer.ID("mock-peer")}},
+	})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	sess.wantStates[idA.String()] = &wantState{
+		mid:            idA,
+		triedProviders: make(map[peer.ID]struct{}),
+	}
+
+	ps := &pipelineState{
+		capCh: make(chan struct{}, 10),
+	}
+
+	// Run readLoop, which will process the corrupt block, record failure, and exit on EOF
+	err = sess.readLoop(ctx, mockStr, ps)
+	if err != nil && err != io.EOF {
+		t.Fatalf("readLoop failed: %v", err)
+	}
+
+	// Verify that the corrupt block was NOT saved in the blockstore
+	has, err := bsC.Has(idA)
+	if err != nil {
+		t.Fatalf("bs.Has failed: %v", err)
+	}
+	if has {
+		t.Fatalf("expected corrupt block data to be discarded and NOT saved in the blockstore")
+	}
+
+	// Verify that the peer was penalized with a failure in metrics
+	score := engC.PeerScore(peer.ID("mock-peer"))
+	if score > 1.0 {
+		t.Fatalf("expected mock-peer to have a penalized score, but got %f", score)
+	}
+}
+
+type mockReadStream struct {
+	network.Stream
+	r io.Reader
+}
+
+func (m *mockReadStream) Read(p []byte) (int, error) {
+	return m.r.Read(p)
+}
+
+func (m *mockReadStream) SetReadDeadline(t time.Time) error {
+	return nil
+}
+
+func (m *mockReadStream) Conn() network.Conn {
+	return &mockReadConn{}
+}
+
+type mockReadConn struct {
+	network.Conn
+}
+
+func (c *mockReadConn) RemotePeer() peer.ID {
+	return peer.ID("mock-peer")
 }
