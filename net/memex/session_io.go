@@ -107,7 +107,7 @@ func (s *Session) storeObjectInfos(infos map[string]*membusspb.ObjectInfo) {
 	}
 }
 
-func (s *Session) writeLoop(ctx context.Context, stream network.Stream, eventChan <-chan sessionEvent, ps *pipelineState) error {
+func (s *Session) writeLoop(ctx context.Context, stream network.Stream, queue *eventQueue, ps *pipelineState) error {
 	const (
 		maxBatchSize = 32
 		flushTimeout = 5 * time.Millisecond
@@ -128,12 +128,16 @@ func (s *Session) writeLoop(ctx context.Context, stream network.Stream, eventCha
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case ev, ok := <-eventChan:
-				if !ok {
+			case _, ok := <-queue.ch:
+				events := queue.PopAll()
+				if len(events) > 0 {
+					firstEv = events[0]
+					pending = append(pending, events[1:]...)
+					gotFirst = true
+				}
+				if !ok && len(pending) == 0 && !gotFirst {
 					return nil
 				}
-				firstEv = ev
-				gotFirst = true
 			}
 		}
 
@@ -149,26 +153,29 @@ func (s *Session) writeLoop(ctx context.Context, stream network.Stream, eventCha
 					return ctx.Err()
 				case <-ps.capCh:
 					ps.inFlight--
-				case ev, ok := <-eventChan:
+				case _, ok := <-queue.ch:
+					events := queue.PopAll()
+					for _, ev := range events {
+						if ev.isCancel {
+							// Process cancel immediately to free capacity and notify peer
+							msg := membusspb.MemexMessage{
+								Cancel: []string{ev.mid.String()},
+							}
+							if _, ok := inFlightMIDs[ev.mid.String()]; ok {
+								delete(inFlightMIDs, ev.mid.String())
+								select {
+								case ps.capCh <- struct{}{}:
+								default:
+								}
+							}
+							_ = stream.SetWriteDeadline(time.Now().Add(DefaultPeerTimeout))
+							_ = writeFrame(stream, &msg)
+						} else {
+							pending = append(pending, ev)
+						}
+					}
 					if !ok {
 						return nil
-					}
-					if ev.isCancel {
-						// Process cancel immediately to free capacity and notify peer
-						msg := membusspb.MemexMessage{
-							Cancel: []string{ev.mid.String()},
-						}
-						if _, ok := inFlightMIDs[ev.mid.String()]; ok {
-							delete(inFlightMIDs, ev.mid.String())
-							select {
-							case ps.capCh <- struct{}{}:
-							default:
-							}
-						}
-						_ = stream.SetWriteDeadline(time.Now().Add(DefaultPeerTimeout))
-						_ = writeFrame(stream, &msg)
-					} else {
-						pending = append(pending, ev)
 					}
 				}
 			}
@@ -218,34 +225,42 @@ func (s *Session) writeLoop(ctx context.Context, stream network.Stream, eventCha
 
 	batchLoop:
 		for batchCount < maxBatchSize && !closed {
+			// First, drain any pending events we already have in our slice.
+			if len(pending) > 0 {
+				nextEv := pending[0]
+				pending = pending[1:]
+				// If it's a want, check pipeline capacity.
+				if !nextEv.isCancel {
+					if ps.inFlight+newWantCount >= ps.maxDepth {
+						// Put it back
+						pending = append([]sessionEvent{nextEv}, pending...)
+						break batchLoop
+					}
+				}
+				addEvent(nextEv)
+				batchCount++
+				continue
+			}
+
+			// If no pending events, wait/poll the queue signal.
 			select {
 			case <-ctx.Done():
 				timer.Stop()
 				return ctx.Err()
 			case <-timer.C:
 				break batchLoop
-			case nextEv, nextOk := <-eventChan:
-				if !nextOk {
+			case _, ok := <-queue.ch:
+				events := queue.PopAll()
+				pending = append(pending, events...)
+				if !ok {
 					closed = true
-					break batchLoop
 				}
-
-				// If it's a want, check pipeline capacity.
-				if !nextEv.isCancel {
-					if ps.inFlight+newWantCount >= ps.maxDepth {
-						pending = append(pending, nextEv)
-						break batchLoop
-					}
-				}
-
-				addEvent(nextEv)
-				batchCount++
 			}
 		}
 		timer.Stop()
 
 		if len(msg.Wants) == 0 && len(msg.Cancel) == 0 {
-			if closed {
+			if closed && len(pending) == 0 {
 				return nil
 			}
 			continue
@@ -259,7 +274,7 @@ func (s *Session) writeLoop(ctx context.Context, stream network.Stream, eventCha
 		// Record in-flight wants.
 		ps.inFlight += newWantCount
 
-		if closed {
+		if closed && len(pending) == 0 {
 			return nil
 		}
 	}

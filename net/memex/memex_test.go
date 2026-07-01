@@ -461,8 +461,8 @@ func TestMemex_ProviderScoringAndLatencyScheduling(t *testing.T) {
 
 	// Add both to active streams
 	sess.streams = []streamInfo{
-		{peerID: peerA, ch: make(chan sessionEvent, 10)},
-		{peerID: peerB, ch: make(chan sessionEvent, 10)},
+		{peerID: peerA, queue: newEventQueue()},
+		{peerID: peerB, queue: newEventQueue()},
 	}
 
 	// Enqueue a want

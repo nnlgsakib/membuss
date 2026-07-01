@@ -84,7 +84,7 @@ type wantState struct {
 
 type streamInfo struct {
 	peerID peer.ID
-	ch     chan sessionEvent
+	queue  *eventQueue
 	stream network.Stream
 }
 
@@ -591,10 +591,7 @@ func (s *Session) markResolved(id mid.MID) {
 
 	// Notify active slots to cancel the want
 	for _, st := range s.streams {
-		select {
-		case st.ch <- sessionEvent{isCancel: true, mid: id}:
-		default:
-		}
+		st.queue.Push(sessionEvent{isCancel: true, mid: id})
 	}
 
 	// Wake the closer goroutine immediately so it can
@@ -616,13 +613,10 @@ func (s *Session) markFailed(id mid.MID, peerID peer.ID) {
 		ws.triedProviders[peerID] = struct{}{}
 		ws.currentProvider = ""
 
-		// Send cancel to this provider stream's channel so writeLoop can cancel it and free capacity
+		// Send cancel to this provider stream's queue so writeLoop can cancel it and free capacity
 		for _, st := range s.streams {
 			if st.peerID == peerID {
-				select {
-				case st.ch <- sessionEvent{isCancel: true, mid: id}:
-				default:
-				}
+				st.queue.Push(sessionEvent{isCancel: true, mid: id})
 			}
 		}
 		s.wakeScheduler()
@@ -894,7 +888,7 @@ func (s *Session) scheduleWants() {
 
 		type activeCandidate struct {
 			peerID peer.ID
-			ch     chan sessionEvent
+			queue  *eventQueue
 		}
 		var activeList []activeCandidate
 		for _, st := range s.streams {
@@ -907,7 +901,7 @@ func (s *Session) scheduleWants() {
 			}
 			if isCand {
 				if _, tried := ws.triedProviders[st.peerID]; !tried {
-					activeList = append(activeList, activeCandidate{peerID: st.peerID, ch: st.ch})
+					activeList = append(activeList, activeCandidate{peerID: st.peerID, queue: st.queue})
 				}
 			}
 		}
@@ -952,11 +946,7 @@ func (s *Session) scheduleWants() {
 		ws.lastSent = now
 		ws.attempts++
 
-		select {
-		case selected.ch <- sessionEvent{isCancel: false, mid: ws.mid}:
-		default:
-			ws.currentProvider = ""
-		}
+		selected.queue.Push(sessionEvent{isCancel: false, mid: ws.mid})
 	}
 }
 
@@ -1085,11 +1075,10 @@ func (s *Session) runStream(ctx context.Context, provider peer.AddrInfo, streamI
 		return fmt.Errorf("memex session: open %s stream %d: %w", provider.ID, streamIdx, err)
 	}
 	defer stream.Close()
-
-	// Register channel for this provider stream
-	eventChan := make(chan sessionEvent, 1024)
+	// Register queue for this provider stream
+	queue := newEventQueue()
 	s.mu.Lock()
-	s.streams = append(s.streams, streamInfo{peerID: provider.ID, ch: eventChan, stream: stream})
+	s.streams = append(s.streams, streamInfo{peerID: provider.ID, queue: queue, stream: stream})
 	s.wakeScheduler()
 	s.mu.Unlock()
 
@@ -1106,13 +1095,13 @@ func (s *Session) runStream(ctx context.Context, provider peer.AddrInfo, streamI
 	defer func() {
 		s.mu.Lock()
 		for i, st := range s.streams {
-			if st.ch == eventChan {
+			if st.queue == queue {
 				s.streams = append(s.streams[:i], s.streams[i+1:]...)
 				break
 			}
 		}
 		s.mu.Unlock()
-		close(eventChan)
+		queue.Close()
 		s.handleProviderDisconnect(provider.ID)
 	}()
 
@@ -1129,7 +1118,7 @@ func (s *Session) runStream(ctx context.Context, provider peer.AddrInfo, streamI
 	go func() {
 		defer swg.Done()
 		defer cancel()
-		_ = s.writeLoop(pctx, stream, eventChan, ps)
+		_ = s.writeLoop(pctx, stream, queue, ps)
 	}()
 	swg.Wait()
 	return nil
