@@ -1,4 +1,4 @@
-﻿package memex
+package memex
 
 import (
 	"bytes"
@@ -13,6 +13,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
+	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
 	"github.com/libp2p/go-libp2p/p2p/security/noise"
 	libp2pquic "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
@@ -327,5 +329,87 @@ func TestMemex_MultiStreamDefaults(t *testing.T) {
 	if MaxStreamsPerProvider < DefaultStreamsPerProvider {
 		t.Fatalf("MaxStreamsPerProvider (%d) < DefaultStreamsPerProvider (%d)",
 			MaxStreamsPerProvider, DefaultStreamsPerProvider)
+	}
+}
+
+// TestMemex_CircuitRelayFallback verifies that if a direct connection to a provider fails,
+// the stream falls back to dialing via an active circuit relay.
+func TestMemex_CircuitRelayFallback(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// 1. Create Host A (provider)
+	hA := newTestHost(t)
+	t.Cleanup(func() { _ = hA.Close() })
+	_, bsA := newTestEngine(t, hA)
+	content := []byte("hello through the relay fallback!")
+	rootStr := buildDAG(t, content, bsA)
+	root, err := mid.Parse(rootStr)
+	if err != nil {
+		t.Fatalf("failed to parse root MID: %v", err)
+	}
+
+	// 2. Create Host B (relay node)
+	hB, err := libp2p.New(
+		libp2p.ListenAddrs(multiaddr.StringCast("/ip4/127.0.0.1/tcp/0")),
+	)
+	if err != nil {
+		t.Fatalf("failed to create relay host: %v", err)
+	}
+	_, err = relay.New(hB,
+		relay.WithResources(relay.DefaultResources()),
+		relay.WithReservationAddressFilter(func(addr multiaddr.Multiaddr) bool {
+			return true
+		}),
+	)
+	if err != nil {
+		t.Fatalf("failed to create relay service: %v", err)
+	}
+	t.Cleanup(func() { _ = hB.Close() })
+
+	// 3. Create Host C (requester node)
+	hC := newTestHost(t)
+	t.Cleanup(func() { _ = hC.Close() })
+	engC, _ := newTestEngine(t, hC)
+
+	// Connect A to B and make a reservation
+	if err := hA.Connect(ctx, peer.AddrInfo{ID: hB.ID(), Addrs: hB.Addrs()}); err != nil {
+		t.Fatalf("hA connect to relay hB: %v", err)
+	}
+	_, err = client.Reserve(ctx, hA, peer.AddrInfo{ID: hB.ID(), Addrs: hB.Addrs()})
+	if err != nil {
+		t.Fatalf("hA reservation on relay hB: %v", err)
+	}
+
+	// Connect C to B
+	if err := hC.Connect(ctx, peer.AddrInfo{ID: hB.ID(), Addrs: hB.Addrs()}); err != nil {
+		t.Fatalf("hC connect to relay hB: %v", err)
+	}
+
+	// Clear direct addresses of A from C's peerstore to force fallback
+	hC.Peerstore().ClearAddrs(hA.ID())
+
+	// Run Fetch with session
+	sess, err := NewSession(SessionConfig{
+		Engine:    engC,
+		Root:      root,
+		Providers: []peer.AddrInfo{{ID: hA.ID()}},
+		Timeout:   15 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	rc, err := sess.Fetch(ctx)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+
+	if string(got) != string(content) {
+		t.Fatalf("fetched content mismatch: got %q, want %q", string(got), string(content))
 	}
 }
