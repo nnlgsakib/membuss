@@ -644,3 +644,11 @@ func (h *Host) IsPeerBlocked(p peer.ID) bool {
 	}
 	return !h.gater.InterceptPeerDial(p)
 }
+
+// BandwidthCounter returns the host's bandwidth counter.
+func (h *Host) BandwidthCounter() *metrics.BandwidthCounter {
+	if h == nil {
+		return nil
+	}
+	return h.bwc
+}

@@ -14,6 +14,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +24,7 @@ import (
 	"github.com/ipfs/go-cid"
 	kaddht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/metrics"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	record "github.com/libp2p/go-libp2p-record"
@@ -44,8 +47,10 @@ const DefaultBootstrapTimeout = 30 * time.Second
 // MemDHT is the Membuss DHT facade. It is safe for concurrent
 // use after construction.
 type MemDHT struct {
-	dht    *kaddht.IpfsDHT
-	dstore ds.Batching
+	dht        *kaddht.IpfsDHT
+	dstore     ds.Batching
+	bwc        *metrics.BandwidthCounter
+	freshStore *freshnessProviderStore
 }
 
 // Config configures a MemDHT.
@@ -95,6 +100,8 @@ type Config struct {
 	// ConnectionGater is used to filter out blacklisted peers from the
 	// routing table and queries.
 	ConnectionGater *conngater.BasicConnectionGater
+	// BandwidthCounter tracks data transferred by remote peers.
+	BandwidthCounter *metrics.BandwidthCounter
 }
 
 // modeOrDefault resolves cfg.Mode vs cfg.ModeName to a
@@ -155,9 +162,21 @@ func New(ctx context.Context, cfg Config) (*MemDHT, error) {
 	if cfg.ProviderCleanupInterval > 0 {
 		pmOpts = append(pmOpts, dhtrecords.CleanupInterval(cfg.ProviderCleanupInterval))
 	}
-	if len(pmOpts) > 0 {
-		opts = append(opts, kaddht.ProviderManagerOpts(pmOpts...))
+
+	dstore := cfg.Datastore
+	if dstore == nil {
+		dstore = ds.NewMapDatastore()
 	}
+	pm, err := dhtrecords.NewProviderManager(ctx, cfg.Host.ID(), cfg.Host.Peerstore(), dstore, pmOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("dht: build provider manager: %w", err)
+	}
+	freshStore := &freshnessProviderStore{
+		ProviderStore: pm,
+		fresh:         make(map[string]time.Time),
+	}
+	opts = append(opts, kaddht.ProviderStore(freshStore))
+
 	if cfg.Datastore != nil {
 		// Provider-record persistence. Without this, the
 		// DHT forgets every Provide() the moment the
@@ -193,7 +212,7 @@ func New(ctx context.Context, cfg Config) (*MemDHT, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dht: build kad-dht: %w", err)
 	}
-	return &MemDHT{dht: d, dstore: cfg.Datastore}, nil
+	return &MemDHT{dht: d, dstore: cfg.Datastore, bwc: cfg.BandwidthCounter, freshStore: freshStore}, nil
 }
 
 // Provide announces to the DHT that this node can serve the
@@ -213,7 +232,7 @@ func (m *MemDHT) Provide(ctx context.Context, id mid.MID) error {
 }
 
 // FindProviders returns the set of peers the DHT knows are
-// providers of the given MID.
+// providers of the given MID, ranked by their peer score.
 func (m *MemDHT) FindProviders(ctx context.Context, id mid.MID) ([]peer.AddrInfo, error) {
 	if m == nil || m.dht == nil {
 		return nil, errors.New("dht: nil")
@@ -225,7 +244,53 @@ func (m *MemDHT) FindProviders(ctx context.Context, id mid.MID) ([]peer.AddrInfo
 	if !c.Defined() {
 		return nil, errors.New("dht: zero MID")
 	}
-	return m.dht.FindProviders(ctx, c)
+	providers, err := m.dht.FindProviders(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+
+	// Sort providers by score descending
+	key := c.Hash()
+	sort.Slice(providers, func(i, j int) bool {
+		return m.scorePeer(key, providers[i].ID) > m.scorePeer(key, providers[j].ID)
+	})
+
+	return providers, nil
+}
+
+func (m *MemDHT) scorePeer(key []byte, p peer.ID) float64 {
+	score := 0.0
+
+	// 1. Latency-based scoring
+	latency := m.dht.Host().Peerstore().LatencyEWMA(p)
+	if latency > 0 {
+		// Lower latency -> higher score
+		score += 1000.0 / (float64(latency/time.Millisecond) + 1.0)
+	} else {
+		// Default score for unknown/not-measured latency (e.g. assume 200ms)
+		score += 1000.0 / 201.0
+	}
+
+	// 2. Bandwidth-based scoring
+	if m.bwc != nil {
+		stats := m.bwc.GetBandwidthForPeer(p)
+		// 1 point per KB/s rate
+		score += stats.RateIn / 1024.0
+		// 1 point per MB total transferred in
+		score += float64(stats.TotalIn) / (1024.0 * 1024.0)
+	}
+
+	// 3. Freshness-based scoring
+	if m.freshStore != nil {
+		lastSeen := m.freshStore.getFreshness(key, p)
+		if !lastSeen.IsZero() {
+			age := time.Since(lastSeen)
+			// Higher score for younger/fresher records (e.g. up to 500 points)
+			score += 500.0 / (age.Hours() + 1.0)
+		}
+	}
+
+	return score
 }
 
 // PutValue stores an arbitrary small value under the given
@@ -409,10 +474,16 @@ func (m *MemDHT) BootstrapWithBackoff(ctx context.Context, peers []peer.AddrInfo
 				if cfg.MaxAttempts > 0 && attempt >= cfg.MaxAttempts {
 					break
 				}
+				// Add jitter (e.g. ±20%) to the backoff delay
+				jitter := float64(delay) * 0.2
+				minDelay := float64(delay) - jitter
+				maxDelay := float64(delay) + jitter
+				actualDelay := time.Duration(minDelay + rand.Float64()*(maxDelay-minDelay))
+
 				select {
 				case <-ctx.Done():
 					return
-				case <-time.After(delay):
+				case <-time.After(actualDelay):
 				}
 				delay = time.Duration(float64(delay) * cfg.Factor)
 				if delay > cfg.Max {
@@ -466,15 +537,46 @@ func (m *MemDHT) RoutingTableSize() int {
 	return m.dht.RoutingTable().Size()
 }
 
+type cidCacheKey struct {
+	codec uint64
+	hash  string
+}
+
+var (
+	cidCache   = make(map[cidCacheKey]cid.Cid)
+	cidCacheMu sync.RWMutex
+)
+
 func midToCID(m mid.MID) cid.Cid {
 	if m.IsZero() {
 		return cid.Cid{}
 	}
-	return cid.NewCidV1(uint64(mid.CodecRaw), mhFromMID(m))
+	key := cidCacheKey{
+		codec: m.Codec(),
+		hash:  string(m.Hash),
+	}
+
+	cidCacheMu.RLock()
+	c, ok := cidCache[key]
+	cidCacheMu.RUnlock()
+	if ok {
+		return c
+	}
+
+	c = cid.NewCidV1(uint64(mid.CodecRaw), multihash.Multihash(m.Hash))
+
+	cidCacheMu.Lock()
+	if len(cidCache) > 10000 {
+		cidCache = make(map[cidCacheKey]cid.Cid)
+	}
+	cidCache[key] = c
+	cidCacheMu.Unlock()
+
+	return c
 }
 
 func mhFromMID(m mid.MID) multihash.Multihash {
-	return multihash.Multihash(append([]byte(nil), m.HashBytes()...))
+	return multihash.Multihash(m.Hash)
 }
 
 // RemoveProviderRecord deletes the local provider record for the given MID.
@@ -505,6 +607,37 @@ func (m *MemDHT) RemoveProviderRecord(id mid.MID) error {
 		return fmt.Errorf("dht: delete provider record from datastore: %w", err)
 	}
 	return nil
+}
+
+type freshnessProviderStore struct {
+	dhtrecords.ProviderStore
+	mu    sync.RWMutex
+	fresh map[string]time.Time
+}
+
+func (f *freshnessProviderStore) AddProvider(ctx context.Context, key []byte, prov peer.AddrInfo) error {
+	rawStd := base32.StdEncoding.WithPadding(base32.NoPadding)
+	kStr := rawStd.EncodeToString(key) + "/" + rawStd.EncodeToString([]byte(prov.ID))
+
+	f.mu.Lock()
+	f.fresh[kStr] = time.Now()
+	f.mu.Unlock()
+
+	return f.ProviderStore.AddProvider(ctx, key, prov)
+}
+
+func (f *freshnessProviderStore) getFreshness(key []byte, pid peer.ID) time.Time {
+	rawStd := base32.StdEncoding.WithPadding(base32.NoPadding)
+	kStr := rawStd.EncodeToString(key) + "/" + rawStd.EncodeToString([]byte(pid))
+
+	f.mu.RLock()
+	t, ok := f.fresh[kStr]
+	f.mu.RUnlock()
+
+	if ok {
+		return t
+	}
+	return time.Time{}
 }
 
 // silence unused import
