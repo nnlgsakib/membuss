@@ -45,6 +45,8 @@ import (
 	libp2pws "github.com/libp2p/go-libp2p/p2p/transport/websocket"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
 	ma "github.com/multiformats/go-multiaddr"
+	ds "github.com/ipfs/go-datastore"
+	"github.com/libp2p/go-libp2p/p2p/net/conngater"
 )
 
 // IdentityFilename is the on-disk filename for the Ed25519
@@ -158,6 +160,7 @@ type Host struct {
 
 	dialMu        sync.RWMutex
 	dialListeners []DialResultListener
+	gater         *conngater.BasicConnectionGater
 }
 
 // NewHost constructs a libp2p host according to cfg. The host
@@ -179,15 +182,22 @@ type Host struct {
 // The returned host is ready to have stream handlers attached.
 // The caller MUST call host.Close() when done.
 func NewHost(cfg Config) (*Host, error) {
+	cg, err := conngater.NewBasicConnectionGater(ds.NewMapDatastore())
+	if err != nil {
+		return nil, fmt.Errorf("host: build connection gater: %w", err)
+	}
+
 	// The in-process path skips NAT options entirely because
 	// libp2p refuses to wire AutoNAT/relay without listen
 	// addrs.
 	if cfg.InProcess {
-		h, err := newInProcessHost(cfg)
+		h, err := newInProcessHost(cfg, cg)
 		if err != nil {
 			return nil, err
 		}
-		return wrapHost(h, true), nil
+		wh := wrapHost(h, true)
+		wh.gater = cg
+		return wh, nil
 	}
 	if cfg.DataDir == "" {
 		return nil, errors.New("host: empty DataDir")
@@ -222,6 +232,7 @@ func NewHost(cfg Config) (*Host, error) {
 		libp2p.Identity(priv),
 		libp2p.ListenAddrStrings(listen...),
 		libp2p.BandwidthReporter(bwc),
+		libp2p.ConnectionGater(cg),
 		// Pass the transport CONSTRUCTORS; libp2p wires the
 		// resource manager / connection manager itself.
 		libp2p.Transport(tcp.NewTCPTransport),
@@ -255,6 +266,7 @@ func NewHost(cfg Config) (*Host, error) {
 	}
 	wh := wrapHost(h, false)
 	wh.bwc = bwc
+	wh.gater = cg
 	if cfg.MDNS {
 		if cfg.OnPeerFound != nil {
 			wh.onPeerFound = cfg.OnPeerFound
@@ -554,7 +566,7 @@ func PeerIDFromKey(priv crypto.PrivKey) (peer.ID, error) {
 // does not listen on any external address. It is intended for
 // tests that wire two hosts together with the in-process
 // transport.
-func newInProcessHost(cfg Config) (host.Host, error) {
+func newInProcessHost(cfg Config, cg *conngater.BasicConnectionGater) (host.Host, error) {
 	priv, _, err := crypto.GenerateEd25519Key(rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generate identity: %w", err)
@@ -562,6 +574,7 @@ func newInProcessHost(cfg Config) (host.Host, error) {
 	opts := []libp2p.Option{
 		libp2p.Identity(priv),
 		libp2p.NoListenAddrs,
+		libp2p.ConnectionGater(cg),
 	}
 	if cfg.UserAgent != "" {
 		opts = append(opts, libp2p.UserAgent(cfg.UserAgent))
@@ -580,4 +593,54 @@ func (h *Host) BandwidthTotals() (totalIn, totalOut int64, rateIn, rateOut float
 	}
 	stats := h.bwc.GetBandwidthTotals()
 	return stats.TotalIn, stats.TotalOut, stats.RateIn, stats.RateOut
+}
+
+// ConnectionGater returns the host's connection gater.
+func (h *Host) ConnectionGater() *conngater.BasicConnectionGater {
+	if h == nil {
+		return nil
+	}
+	return h.gater
+}
+
+// BlockPeer bans a peer by ID and terminates any existing connection to it.
+func (h *Host) BlockPeer(p peer.ID) error {
+	if h == nil {
+		return errors.New("host: nil")
+	}
+	if h.gater == nil {
+		return errors.New("host: connection gater not initialized")
+	}
+	if err := h.gater.BlockPeer(p); err != nil {
+		return err
+	}
+	_ = h.Network().ClosePeer(p)
+	return nil
+}
+
+// UnblockPeer unbans a peer by ID.
+func (h *Host) UnblockPeer(p peer.ID) error {
+	if h == nil {
+		return errors.New("host: nil")
+	}
+	if h.gater == nil {
+		return errors.New("host: connection gater not initialized")
+	}
+	return h.gater.UnblockPeer(p)
+}
+
+// ListBlockedPeers returns all banned peer IDs.
+func (h *Host) ListBlockedPeers() []peer.ID {
+	if h == nil || h.gater == nil {
+		return nil
+	}
+	return h.gater.ListBlockedPeers()
+}
+
+// IsPeerBlocked returns true if the peer is banned.
+func (h *Host) IsPeerBlocked(p peer.ID) bool {
+	if h == nil || h.gater == nil {
+		return false
+	}
+	return !h.gater.InterceptPeerDial(p)
 }

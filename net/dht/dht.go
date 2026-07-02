@@ -26,6 +26,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	record "github.com/libp2p/go-libp2p-record"
 	dhtrecords "github.com/libp2p/go-libp2p-kad-dht/records"
+	"github.com/libp2p/go-libp2p/p2p/net/conngater"
 	"github.com/multiformats/go-multihash"
 
 	"github.com/nnlgsakib/membuss/core/mid"
@@ -91,6 +92,9 @@ type Config struct {
 	// ProviderCleanupInterval is the sweep interval for pruning
 	// expired provider records from local storage.
 	ProviderCleanupInterval time.Duration
+	// ConnectionGater is used to filter out blacklisted peers from the
+	// routing table and queries.
+	ConnectionGater *conngater.BasicConnectionGater
 }
 
 // modeOrDefault resolves cfg.Mode vs cfg.ModeName to a
@@ -168,6 +172,22 @@ func New(ctx context.Context, cfg Config) (*MemDHT, error) {
 		// node can discover our content from minutes
 		// (full DHT walk) to seconds (single hop).
 		opts = append(opts, kaddht.EnableOptimisticProvide())
+	}
+	if cfg.ConnectionGater != nil {
+		var rtFilter kaddht.RouteTableFilterFunc = func(dht any, p peer.ID) bool {
+			if !cfg.ConnectionGater.InterceptPeerDial(p) {
+				return false
+			}
+			return true
+		}
+		var qFilter kaddht.QueryFilterFunc = func(dht any, ai peer.AddrInfo) bool {
+			if !cfg.ConnectionGater.InterceptPeerDial(ai.ID) {
+				return false
+			}
+			return true
+		}
+		opts = append(opts, kaddht.RoutingTableFilter(rtFilter))
+		opts = append(opts, kaddht.QueryFilter(qFilter))
 	}
 	d, err := kaddht.New(ctx, cfg.Host, opts...)
 	if err != nil {

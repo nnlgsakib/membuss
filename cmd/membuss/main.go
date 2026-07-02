@@ -278,6 +278,7 @@ func main() {
 		ProviderRecordTTL:       cfg.DHTProviderRecordTTL,
 		ProviderAddrTTL:         cfg.DHTProviderAddrTTL,
 		ProviderCleanupInterval: cfg.DHTProviderCleanupInterval,
+		ConnectionGater:         h.ConnectionGater(),
 	})
 	defer func() { _ = dhtDS.Close() }()
 	if err != nil {
