@@ -121,12 +121,12 @@ func New(ctx context.Context, cfg Config) (*MemDHT, error) {
 	opts := []kaddht.Option{
 		kaddht.ProtocolPrefix(protocol.ID(ProtocolPrefix)),
 		kaddht.Mode(cfg.modeOrDefault()),
-		// Register a permissive validator for the "membuss"
-		// namespace so that arbitrary app-level values can be
-		// stored and retrieved. The kad-dht default validator
-		// only allows "/pk/..." (public-key) records.
-		kaddht.NamespacedValidator("membuss", permissiveValidator{}),
-		kaddht.NamespacedValidator("memns", permissiveValidator{}),
+		// Register a validator for the "membuss" and "memns"
+		// namespaces so that app-level values and MemNS records can be
+		// securely stored, validated, and selected. The kad-dht default
+		// validator only allows "/pk/..." (public-key) records.
+		kaddht.NamespacedValidator("membuss", membussValidator{}),
+		kaddht.NamespacedValidator("memns", membussValidator{}),
 	}
 	if cfg.Datastore != nil {
 		// Provider-record persistence. Without this, the
@@ -393,20 +393,6 @@ func midToCID(m mid.MID) cid.Cid {
 
 func mhFromMID(m mid.MID) multihash.Multihash {
 	return multihash.Multihash(append([]byte(nil), m.HashBytes()...))
-}
-
-// permissiveValidator accepts any value stored under its
-// namespace. It is used for the "membuss" app-level key/value
-// records; the default kad-dht validator is preserved for
-// "pk" public-key records.
-type permissiveValidator struct{}
-
-func (permissiveValidator) Validate(_ string, _ []byte) error { return nil }
-func (permissiveValidator) Select(_ string, values [][]byte) (int, error) {
-	if len(values) == 0 {
-		return 0, errors.New("no values")
-	}
-	return 0, nil
 }
 
 // silence unused import
