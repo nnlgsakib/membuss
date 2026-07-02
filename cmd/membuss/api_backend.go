@@ -252,6 +252,11 @@ func (a *apiAdapter) AddFile(ctx context.Context, name string, r io.Reader, wrap
 		provideRecursive(announceCtx, a.b.dht, a.b.store, res.MID)
 		cancel()
 	}
+	// Update ObjectInfo for the root MID to set IsRoot: true.
+	if oi, err := store.GetObjectInfo(a.b.store, res.MID); err == nil {
+		oi.IsRoot = true
+		_ = store.SetObjectInfo(a.b.store, res.MID, oi)
+	}
 	return api.AddResult{
 		MID:    res.MID.String(),
 		Size:   res.Size,
@@ -307,13 +312,25 @@ func (a *apiAdapter) AddDirectory(ctx context.Context, name string, parts []api.
 		return api.AddResult{}, err
 	}
 	name = filepath.Clean(name)
-	if name != "" && name != "." && name != "/" && name != "\\" {
-		_ = store.SetObjectInfo(a.b.store, res.MID, store.ObjectInfo{
-			Name:     name,
-			MimeType: "inode/directory",
-			Size:     res.Size,
-		})
+	if name == "." || name == "/" || name == "\\" {
+		name = ""
 	}
+	dirName := name
+	if dirName == "" {
+		dirName = "upload"
+		if len(parts) > 0 && parts[0].Path != "" {
+			subparts := strings.Split(strings.ReplaceAll(parts[0].Path, "\\", "/"), "/")
+			if len(subparts) > 0 && subparts[0] != "" {
+				dirName = subparts[0]
+			}
+		}
+	}
+	_ = store.SetObjectInfo(a.b.store, res.MID, store.ObjectInfo{
+		Name:     dirName,
+		MimeType: "inode/directory",
+		Size:     res.Size,
+		IsRoot:   true,
+	})
 	_ = a.b.store.Seal(res.MID, true)
 	if a.b.dht != nil {
 		announceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)

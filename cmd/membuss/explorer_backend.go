@@ -58,10 +58,15 @@ type explorerAdapter struct {
 
 func newExplorerAdapter(b *daemonBackend, anchorMode bool, keyring *keyring.KeyRing, memnsRes *memns.Resolver) *explorerAdapter {
 	a := &explorerAdapter{b: b, started: time.Now(), anchorMode: anchorMode, keyring: keyring, memnsRes: memnsRes, allRoots: make(map[string]struct{})}
-	// Populate allRoots from sealed MIDs on startup.
+	// Populate allRoots from sealed and object MIDs on startup.
 	if b.store != nil {
 		if sealed, err := b.store.AllSealed(); err == nil {
 			for _, m := range sealed {
+				a.allRoots[m.String()] = struct{}{}
+			}
+		}
+		if objMIDs, err := b.store.AllObjectMIDs(); err == nil {
+			for _, m := range objMIDs {
 				a.allRoots[m.String()] = struct{}{}
 			}
 		}
@@ -92,6 +97,9 @@ func (a *explorerAdapter) Stat(ctx context.Context, m mid.MID) (explorer.Content
 // Seal pins m recursively. We delegate to daemonBackend.
 func (a *explorerAdapter) Seal(ctx context.Context, m mid.MID) error {
 	_, err := a.b.Seal(ctx, m.String(), true)
+	if err == nil {
+		a.allRoots[m.String()] = struct{}{}
+	}
 	return err
 }
 
@@ -244,6 +252,22 @@ func (a *explorerAdapter) ResolveWithProgress(ctx context.Context, m mid.MID, pr
 		}
 		return nil, explorer.ContentInfo{}, err
 	}
+
+	// Write ObjectInfo record so it persists across restarts.
+	if oi, oerr := store.GetObjectInfo(b.store, m); oerr == nil {
+		if oi.Name == "" {
+			oi.Name = info.Name
+		}
+		if oi.MimeType == "" {
+			oi.MimeType = info.MimeType
+		}
+		if oi.Size == 0 {
+			oi.Size = info.Size
+		}
+		oi.IsRoot = true
+		_ = store.SetObjectInfo(b.store, m, oi)
+	}
+
 	st, _ := a.b.Stat(ctx, m.String())
 	return rc, explorer.ContentInfo{
 		MID:           info.MID,
@@ -600,6 +624,7 @@ func (a *explorerAdapter) AddDirectory(ctx context.Context, name string, files [
 		Name:     dirName,
 		MimeType: "inode/directory",
 		Size:     res.Size,
+		IsRoot:   true,
 	})
 
 	a.allRoots[res.MID.String()] = struct{}{}
@@ -610,7 +635,7 @@ func (a *explorerAdapter) AddDirectory(ctx context.Context, name string, files [
 		Blocks:        res.Block,
 		Sealed:        true,
 		Present:       true,
-		Name:          name,
+		Name:          dirName,
 		MimeType:      "inode/directory",
 	}, nil
 }
@@ -626,6 +651,22 @@ func (a *explorerAdapter) Rename(ctx context.Context, m mid.MID, name string) er
 	}
 	info.Name = name
 	return store.SetObjectInfo(b.store, m, info)
+}
+
+// TrackRootWithMetadata writes root ObjectInfo metadata and registers it in allRoots.
+func (a *explorerAdapter) TrackRootWithMetadata(m mid.MID, name string, mime string, size uint64) error {
+	b := a.b
+	if b == nil || b.store == nil {
+		return errors.New("explorer: no backend")
+	}
+	_ = store.SetObjectInfo(b.store, m, store.ObjectInfo{
+		Name:     name,
+		MimeType: mime,
+		Size:     size,
+		IsRoot:   true,
+	})
+	a.allRoots[m.String()] = struct{}{}
+	return nil
 }
 
 // --- Phase 17: MemFS methods on explorerAdapter ---

@@ -45,6 +45,10 @@ type ObjectInfo struct {
 	// countDAG. Stored so the descriptor is
 	// self-describing when extracted with DB tooling.
 	Size uint64 `json:"size,omitempty"`
+	// IsRoot is true if this MID is a top-level root object
+	// (not a child of a directory). Used to populate the
+	// explorer files list.
+	IsRoot bool `json:"is_root,omitempty"`
 }
 
 // objectInfoKey returns the meta key for a MID's

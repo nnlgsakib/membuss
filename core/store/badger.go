@@ -71,6 +71,10 @@ type Store interface {
 	// engine's status reporter.
 	AllBlocks() ([]mid.MID, error)
 
+	// AllObjectMIDs returns every MID that has an ObjectInfo metadata record
+	// where IsRoot is true. Order is implementation-defined.
+	AllObjectMIDs() ([]mid.MID, error)
+
 	// PutMeta stores an arbitrary key/value pair under the /m/
 	// namespace. Meta records are independent of blocks and
 	// DAG nodes; they are not part of the content-addressed

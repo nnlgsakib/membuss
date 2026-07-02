@@ -9,7 +9,9 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -346,11 +348,40 @@ func (m *Memstore) DeleteRecursive(root mid.MID) (uint64, uint64, error) {
 			delete(m.blocks, ids)
 			blocksDeleted++
 		}
-		delete(m.meta, ids)
+		delete(m.meta, "obj/"+ids)
+		delete(m.meta, "ts/"+ids)
 	}
 	m.metaMu.Unlock()
 	m.mu.Unlock()
 
 	return blocksDeleted, bytesFreed, nil
+}
+
+// AllObjectMIDs returns every MID that has an ObjectInfo metadata record
+// where IsRoot is true.
+func (m *Memstore) AllObjectMIDs() ([]mid.MID, error) {
+	m.metaMu.RLock()
+	defer m.metaMu.RUnlock()
+
+	var out []mid.MID
+	for k, data := range m.meta {
+		if !strings.HasPrefix(k, "obj/") {
+			continue
+		}
+		var info ObjectInfo
+		if err := json.Unmarshal(data, &info); err != nil {
+			continue
+		}
+		if !info.IsRoot {
+			continue
+		}
+		midStr := k[len("obj/"):]
+		midID, err := mid.Parse(midStr)
+		if err != nil {
+			continue
+		}
+		out = append(out, midID)
+	}
+	return out, nil
 }
 

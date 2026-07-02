@@ -153,6 +153,14 @@ func (b *memBackend) SealedMIDs(ctx context.Context) ([]mid.MID, error) {
 	return out, nil
 }
 
+func (b *memBackend) TrackRootWithMetadata(m mid.MID, name string, mime string, size uint64) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.sealed[m.String()] = true
+	b.content[m.String()] = nil
+	return nil
+}
+
 func (b *memBackend) AllStoredMIDs(ctx context.Context) ([]StoredMIDView, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

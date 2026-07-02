@@ -147,6 +147,7 @@ func (b *daemonBackend) Add(ctx context.Context, path, chunker string, chunkSize
 		Name:     name,
 		MimeType: mimeType,
 		Size:     size,
+		IsRoot:   true,
 	}); err != nil {
 		return serverpkg.AddResult{}, fmt.Errorf("add: objectinfo: %w", err)
 	}

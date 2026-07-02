@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -504,8 +505,9 @@ func (s *MemStore) DeleteRecursive(root mid.MID) (uint64, uint64, error) {
 					bytesFreed += size
 				}
 
-				// 2. Also delete the ObjectInfo metadata from /m/ namespace if exists
-				_ = txn.Delete([]byte(prefixMeta + m.String()))
+				// 2. Also delete the ObjectInfo and timestamp metadata if they exist
+				_ = txn.Delete(metaKey("obj/" + m.String()))
+				_ = txn.Delete(metaKey("ts/" + m.String()))
 			}
 			return nil
 		})
@@ -527,5 +529,57 @@ func (s *MemStore) DeleteRecursive(root mid.MID) (uint64, uint64, error) {
 	}
 
 	return blocksDeleted, bytesFreed, nil
+}
+
+// AllObjectMIDs returns every MID that has an ObjectInfo metadata record
+// where IsRoot is true.
+func (s *MemStore) AllObjectMIDs() ([]mid.MID, error) {
+	if s.db == nil {
+		return nil, errors.New("store: closed")
+	}
+	var out []mid.MID
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		// The key prefix in BadgerDB is prefixMeta ("obj/")
+		prefix := metaKey("obj/")
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+			// Read the ObjectInfo from the DB
+			var data []byte
+			err := item.Value(func(v []byte) error {
+				data = append([]byte(nil), v...)
+				return nil
+			})
+			if err != nil {
+				continue
+			}
+
+			var info ObjectInfo
+			if err := json.Unmarshal(data, &info); err != nil {
+				continue
+			}
+			if !info.IsRoot {
+				continue
+			}
+
+			// The key shape is /m/obj/<MID_string>.
+			// Let's parse the MID from the key itself.
+			k := item.Key()
+			midStr := string(k[len(prefix):])
+			m, err := mid.Parse(midStr)
+			if err != nil {
+				continue
+			}
+			out = append(out, m)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: all object mids: %w", err)
+	}
+	return out, nil
 }
 

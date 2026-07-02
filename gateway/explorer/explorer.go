@@ -180,6 +180,8 @@ type Backend interface {
 	AddDirectory(ctx context.Context, name string, files []DirectoryFile) (ContentInfo, error)
 	// Rename updates the name metadata of a MID.
 	Rename(ctx context.Context, m mid.MID, name string) error
+	// TrackRootWithMetadata writes root ObjectInfo metadata and registers it.
+	TrackRootWithMetadata(m mid.MID, name string, mime string, size uint64) error
 	// Peers returns the local PEX peer table.
 	Peers(ctx context.Context, limit int) ([]PeerInfo, error)
 	// SealedMIDs lists all sealed MIDs in the local store.
@@ -451,6 +453,7 @@ func (e *Explorer) handleDescriptorImportStream(w http.ResponseWriter, r *http.R
 	_, _, rootErr := e.cfg.Backend.Resolve(r.Context(), d.RootMID)
 	if rootErr == nil {
 		// Already have everything
+		_ = e.cfg.Backend.TrackRootWithMetadata(d.RootMID, d.Name, d.MimeType, d.TotalSize)
 		sendEvent(sseEvent{State: "complete", Done: true, MID: d.RootMID.String()})
 		return
 	}
@@ -481,6 +484,7 @@ func (e *Explorer) handleDescriptorImportStream(w http.ResponseWriter, r *http.R
 		_ = rc.Close()
 	}
 
+	_ = e.cfg.Backend.TrackRootWithMetadata(d.RootMID, d.Name, d.MimeType, d.TotalSize)
 	sendEvent(sseEvent{State: "complete", Done: true, MID: info.MID})
 }
 
