@@ -543,6 +543,9 @@ func (b *daemonBackend) Delete(ctx context.Context, midStr string) (serverpkg.De
 		if err != nil {
 			return serverpkg.DeleteResult{}, err
 		}
+		if b.dht != nil {
+			_ = b.dht.RemoveProviderRecord(m)
+		}
 		return serverpkg.DeleteResult{
 			BlocksDeleted: deleted,
 			BytesFreed:    freed,

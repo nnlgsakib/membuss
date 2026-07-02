@@ -10,6 +10,7 @@ package dht
 
 import (
 	"context"
+	"encoding/base32"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -24,6 +25,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	record "github.com/libp2p/go-libp2p-record"
+	dhtrecords "github.com/libp2p/go-libp2p-kad-dht/records"
 	"github.com/multiformats/go-multihash"
 
 	"github.com/nnlgsakib/membuss/core/mid"
@@ -41,7 +43,8 @@ const DefaultBootstrapTimeout = 30 * time.Second
 // MemDHT is the Membuss DHT facade. It is safe for concurrent
 // use after construction.
 type MemDHT struct {
-	dht *kaddht.IpfsDHT
+	dht    *kaddht.IpfsDHT
+	dstore ds.Batching
 }
 
 // Config configures a MemDHT.
@@ -79,6 +82,15 @@ type Config struct {
 	// dramatically faster and is what IPFS ships with
 	// by default. Default true.
 	OptimisticProvide bool
+
+	// ProviderRecordTTL is the duration provider records remain
+	// valid in the DHT.
+	ProviderRecordTTL time.Duration
+	// ProviderAddrTTL is the TTL for provider address records.
+	ProviderAddrTTL time.Duration
+	// ProviderCleanupInterval is the sweep interval for pruning
+	// expired provider records from local storage.
+	ProviderCleanupInterval time.Duration
 }
 
 // modeOrDefault resolves cfg.Mode vs cfg.ModeName to a
@@ -128,6 +140,20 @@ func New(ctx context.Context, cfg Config) (*MemDHT, error) {
 		kaddht.NamespacedValidator("membuss", membussValidator{}),
 		kaddht.NamespacedValidator("memns", membussValidator{}),
 	}
+
+	var pmOpts []dhtrecords.Option
+	if cfg.ProviderRecordTTL > 0 {
+		pmOpts = append(pmOpts, dhtrecords.ProvideValidity(cfg.ProviderRecordTTL))
+	}
+	if cfg.ProviderAddrTTL > 0 {
+		pmOpts = append(pmOpts, dhtrecords.ProviderAddrTTL(cfg.ProviderAddrTTL))
+	}
+	if cfg.ProviderCleanupInterval > 0 {
+		pmOpts = append(pmOpts, dhtrecords.CleanupInterval(cfg.ProviderCleanupInterval))
+	}
+	if len(pmOpts) > 0 {
+		opts = append(opts, kaddht.ProviderManagerOpts(pmOpts...))
+	}
 	if cfg.Datastore != nil {
 		// Provider-record persistence. Without this, the
 		// DHT forgets every Provide() the moment the
@@ -147,7 +173,7 @@ func New(ctx context.Context, cfg Config) (*MemDHT, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dht: build kad-dht: %w", err)
 	}
-	return &MemDHT{dht: d}, nil
+	return &MemDHT{dht: d, dstore: cfg.Datastore}, nil
 }
 
 // Provide announces to the DHT that this node can serve the
@@ -221,7 +247,7 @@ func (m *MemDHT) SearchValue(ctx context.Context, key string) (<-chan []byte, er
 	return m.dht.SearchValue(ctx, key)
 }
 
-// Bootstrap connects to the configured bootstrap peers and
+// Bootstrap connects to the configured bootstrap peers in parallel and
 // refreshes the routing table.
 func (m *MemDHT) Bootstrap(ctx context.Context, peers []peer.AddrInfo) error {
 	if m == nil || m.dht == nil {
@@ -230,9 +256,45 @@ func (m *MemDHT) Bootstrap(ctx context.Context, peers []peer.AddrInfo) error {
 	if err := m.dht.Bootstrap(ctx); err != nil {
 		return fmt.Errorf("dht: bootstrap: %w", err)
 	}
-	for _, p := range peers {
-		_ = m.dht.Host().Connect(ctx, p)
+
+	if len(peers) == 0 {
+		return nil
 	}
+
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		lastErr error
+		success int
+	)
+
+	for _, p := range peers {
+		wg.Add(1)
+		go func(p peer.AddrInfo) {
+			defer wg.Done()
+			dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			if err := m.dht.Host().Connect(dialCtx, p); err != nil {
+				mu.Lock()
+				lastErr = err
+				mu.Unlock()
+			} else {
+				mu.Lock()
+				success++
+				mu.Unlock()
+			}
+		}(p)
+	}
+
+	wg.Wait()
+
+	if success == 0 {
+		if lastErr != nil {
+			return fmt.Errorf("dht: all bootstrap peers unreachable: %w", lastErr)
+		}
+		return errors.New("dht: all bootstrap peers unreachable")
+	}
+
 	return nil
 }
 
@@ -393,6 +455,36 @@ func midToCID(m mid.MID) cid.Cid {
 
 func mhFromMID(m mid.MID) multihash.Multihash {
 	return multihash.Multihash(append([]byte(nil), m.HashBytes()...))
+}
+
+// RemoveProviderRecord deletes the local provider record for the given MID.
+func (m *MemDHT) RemoveProviderRecord(id mid.MID) error {
+	if m == nil || m.dht == nil {
+		return errors.New("dht: nil")
+	}
+	if m.dstore == nil {
+		return nil
+	}
+	if id.IsZero() {
+		return errors.New("dht: zero MID")
+	}
+	c := midToCID(id)
+	if !c.Defined() {
+		return errors.New("dht: zero MID")
+	}
+
+	rawStd := base32.StdEncoding.WithPadding(base32.NoPadding)
+	cidB32 := rawStd.EncodeToString(c.Hash())
+	pidB32 := rawStd.EncodeToString([]byte(m.dht.PeerID()))
+
+	key := ds.NewKey("/providers/" + cidB32 + "/" + pidB32)
+	if err := m.dstore.Delete(context.Background(), key); err != nil {
+		if errors.Is(err, ds.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("dht: delete provider record from datastore: %w", err)
+	}
+	return nil
 }
 
 // silence unused import

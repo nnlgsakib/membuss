@@ -139,6 +139,15 @@ type Config struct {
 	// returns. Matches the IPFS default. Default
 	// true.
 	DHTOptimisticProvide bool `yaml:"dht_optimistic_provide"`
+	// DHTProviderRecordTTL is the duration provider records remain
+	// valid in the DHT. Default 24h.
+	DHTProviderRecordTTL time.Duration `yaml:"dht_provider_record_ttl"`
+	// DHTProviderAddrTTL is the TTL for provider address records.
+	// Default 24h.
+	DHTProviderAddrTTL time.Duration `yaml:"dht_provider_addr_ttl"`
+	// DHTProviderCleanupInterval is the sweep interval for pruning
+	// expired provider records from local storage. Default 1h.
+	DHTProviderCleanupInterval time.Duration `yaml:"dht_provider_cleanup_interval"`
 
 	// MIDVersion selects which MID string format the
 	// daemon uses. v1 is the canonical CIDv1 +
@@ -235,6 +244,9 @@ func Default() *Config {
 		MIDVersion:                    "v1",
 		DHTMode:                       "server",
 		DHTOptimisticProvide:          true,
+		DHTProviderRecordTTL:          24 * time.Hour,
+		DHTProviderAddrTTL:            24 * time.Hour,
+		DHTProviderCleanupInterval:    1 * time.Hour,
 		EnableGeolocation:             true,
 		EnableMDNS:                    true,
 	}

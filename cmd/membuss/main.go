@@ -271,10 +271,13 @@ func main() {
 		os.Exit(1)
 	}
 	mdht, err := dht.New(ctx, dht.Config{
-		Host:               h,
-		ModeName:           cfg.DHTMode,
-		OptimisticProvide:  cfg.DHTOptimisticProvide,
-		Datastore:          dhtDS,
+		Host:                    h,
+		ModeName:                cfg.DHTMode,
+		OptimisticProvide:       cfg.DHTOptimisticProvide,
+		Datastore:               dhtDS,
+		ProviderRecordTTL:       cfg.DHTProviderRecordTTL,
+		ProviderAddrTTL:         cfg.DHTProviderAddrTTL,
+		ProviderCleanupInterval: cfg.DHTProviderCleanupInterval,
 	})
 	defer func() { _ = dhtDS.Close() }()
 	if err != nil {
